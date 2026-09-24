@@ -14,10 +14,13 @@
 export const PERMISSION_CATALOG = [
   { key: "home.view", name: "Home and navigation access", group: "Navigation" },
   { key: "dashboard.view", name: "Dashboard access", group: "Dashboard" },
-  { key: "items.view", name: "View items", group: "Master data" },
-  { key: "items.manage", name: "Manage items", group: "Master data" },
-  { key: "activity.view", name: "View activity log", group: "Operations" },
-  { key: "activity.record", name: "Record activity", group: "Operations" },
+  { key: "clients.view", name: "View clients", group: "Clients" },
+  { key: "clients.manage", name: "Manage clients", group: "Clients" },
+  {
+    key: "master_data.manage",
+    name: "Manage master data",
+    group: "Master data",
+  },
   // MENGAJUKAN reset password dan MENGAKTIFKAN 2FA untuk akun sendiri tidak
   // butuh izin apa pun: yang pertama memang terbuka tanpa sesi, yang kedua hak
   // setiap operator atas akunnya. Yang di-RBAC adalah membaca/menghapus jejak
@@ -113,8 +116,9 @@ export const SENSITIVE_MUTATION_PERMISSIONS = new Set<PermissionKey>([
   // Menyetujui pemulihan berarti menyerahkan kendali sebuah akun kepada orang
   // yang sedang berdiri di depan layar. Peninjaunya WAJIB sadar memikul itu.
   "password_reset.approve",
-  "items.manage",
   "settings.manage",
+  // Izin domain yang bisa MENGHAPUS data bisnis (mis. `clients.delete` saat
+  // ditambahkan) wajib didaftarkan di sini, bukan ikut paket Admin diam-diam.
 ]);
 
 export const SYSTEM_ROLE_KEYS = ["superadmin", "admin", "operator"] as const;
@@ -134,12 +138,13 @@ export const DEFAULT_ROLE_PERMISSIONS: Record<
       key !== "diagnostics.view" &&
       !SENSITIVE_MUTATION_PERMISSIONS.has(key),
   ).map(({ key }) => key),
+  // Operator bawaan bekerja sebagai CS sampai role divisi dibuat (PRD F-02).
+  // WAJIB sama dengan seed role 3 di `db-schema.ts` dan `turso.rs`.
   operator: [
     "home.view",
     "dashboard.view",
-    "items.view",
-    "activity.view",
-    "activity.record",
+    "clients.view",
+    "clients.manage",
     "sync.view",
   ],
 };

@@ -14,7 +14,7 @@ import { runDatabaseMigrations } from "./db-migrations";
  * Rust DAN migrasi `ALTER TABLE` di `db-migrations.ts`, supaya klien mana pun
  * bisa menyembuhkan database buatan klien lain.
  */
-export const CURRENT_SCHEMA_VERSION = 2;
+export const CURRENT_SCHEMA_VERSION = 3;
 
 /** Tabel yang wajib ada sebelum database dianggap siap dipakai. */
 export const REQUIRED_TABLES = [
@@ -42,9 +42,12 @@ export const REQUIRED_TABLES = [
   // contoh: hampir setiap aplikasi bisnis membutuhkannya untuk kop dokumen,
   // cetakan, dan ekspor.
   "company_profile",
-  // Domain contoh — ganti dengan tabel aplikasi Anda
-  "master_item",
-  "log_aktivitas",
+  // Domain MaklonOS: klien, lead, dan daftar pilihan Master Data (ikut
+  // sinkronisasi), serta registri tag perangkat untuk kode klien (cloud-only).
+  "clients",
+  "leads",
+  "master_option",
+  "device_tag_registry",
 ] as const;
 
 export const REQUIRED_TABLE_COUNT = REQUIRED_TABLES.length;
@@ -282,39 +285,71 @@ export async function initDatabaseSchema(client: Client) {
       updated_at TEXT NOT NULL
       );`,
 
-    // ============ DOMAIN CONTOH — GANTI DENGAN MILIK ANDA ============
-    // DDL ini disalin dari `turso.rs` agar kedua jalur provisioning —
-    // bootstrap dari perangkat dan inisialisasi dari Web — menghasilkan
-    // tabel yang persis sama. `CREATE TABLE IF NOT EXISTS` tidak pernah
-    // memperbaiki tabel yang sudah ada, jadi satu perbedaan akan merusak
-    // jalur yang tidak membuat tabel itu, secara permanen.
-    `CREATE TABLE IF NOT EXISTS master_item (
-      id_item INTEGER PRIMARY KEY AUTOINCREMENT,
-      kode_item TEXT NOT NULL UNIQUE,
-      nama TEXT NOT NULL,
-      kategori TEXT,
-      harga INTEGER NOT NULL DEFAULT 0 CHECK (harga >= 0),
-      satuan TEXT,
-      catatan TEXT,
-      status_aktif TEXT NOT NULL DEFAULT 'Active'
-      CHECK (status_aktif IN ('Active', 'Inactive')),
-      update_terakhir TEXT NOT NULL
+    // ============ DOMAIN MAKLONOS ============
+    // DDL ini WAJIB identik dengan `turso.rs` (cloud) dan, untuk tabel yang ikut
+    // sinkronisasi, dengan `storage.rs` (lokal). `CREATE TABLE IF NOT EXISTS`
+    // tidak pernah memperbaiki tabel yang sudah ada, jadi satu perbedaan
+    // merusak jalur yang tidak membuat tabel itu, secara permanen.
+    //
+    // Tanpa CHECK dan tanpa FOREIGN KEY, sengaja: nilai divalidasi aplikasi
+    // (`src/lib/validations/client.ts` dan `clients.rs`). CHECK di tabel yang
+    // ikut sinkron membuat perangkat versi lama menolak nilai baru dari cloud,
+    // dan FK bisa menolak snapshot yang tiba dengan urutan tabel berbeda.
+    // Keunikan nomor WhatsApp dan kode klien juga dijaga aplikasi, bukan
+    // UNIQUE: dua perangkat offline yang bertabrakan akan membuat push macet.
+    `CREATE TABLE IF NOT EXISTS clients (
+      id TEXT PRIMARY KEY,
+      client_code TEXT NOT NULL,
+      name TEXT NOT NULL,
+      phone_normalized TEXT NOT NULL,
+      address TEXT NOT NULL DEFAULT '',
+      city TEXT NOT NULL DEFAULT '',
+      province TEXT NOT NULL DEFAULT '',
+      lifecycle_status TEXT NOT NULL DEFAULT 'LEAD',
+      free_revision_limit INTEGER NOT NULL DEFAULT 1,
+      is_white_label INTEGER NOT NULL DEFAULT 0,
+      assigned_crm_id INTEGER,
+      created_by INTEGER,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
       );`,
-    `CREATE TABLE IF NOT EXISTS log_aktivitas (
-      id_log INTEGER PRIMARY KEY AUTOINCREMENT,
-      event_key TEXT NOT NULL UNIQUE,
-      kode_item TEXT NOT NULL,
-      jenis TEXT NOT NULL,
-      jumlah INTEGER NOT NULL DEFAULT 0,
-      keterangan TEXT,
-      kode_operator TEXT,
-      waktu TEXT NOT NULL
+    `CREATE TABLE IF NOT EXISTS leads (
+      id TEXT PRIMARY KEY,
+      client_id TEXT NOT NULL,
+      pic_cs_id INTEGER,
+      channel_option_id TEXT NOT NULL,
+      product_category_option_id TEXT NOT NULL,
+      needs_notes TEXT NOT NULL DEFAULT '',
+      last_followup_at TEXT NOT NULL DEFAULT '',
+      last_client_response_at TEXT NOT NULL DEFAULT '',
+      total_followups INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
       );`,
-    // =================================================================
+    `CREATE TABLE IF NOT EXISTS master_option (
+      id TEXT PRIMARY KEY,
+      kind TEXT NOT NULL,
+      code TEXT NOT NULL,
+      label TEXT NOT NULL,
+      is_active INTEGER NOT NULL DEFAULT 1,
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      updated_at TEXT NOT NULL
+      );`,
+    // Cloud-only: tag dua karakter yang diterbitkan untuk setiap perangkat,
+    // bagian `<KP>` dari kode klien. Tidak ikut sinkronisasi, jadi UNIQUE
+    // di sini aman.
+    `CREATE TABLE IF NOT EXISTS device_tag_registry (
+      tag TEXT PRIMARY KEY,
+      client_id TEXT NOT NULL UNIQUE,
+      registered_at TEXT NOT NULL
+      );`,
+    // =========================================
 
     `CREATE INDEX IF NOT EXISTS idx_operator_username ON master_operator(username);`,
-    `CREATE INDEX IF NOT EXISTS idx_item_status ON master_item(status_aktif);`,
-    `CREATE INDEX IF NOT EXISTS idx_aktivitas_item_waktu ON log_aktivitas(kode_item, waktu);`,
+    `CREATE INDEX IF NOT EXISTS idx_clients_phone ON clients(phone_normalized);`,
+    `CREATE INDEX IF NOT EXISTS idx_clients_code ON clients(client_code);`,
+    `CREATE INDEX IF NOT EXISTS idx_leads_client ON leads(client_id);`,
+    `CREATE INDEX IF NOT EXISTS idx_master_option_kind ON master_option(kind, sort_order);`,
 
     // Seed role bawaan. TIDAK ADA akun bawaan: operator pertama hanya lahir
     // lewat provisioning sekali-pakai, sehingga tidak ada kredensial default
@@ -329,10 +364,9 @@ export async function initDatabaseSchema(client: Client) {
     `INSERT OR IGNORE INTO app_permission (permission_key, nama, grup, deskripsi, is_active, sort_order) VALUES
       ('home.view', 'Home and navigation access', 'Navigation', 'View home and the app menu.', 1, 10),
       ('dashboard.view', 'Dashboard access', 'Dashboard', 'View summaries and statistics.', 1, 20),
-      ('items.view', 'View items', 'Master data', 'View the item list.', 1, 30),
-      ('items.manage', 'Manage items', 'Master data', 'Add, edit, and deactivate items.', 1, 40),
-      ('activity.view', 'View activity log', 'Operations', 'View activity history.', 1, 50),
-      ('activity.record', 'Record activity', 'Operations', 'Record new activity.', 1, 60),
+      ('clients.view', 'View clients', 'Clients', 'View clients and their leads.', 1, 30),
+      ('clients.manage', 'Manage clients', 'Clients', 'Register new leads and edit client details.', 1, 40),
+      ('master_data.manage', 'Manage master data', 'Master data', 'Maintain lead channels and product categories.', 1, 50),
       ('password_reset.view', 'View password reset history', 'Operators', 'Review who requested a password recovery, with their verification photo.', 1, 62),
       ('password_reset.delete', 'Delete password reset history', 'Operators', 'Delete password recovery records and their photos.', 1, 64),
       ('two_factor.reset', 'Reset another operator''s 2FA', 'Operators', 'Turn off two-step verification for another operator who lost their phone.', 1, 66),
@@ -355,7 +389,15 @@ export async function initDatabaseSchema(client: Client) {
       WHERE permission_key NOT IN (
         'roles.manage', 'operators.manage', 'operators.view', 'diagnostics.view',
         'password_reset.delete', 'two_factor.reset', 'password_reset.approve',
-        'database_backup.restore', 'items.manage', 'settings.manage'
+        'database_backup.restore', 'settings.manage'
+      );`,
+    // Operator bawaan bekerja sebagai CS sampai role divisi dibuat (PRD F-02).
+    // WAJIB sama dengan `DEFAULT_ROLE_PERMISSIONS.operator` di `catalog.ts` dan
+    // seed yang sama di `turso.rs`.
+    `INSERT OR IGNORE INTO role_permission (role_id, permission_key, is_allowed, updated_at, updated_by)
+      SELECT 3, permission_key, 1, datetime('now'), 'system' FROM app_permission
+      WHERE permission_key IN (
+        'home.view', 'dashboard.view', 'clients.view', 'clients.manage', 'sync.view'
       );`,
 
     // `rbac_revision` WAJIB ada: nilainya yang dipakai Web dan perangkat untuk
