@@ -11,8 +11,7 @@ import type { PermissionKey } from "@/lib/rbac/catalog";
 export type AppArea =
   | "home"
   | "dashboard"
-  | "items"
-  | "activity"
+  | "clients"
   | "operators"
   | "password_reset"
   | "settings"
@@ -26,8 +25,7 @@ export interface AccessSubject {
 const AREA_PERMISSION: Record<AppArea, PermissionKey> = {
   home: "home.view",
   dashboard: "dashboard.view",
-  items: "items.view",
-  activity: "activity.view",
+  clients: "clients.view",
   operators: "operators.view",
   password_reset: "password_reset.view",
   settings: "settings.view",

@@ -61,7 +61,6 @@ pub fn get_or_create_device_id(path: &Path) -> Result<String, CommandError> {
     Ok(generated)
 }
 
-#[allow(dead_code)]
 fn ensure_column(
     connection: &Connection,
     table: &str,
@@ -91,11 +90,10 @@ fn ensure_column(
 ///    vault kredensial, audit, dan rate limit login. JANGAN dihapus; seluruh
 ///    aplikasi bergantung padanya, dan nama kolomnya dipakai langsung oleh
 ///    fungsi-fungsi di berkas ini.
-/// 2. **Domain contoh** (`master_item`, `log_aktivitas`) — dua tabel peraga yang
-///    menunjukkan pola lengkap: satu master data dan satu log transaksional.
-///    Ganti keduanya dengan tabel aplikasi Anda, lalu sesuaikan `SNAPSHOT_TABLES`
-///    di `sync.rs`, `SNAPSHOT_SOURCES` di `turso.rs`, dan `db-schema.ts`.
-///    Keempat lapisan itu WAJIB memakai nama tabel dan kolom yang identik.
+/// 2. **Domain MaklonOS** (`clients`, `leads`, `master_option`) — cache lokal
+///    tabel cloud yang ikut sinkronisasi. Keempat lapisan (`storage.rs`,
+///    `turso.rs`, `SNAPSHOT_TABLES` di `sync.rs`, `db-schema.ts`) WAJIB memakai
+///    nama tabel dan kolom yang identik.
 pub fn initialize(path: &Path) -> Result<(), String> {
     let connection = database(path).map_err(|error| error.message)?;
     connection
@@ -166,10 +164,14 @@ pub fn initialize(path: &Path) -> Result<(), String> {
         timezone TEXT DEFAULT 'Asia/Jakarta',
         updated_at TEXT NOT NULL
       );
+      -- `device_tag`: bagian `<KP>` kode klien, diterbitkan database yang
+      -- ditunjuk `server_origin`. Disimpan di sini (bukan setting device-local)
+      -- supaya perangkat yang pindah database otomatis tidak membawa tag lama.
       CREATE TABLE IF NOT EXISTS desktop_client_identity (
         server_origin TEXT PRIMARY KEY,
         client_id TEXT UNIQUE NOT NULL,
-        created_at INTEGER NOT NULL
+        created_at INTEGER NOT NULL,
+        device_tag TEXT
       );
       CREATE TABLE IF NOT EXISTS desktop_sync_outbox (
         event_id TEXT PRIMARY KEY,
@@ -218,43 +220,62 @@ pub fn initialize(path: &Path) -> Result<(), String> {
         PRIMARY KEY (domain, entity_key)
       );
 
-      -- ================= DOMAIN CONTOH — GANTI DENGAN MILIK ANDA =================
-      -- Master data. Kunci sinkronisasinya `kode_item` (stabil lintas perangkat),
-      -- bukan rowid lokal yang bisa berbeda di tiap instalasi.
-      CREATE TABLE IF NOT EXISTS master_item (
-        id_item INTEGER PRIMARY KEY AUTOINCREMENT,
-        kode_item TEXT NOT NULL UNIQUE,
-        nama TEXT NOT NULL,
-        kategori TEXT,
-        harga INTEGER NOT NULL DEFAULT 0 CHECK (harga >= 0),
-        satuan TEXT,
-        catatan TEXT,
-        status_aktif TEXT NOT NULL DEFAULT 'Active'
-          CHECK (status_aktif IN ('Active', 'Inactive')),
-        update_terakhir TEXT NOT NULL
+      -- ================= DOMAIN MAKLONOS =================
+      -- Cache lokal tabel cloud yang ikut sinkronisasi. Kolom WAJIB identik
+      -- dengan `turso.rs` dan `db-schema.ts`. Tanpa CHECK/FK/UNIQUE (keputusan
+      -- G): perangkat versi lama tidak boleh menolak nilai baru dari cloud.
+      CREATE TABLE IF NOT EXISTS clients (
+        id TEXT PRIMARY KEY,
+        client_code TEXT NOT NULL,
+        name TEXT NOT NULL,
+        phone_normalized TEXT NOT NULL,
+        address TEXT NOT NULL DEFAULT '',
+        city TEXT NOT NULL DEFAULT '',
+        province TEXT NOT NULL DEFAULT '',
+        lifecycle_status TEXT NOT NULL DEFAULT 'LEAD',
+        free_revision_limit INTEGER NOT NULL DEFAULT 1,
+        is_white_label INTEGER NOT NULL DEFAULT 0,
+        assigned_crm_id INTEGER,
+        created_by INTEGER,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
       );
-      -- Log transaksional append-only. `event_key` membuat setiap baris idempoten:
-      -- perangkat yang mengirim ulang baris yang sama tidak menggandakannya.
-      CREATE TABLE IF NOT EXISTS log_aktivitas (
-        id_log INTEGER PRIMARY KEY,
-        event_key TEXT NOT NULL UNIQUE,
-        kode_item TEXT NOT NULL,
-        jenis TEXT NOT NULL,
-        jumlah INTEGER NOT NULL DEFAULT 0,
-        keterangan TEXT,
-        kode_operator TEXT,
-        waktu TEXT NOT NULL
+      CREATE TABLE IF NOT EXISTS leads (
+        id TEXT PRIMARY KEY,
+        client_id TEXT NOT NULL,
+        pic_cs_id INTEGER,
+        channel_option_id TEXT NOT NULL,
+        product_category_option_id TEXT NOT NULL,
+        needs_notes TEXT NOT NULL DEFAULT '',
+        last_followup_at TEXT NOT NULL DEFAULT '',
+        last_client_response_at TEXT NOT NULL DEFAULT '',
+        total_followups INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
       );
-      -- ===========================================================================
+      CREATE TABLE IF NOT EXISTS master_option (
+        id TEXT PRIMARY KEY,
+        kind TEXT NOT NULL,
+        code TEXT NOT NULL,
+        label TEXT NOT NULL,
+        is_active INTEGER NOT NULL DEFAULT 1,
+        sort_order INTEGER NOT NULL DEFAULT 0,
+        updated_at TEXT NOT NULL
+      );
+      -- ====================================================
 
       CREATE INDEX IF NOT EXISTS idx_local_outbox_status_retry
         ON desktop_sync_outbox(status, next_retry_at);
       CREATE INDEX IF NOT EXISTS idx_local_outbox_domain_entity
         ON desktop_sync_outbox(domain, entity_key);
-      CREATE INDEX IF NOT EXISTS idx_local_item_status
-        ON master_item(status_aktif);
-      CREATE INDEX IF NOT EXISTS idx_local_aktivitas_item_waktu
-        ON log_aktivitas(kode_item, waktu);
+      CREATE INDEX IF NOT EXISTS idx_local_clients_phone
+        ON clients(phone_normalized);
+      CREATE INDEX IF NOT EXISTS idx_local_clients_code
+        ON clients(client_code);
+      CREATE INDEX IF NOT EXISTS idx_local_leads_client
+        ON leads(client_id);
+      CREATE INDEX IF NOT EXISTS idx_local_master_option_kind
+        ON master_option(kind, sort_order);
 
       INSERT OR IGNORE INTO desktop_schema_migration (version, name, applied_at)
       VALUES (1, 'desktop-security-foundation', unixepoch());
@@ -263,6 +284,14 @@ pub fn initialize(path: &Path) -> Result<(), String> {
       "#,
         )
         .map_err(|_| "The desktop security schema could not be initialized.".to_owned())?;
+
+    // Database perangkat yang dibuat sebelum kode klien ada.
+    ensure_column(
+        &connection,
+        "desktop_client_identity",
+        "device_tag",
+        "ALTER TABLE desktop_client_identity ADD COLUMN device_tag TEXT;",
+    )?;
 
     Ok(())
 }
@@ -273,7 +302,7 @@ pub fn initialize(path: &Path) -> Result<(), String> {
 /// terlewat akan menyimpan data milik database lama setelah perangkat dipindahkan
 /// ke database baru — data itu tetap tampil di layar dan outbox lamanya justru
 /// terdorong masuk ke database yang baru.
-const CLOUD_MIRRORED_TABLES: &[&str] = &["master_item", "log_aktivitas"];
+const CLOUD_MIRRORED_TABLES: &[&str] = &["clients", "leads", "master_option"];
 
 /// Membuang seluruh jejak database cloud lama ketika perangkat dipindahkan ke
 /// database Turso yang berbeda.
@@ -577,8 +606,9 @@ mod tests {
 
         let connection = database(directory.path()).expect("database connection");
         for table in [
-            "master_item",
-            "log_aktivitas",
+            "clients",
+            "leads",
+            "master_option",
             "setting_gex_system",
             "desktop_sync_outbox",
             "desktop_sync_cursor",
@@ -612,13 +642,13 @@ mod tests {
         let connection = database(directory.path()).expect("database connection");
         connection
             .execute(
-                "INSERT INTO master_item (kode_item, nama, harga, status_aktif, update_terakhir) VALUES ('I1', 'Item Lama', 1000, 'Active', '0');",
+                "INSERT INTO clients (id, client_code, name, phone_normalized, created_at, updated_at) VALUES ('C1', 'KLN-20260925-0101', 'Klien Lama', '6281234567890', '0', '0');",
                 [],
             )
-            .expect("seed item");
+            .expect("seed client");
         connection
             .execute(
-                "INSERT INTO desktop_sync_outbox (event_id, client_id, domain, operation, entity_key, payload_json, status, created_at, updated_at) VALUES ('EV1', 'C1', 'item', 'update', 'I1', '{}', 'pending', 0, 0);",
+                "INSERT INTO desktop_sync_outbox (event_id, client_id, domain, operation, entity_key, payload_json, status, created_at, updated_at) VALUES ('EV1', 'C1', 'client', 'update', 'C1', '{}', 'pending', 0, 0);",
                 [],
             )
             .expect("seed outbox");
@@ -636,7 +666,7 @@ mod tests {
             .expect("reset local workspace");
 
         let connection = database(directory.path()).expect("database connection");
-        for table in ["master_item", "desktop_sync_outbox", "desktop_entity_revision"] {
+        for table in ["clients", "desktop_sync_outbox", "desktop_entity_revision"] {
             let total: i64 = connection
                 .query_row(&format!("SELECT COUNT(*) FROM {table};"), [], |row| {
                     row.get(0)

@@ -196,4 +196,13 @@ export async function runDatabaseMigrations(client: Client) {
           VALUES (2, 'password-reset-and-two-factor', ?);`,
     args: [new Date().toISOString()],
   });
+
+  // Versi 3: domain klien/lead/Master Data menggantikan domain contoh. Seluruh
+  // tabelnya baru, jadi cukup dibuat DDL awal `db-schema.ts`; baris ini hanya
+  // mencatat versinya. Nomor dan nama WAJIB sama dengan `turso.rs`.
+  await client.execute({
+    sql: `INSERT OR IGNORE INTO schema_migration (version, name, applied_at)
+          VALUES (3, 'clients-leads-master-data', ?);`,
+    args: [new Date().toISOString()],
+  });
 }

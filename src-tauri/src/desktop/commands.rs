@@ -1751,42 +1751,214 @@ pub async fn desktop_update_company_profile(
 }
 
 // ===========================================================================
-// DOMAIN CONTOH — GANTI DENGAN DOMAIN APLIKASI ANDA
+// DOMAIN MAKLONOS: klien, lead, Master Data, dan setelan kode klien.
+//
+// Padanan jalur Web: `src/lib/server/clients.ts`. Pesan validasi dan aturan
+// keduanya WAJIB sama; aturan murninya ada di `clients.rs` / `client.ts` dan
+// diuji dengan vektor kembar.
 //
 // Pola yang wajib dipertahankan pada setiap mutasi:
 //
 //   1. Tulis perubahan ke SQLite lokal DAN daftarkan event outbox dalam SATU
-//      transaksi. Kalau outbox ditulis di transaksi terpisah dan proses mati di
-//      antaranya, perubahan itu hidup di perangkat tetapi tidak pernah sampai
-//      ke cloud — dan tidak ada yang menyadarinya.
+//      transaksi (`commit_with_outbox`).
 //   2. Pakai pasangan (domain, operation) yang terdaftar di
 //      `CANONICAL_SYNC_ROUTES`. Pasangan lain ditolak batas cloud.
-//   3. `entity_key` adalah identitas resmi baris; pilih kunci bisnis yang stabil
-//      lintas perangkat.
+//   3. `entity_key` adalah identitas resmi baris (UUID buatan perangkat).
 //   4. Picu sinkronisasi latar setelah commit, jangan sebelum.
 // ===========================================================================
 
+use super::clients;
+
+fn draft_text(draft: &Value, key: &str) -> String {
+    draft
+        .get(key)
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim()
+        .to_owned()
+}
+
+fn client_invalid(message: impl Into<String>) -> CommandError {
+    CommandError::new("CLIENT_INVALID", message)
+}
+
+struct ClientDraft {
+    name: String,
+    phone: String,
+    address: String,
+    city: String,
+    province: String,
+    channel: String,
+    category: String,
+    needs: String,
+}
+
+/// Opsi Master Data boleh dipakai bila ada, jenisnya cocok, dan aktif — atau
+/// memang nilai yang sudah tersimpan (opsi yang dinonaktifkan belakangan tidak
+/// boleh membuat klien lama tidak bisa disunting).
+fn option_usable(
+    connection: &rusqlite::Connection,
+    id: &str,
+    kind: &str,
+    current: Option<&str>,
+) -> Result<bool, CommandError> {
+    use rusqlite::OptionalExtension;
+    if id.is_empty() {
+        return Ok(false);
+    }
+    let active = connection
+        .query_row(
+            "SELECT is_active FROM master_option WHERE id = ? AND kind = ?;",
+            rusqlite::params![id, kind],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()
+        .map_err(|_| CommandError::internal())?;
+    Ok(match active {
+        Some(flag) => flag == 1 || current == Some(id),
+        None => false,
+    })
+}
+
+fn validate_client_draft(
+    connection: &rusqlite::Connection,
+    draft: &Value,
+    current: Option<(&str, &str)>,
+) -> Result<ClientDraft, CommandError> {
+    let name = draft_text(draft, "name");
+    let length = name.chars().count();
+    if !(clients::CLIENT_NAME_MIN..=clients::CLIENT_NAME_MAX).contains(&length) {
+        return Err(client_invalid("The client name must be 2-120 characters."));
+    }
+    let phone = clients::normalize_whatsapp(&draft_text(draft, "phone")).ok_or_else(|| {
+        client_invalid("Enter a valid WhatsApp number that starts with 0 or 62.")
+    })?;
+    let address = draft_text(draft, "address");
+    let city = draft_text(draft, "city");
+    let province = draft_text(draft, "province");
+    if [&address, &city, &province]
+        .iter()
+        .any(|value| value.chars().count() > clients::CLIENT_TEXT_MAX)
+    {
+        return Err(client_invalid(
+            "Address, city, and province can be at most 300 characters each.",
+        ));
+    }
+    let needs = draft_text(draft, "needs_notes");
+    if needs.chars().count() > clients::CLIENT_NOTES_MAX {
+        return Err(client_invalid("Client needs can be at most 2000 characters."));
+    }
+    let channel = draft_text(draft, "channel_option_id");
+    if !option_usable(connection, &channel, "LEAD_CHANNEL", current.map(|c| c.0))? {
+        return Err(client_invalid("Choose an active lead channel."));
+    }
+    let category = draft_text(draft, "product_category_option_id");
+    if !option_usable(connection, &category, "PRODUCT_CATEGORY", current.map(|c| c.1))? {
+        return Err(client_invalid("Choose an active product category."));
+    }
+    Ok(ClientDraft {
+        name,
+        phone,
+        address,
+        city,
+        province,
+        channel,
+        category,
+        needs,
+    })
+}
+
+/// Kode klien lain yang sudah memakai nomor ini di data lokal. Cloud
+/// memeriksa ulang saat push (guard di `turso.rs::push_events`).
+fn local_phone_owner(
+    connection: &rusqlite::Connection,
+    phone: &str,
+    client_id: &str,
+) -> Result<Option<String>, CommandError> {
+    use rusqlite::OptionalExtension;
+    connection
+        .query_row(
+            "SELECT client_code FROM clients WHERE phone_normalized = ? AND id <> ? LIMIT 1;",
+            rusqlite::params![phone, client_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|_| CommandError::internal())
+}
+
+fn duplicate_phone(phone: &str, owner: &str) -> CommandError {
+    CommandError::new(
+        "CLIENT_PHONE_TAKEN",
+        format!("The WhatsApp number {phone} is already registered to client {owner}."),
+    )
+}
+
+fn company_timezone(connection: &rusqlite::Connection) -> String {
+    connection
+        .query_row(
+            "SELECT timezone FROM company_profile WHERE id = 'default_company';",
+            [],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .ok()
+        .flatten()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "Asia/Jakarta".to_owned())
+}
+
+fn client_code_prefix(state: &DesktopState) -> String {
+    storage::get_system_setting(&state.data_dir, clients::CLIENT_CODE_PREFIX_SETTING)
+        .ok()
+        .flatten()
+        .and_then(|value| clients::normalize_code_prefix(&value))
+        .unwrap_or_else(|| clients::DEFAULT_CLIENT_CODE_PREFIX.to_owned())
+}
+
+fn client_code_web_tag(state: &DesktopState) -> String {
+    storage::get_system_setting(&state.data_dir, clients::CLIENT_CODE_WEB_TAG_SETTING)
+        .ok()
+        .flatten()
+        .and_then(|value| clients::normalize_device_tag(&value))
+        .unwrap_or_else(|| clients::DEFAULT_CLIENT_CODE_WEB_TAG.to_owned())
+}
+
+/// Daftar klien beserta lead-nya, terbaru dulu. Bentuk barisnya sama dengan
+/// `listClients` di `src/lib/server/clients.ts`.
 #[tauri::command]
-pub fn desktop_list_items(state: State<'_, DesktopState>) -> Result<Value, CommandError> {
-    require_permission(&state, "items.view")?;
+pub fn desktop_list_clients(state: State<'_, DesktopState>) -> Result<Value, CommandError> {
+    require_permission(&state, "clients.view")?;
     let connection = storage::database(&state.data_dir)?;
     let mut statement = connection
         .prepare(
-            "SELECT kode_item, nama, kategori, harga, satuan, catatan, status_aktif, update_terakhir
-             FROM master_item ORDER BY nama;",
+            "SELECT c.id, c.client_code, c.name, c.phone_normalized, c.address, c.city,
+                    c.province, c.lifecycle_status, c.created_by, c.created_at, c.updated_at,
+                    l.id, l.pic_cs_id, l.channel_option_id, l.product_category_option_id,
+                    l.needs_notes, l.last_client_response_at, l.total_followups
+             FROM clients c LEFT JOIN leads l ON l.client_id = c.id
+             ORDER BY c.created_at DESC, c.id;",
         )
         .map_err(|_| CommandError::internal())?;
     let rows = statement
         .query_map([], |row| {
             Ok(json!({
-                "kode_item": row.get::<_, String>(0)?,
-                "nama": row.get::<_, String>(1)?,
-                "kategori": row.get::<_, Option<String>>(2)?,
-                "harga": row.get::<_, i64>(3)?,
-                "satuan": row.get::<_, Option<String>>(4)?,
-                "catatan": row.get::<_, Option<String>>(5)?,
-                "status_aktif": row.get::<_, String>(6)?,
-                "update_terakhir": row.get::<_, String>(7)?,
+                "id": row.get::<_, String>(0)?,
+                "client_code": row.get::<_, String>(1)?,
+                "name": row.get::<_, String>(2)?,
+                "phone_normalized": row.get::<_, String>(3)?,
+                "address": row.get::<_, String>(4)?,
+                "city": row.get::<_, String>(5)?,
+                "province": row.get::<_, String>(6)?,
+                "lifecycle_status": row.get::<_, String>(7)?,
+                "created_by": row.get::<_, Option<i64>>(8)?,
+                "created_at": row.get::<_, String>(9)?,
+                "updated_at": row.get::<_, String>(10)?,
+                "lead_id": row.get::<_, Option<String>>(11)?,
+                "pic_cs_id": row.get::<_, Option<i64>>(12)?,
+                "channel_option_id": row.get::<_, Option<String>>(13)?.unwrap_or_default(),
+                "product_category_option_id": row.get::<_, Option<String>>(14)?.unwrap_or_default(),
+                "needs_notes": row.get::<_, Option<String>>(15)?.unwrap_or_default(),
+                "last_client_response_at": row.get::<_, Option<String>>(16)?.unwrap_or_default(),
+                "total_followups": row.get::<_, Option<i64>>(17)?.unwrap_or(0),
             }))
         })
         .map_err(|_| CommandError::internal())?;
@@ -1796,176 +1968,240 @@ pub fn desktop_list_items(state: State<'_, DesktopState>) -> Result<Value, Comma
     ))
 }
 
+/// Daftarkan lead baru: satu baris `clients` + satu baris `leads`, kode
+/// `KLN-YYYYMMDD-<KP><NN>` dihitung dari data lokal sehingga aman saat offline.
 #[tauri::command]
-pub async fn desktop_save_item(
+pub async fn desktop_register_client(
     state: State<'_, DesktopState>,
-    item: Value,
+    client: Value,
 ) -> Result<Value, CommandError> {
-    require_permission(&state, "items.manage")?;
-    let kode_item = item
-        .get("kode_item")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| {
-            CommandError::new("ITEM_INVALID", "Kode item wajib diisi.")
-        })?
-        .to_owned();
-    let nama = item
-        .get("nama")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| value.chars().count() >= 2)
-        .ok_or_else(|| {
-            CommandError::new("ITEM_INVALID", "Nama item minimal dua karakter.")
-        })?
-        .to_owned();
-    let kategori = item
-        .get("kategori")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_owned();
-    let harga = item.get("harga").and_then(Value::as_i64).unwrap_or(0);
-    if harga < 0 {
-        return Err(CommandError::new(
-            "ITEM_INVALID",
-            "Harga tidak boleh negatif.",
-        ));
-    }
-    let satuan = item
-        .get("satuan")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_owned();
-    let catatan = item
-        .get("catatan")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_owned();
-    // Nilai asing ditolak, tidak pernah dinormalkan menjadi "Active" — aturan
-    // yang sama dieja `saveItem` di `src/lib/server/example-domain.ts`.
-    let status = match item.get("status_aktif").and_then(Value::as_str) {
-        None | Some("Active") => "Active",
-        Some("Inactive") => "Inactive",
-        Some(_) => {
-            return Err(CommandError::new(
-                "ITEM_INVALID",
-                "Status item harus Aktif atau Nonaktif.",
-            ))
+    let operator = require_permission(&state, "clients.manage")?;
+    let tag = sync::local_device_tag(&state)?.ok_or_else(|| {
+        CommandError::new(
+            "DEVICE_TAG_MISSING",
+            "This device has no client code tag yet. Connect it to the database once to get one.",
+        )
+    })?;
+    let now = storage::now_epoch_seconds();
+    let (draft, code) = {
+        let connection = storage::database(&state.data_dir)?;
+        let draft = validate_client_draft(&connection, &client, None)?;
+        if let Some(owner) = local_phone_owner(&connection, &draft.phone, "")? {
+            return Err(duplicate_phone(&draft.phone, &owner));
         }
+        let stamp = clients::company_date_stamp(now, &company_timezone(&connection));
+        let mut statement = connection
+            .prepare("SELECT client_code FROM clients WHERE client_code LIKE ?;")
+            .map_err(|_| CommandError::internal())?;
+        let codes = statement
+            .query_map([format!("%-{stamp}-{tag}__")], |row| row.get::<_, String>(0))
+            .map_err(|_| CommandError::internal())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| CommandError::internal())?;
+        let code = clients::next_client_sequence(codes.iter().map(String::as_str), &stamp, &tag)
+            .and_then(|sequence| {
+                clients::format_client_code(&client_code_prefix(&state), &stamp, &tag, sequence)
+            })
+            .ok_or_else(|| {
+                CommandError::new(
+                    "CLIENT_CODE_EXHAUSTED",
+                    "This device has used up its client codes for today.",
+                )
+            })?;
+        (draft, code)
     };
-    let updated = storage::now_epoch_seconds().to_string();
 
+    let id = clients::new_uuid();
+    let lead_id = clients::new_uuid();
+    let timestamp = clients::utc_timestamp(now);
     let payload = json!({
-        "kode_item": kode_item,
-        "nama": nama,
-        "kategori": kategori,
-        "harga": harga,
-        "satuan": satuan,
-        "catatan": catatan,
-        "status_aktif": status,
+        "id": id,
+        "client_code": code,
+        "name": draft.name,
+        "phone_normalized": draft.phone,
+        "address": draft.address,
+        "city": draft.city,
+        "province": draft.province,
+        "lifecycle_status": "LEAD",
+        "free_revision_limit": 1,
+        "is_white_label": 0,
+        "assigned_crm_id": Value::Null,
+        "created_by": operator.id,
+        "created_at": timestamp,
+        "updated_at": timestamp,
+        "lead_id": lead_id,
+        "pic_cs_id": operator.id,
+        "channel_option_id": draft.channel,
+        "product_category_option_id": draft.category,
+        "needs_notes": draft.needs,
+        "last_followup_at": "",
+        // Lead masuk = klien yang menghubungi, jadi itulah respons pertamanya.
+        "last_client_response_at": timestamp,
+        "total_followups": 0,
     });
 
-    let exists = {
-        let connection = storage::database(&state.data_dir)?;
-        connection
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM master_item WHERE kode_item = ?);",
-                [&kode_item],
-                |row| row.get::<_, bool>(0),
+    commit_with_outbox(&state, "client", "register", &id, payload, |transaction| {
+        transaction
+            .execute(
+                r#"INSERT INTO clients
+                    (id, client_code, name, phone_normalized, address, city, province,
+                     lifecycle_status, free_revision_limit, is_white_label, assigned_crm_id,
+                     created_by, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, 'LEAD', 1, 0, NULL, ?, ?, ?);"#,
+                rusqlite::params![
+                    &id, &code, &draft.name, &draft.phone, &draft.address, &draft.city,
+                    &draft.province, operator.id, &timestamp, &timestamp
+                ],
             )
-            .unwrap_or(false)
+            .map_err(|_| CommandError::new("CLIENT_SAVE_FAILED", "The client could not be saved."))?;
+        transaction
+            .execute(
+                r#"INSERT INTO leads
+                    (id, client_id, pic_cs_id, channel_option_id, product_category_option_id,
+                     needs_notes, last_followup_at, last_client_response_at, total_followups,
+                     created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, '', ?, 0, ?, ?);"#,
+                rusqlite::params![
+                    &lead_id, &id, operator.id, &draft.channel, &draft.category, &draft.needs,
+                    &timestamp, &timestamp, &timestamp
+                ],
+            )
+            .map_err(|_| CommandError::new("CLIENT_SAVE_FAILED", "The client could not be saved."))?;
+        Ok(())
+    })?;
+
+    let _ = sync::synchronize(&state).await;
+    Ok(json!({ "sukses": true, "id": id, "client_code": code }))
+}
+
+/// Ubah data kontak klien dan kebutuhan lead-nya. Kode klien, pembuat, dan
+/// kolom interaksi lead tidak ikut berubah.
+#[tauri::command]
+pub async fn desktop_update_client(
+    state: State<'_, DesktopState>,
+    client: Value,
+) -> Result<Value, CommandError> {
+    use rusqlite::OptionalExtension;
+    require_permission(&state, "clients.manage")?;
+    let id = draft_text(&client, "id");
+    let now = clients::utc_timestamp(storage::now_epoch_seconds());
+    let (draft, current) = {
+        let connection = storage::database(&state.data_dir)?;
+        let current = connection
+            .query_row(
+                "SELECT c.client_code, c.lifecycle_status, c.free_revision_limit, c.is_white_label,
+                        c.assigned_crm_id, c.created_by, c.created_at, l.id, l.pic_cs_id,
+                        l.channel_option_id, l.product_category_option_id, l.last_followup_at,
+                        l.last_client_response_at, l.total_followups, l.created_at
+                 FROM clients c JOIN leads l ON l.client_id = c.id WHERE c.id = ? LIMIT 1;",
+                [&id],
+                |row| {
+                    Ok(json!({
+                        "client_code": row.get::<_, String>(0)?,
+                        "lifecycle_status": row.get::<_, String>(1)?,
+                        "free_revision_limit": row.get::<_, i64>(2)?,
+                        "is_white_label": row.get::<_, i64>(3)?,
+                        "assigned_crm_id": row.get::<_, Option<i64>>(4)?,
+                        "created_by": row.get::<_, Option<i64>>(5)?,
+                        "created_at": row.get::<_, String>(6)?,
+                        "lead_id": row.get::<_, String>(7)?,
+                        "pic_cs_id": row.get::<_, Option<i64>>(8)?,
+                        "channel_option_id": row.get::<_, String>(9)?,
+                        "product_category_option_id": row.get::<_, String>(10)?,
+                        "last_followup_at": row.get::<_, String>(11)?,
+                        "last_client_response_at": row.get::<_, String>(12)?,
+                        "total_followups": row.get::<_, i64>(13)?,
+                        "lead_created_at": row.get::<_, String>(14)?,
+                    }))
+                },
+            )
+            .optional()
+            .map_err(|_| CommandError::internal())?
+            .ok_or_else(|| CommandError::new("CLIENT_NOT_FOUND", "Client not found."))?;
+        let draft = validate_client_draft(
+            &connection,
+            &client,
+            Some((
+                current["channel_option_id"].as_str().unwrap_or_default(),
+                current["product_category_option_id"].as_str().unwrap_or_default(),
+            )),
+        )?;
+        if let Some(owner) = local_phone_owner(&connection, &draft.phone, &id)? {
+            return Err(duplicate_phone(&draft.phone, &owner));
+        }
+        (draft, current)
     };
 
-    commit_with_outbox(
-        &state,
-        "item",
-        if exists { "update" } else { "create" },
-        &kode_item,
-        payload,
-        |transaction| {
-            transaction
-                .execute(
-                    r#"INSERT INTO master_item
-                        (kode_item, nama, kategori, harga, satuan, catatan, status_aktif, update_terakhir)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                       ON CONFLICT(kode_item) DO UPDATE SET
-                         nama = excluded.nama,
-                         kategori = excluded.kategori,
-                         harga = excluded.harga,
-                         satuan = excluded.satuan,
-                         catatan = excluded.catatan,
-                         status_aktif = excluded.status_aktif,
-                         update_terakhir = excluded.update_terakhir;"#,
-                    rusqlite::params![
-                        &kode_item, &nama, &kategori, harga, &satuan, &catatan, status, &updated
-                    ],
-                )
-                .map_err(|_| {
-                    CommandError::new("ITEM_SAVE_FAILED", "Item tidak dapat disimpan.")
-                })?;
-            Ok(())
-        },
-    )?;
+    let lead_id = current["lead_id"].as_str().unwrap_or_default().to_owned();
+    let payload = json!({
+        "id": id,
+        "client_code": current["client_code"],
+        "name": draft.name,
+        "phone_normalized": draft.phone,
+        "address": draft.address,
+        "city": draft.city,
+        "province": draft.province,
+        "lifecycle_status": current["lifecycle_status"],
+        "free_revision_limit": current["free_revision_limit"],
+        "is_white_label": current["is_white_label"],
+        "assigned_crm_id": current["assigned_crm_id"],
+        "created_by": current["created_by"],
+        "created_at": current["created_at"],
+        "updated_at": now,
+        "lead_id": lead_id,
+        "pic_cs_id": current["pic_cs_id"],
+        "channel_option_id": draft.channel,
+        "product_category_option_id": draft.category,
+        "needs_notes": draft.needs,
+        "last_followup_at": current["last_followup_at"],
+        "last_client_response_at": current["last_client_response_at"],
+        "total_followups": current["total_followups"],
+    });
+
+    commit_with_outbox(&state, "client", "update", &id, payload, |transaction| {
+        transaction
+            .execute(
+                "UPDATE clients SET name = ?, phone_normalized = ?, address = ?, city = ?, province = ?, updated_at = ? WHERE id = ?;",
+                rusqlite::params![
+                    &draft.name, &draft.phone, &draft.address, &draft.city, &draft.province, &now, &id
+                ],
+            )
+            .map_err(|_| CommandError::new("CLIENT_SAVE_FAILED", "The client could not be saved."))?;
+        transaction
+            .execute(
+                "UPDATE leads SET channel_option_id = ?, product_category_option_id = ?, needs_notes = ?, updated_at = ? WHERE id = ?;",
+                rusqlite::params![&draft.channel, &draft.category, &draft.needs, &now, &lead_id],
+            )
+            .map_err(|_| CommandError::new("CLIENT_SAVE_FAILED", "The client could not be saved."))?;
+        Ok(())
+    })?;
 
     let _ = sync::synchronize(&state).await;
-    Ok(json!({ "sukses": true, "kode_item": kode_item }))
+    Ok(json!({ "sukses": true, "id": id }))
 }
 
+/// Daftar pilihan Master Data (saluran lead, kategori produk), aktif maupun
+/// tidak. Bentuk barisnya sama dengan `listMasterOptions` di TS.
 #[tauri::command]
-pub async fn desktop_delete_item(
-    state: State<'_, DesktopState>,
-    kode_item: String,
-) -> Result<Value, CommandError> {
-    require_permission(&state, "items.manage")?;
-    let kode_item = kode_item.trim().to_owned();
-    if kode_item.is_empty() {
-        return Err(CommandError::new("ITEM_INVALID", "Kode item wajib diisi."));
-    }
-    commit_with_outbox(
-        &state,
-        "item",
-        "delete",
-        &kode_item,
-        json!({ "kode_item": kode_item }),
-        |transaction| {
-            transaction
-                .execute(
-                    "DELETE FROM master_item WHERE kode_item = ?;",
-                    [&kode_item],
-                )
-                .map_err(|_| CommandError::internal())?;
-            Ok(())
-        },
-    )?;
-    let _ = sync::synchronize(&state).await;
-    Ok(json!({ "sukses": true }))
-}
-
-#[tauri::command]
-pub fn desktop_list_activities(
-    state: State<'_, DesktopState>,
-    limit: Option<i64>,
-) -> Result<Value, CommandError> {
-    require_permission(&state, "activity.view")?;
-    let limit = limit.unwrap_or(200).clamp(1, 1000);
+pub fn desktop_list_master_options(state: State<'_, DesktopState>) -> Result<Value, CommandError> {
+    require_permission(&state, "clients.view")?;
     let connection = storage::database(&state.data_dir)?;
     let mut statement = connection
         .prepare(
-            "SELECT event_key, kode_item, jenis, jumlah, keterangan, kode_operator, waktu
-             FROM log_aktivitas ORDER BY waktu DESC LIMIT ?;",
+            "SELECT id, kind, code, label, is_active, sort_order, updated_at
+             FROM master_option ORDER BY kind, sort_order, label;",
         )
         .map_err(|_| CommandError::internal())?;
     let rows = statement
-        .query_map([limit], |row| {
+        .query_map([], |row| {
             Ok(json!({
-                "event_key": row.get::<_, String>(0)?,
-                "kode_item": row.get::<_, String>(1)?,
-                "jenis": row.get::<_, String>(2)?,
-                "jumlah": row.get::<_, i64>(3)?,
-                "keterangan": row.get::<_, Option<String>>(4)?,
-                "kode_operator": row.get::<_, Option<String>>(5)?,
-                "waktu": row.get::<_, String>(6)?,
+                "id": row.get::<_, String>(0)?,
+                "kind": row.get::<_, String>(1)?,
+                "code": row.get::<_, String>(2)?,
+                "label": row.get::<_, String>(3)?,
+                "is_active": row.get::<_, i64>(4)? == 1,
+                "sort_order": row.get::<_, i64>(5)?,
+                "updated_at": row.get::<_, String>(6)?,
             }))
         })
         .map_err(|_| CommandError::internal())?;
@@ -1975,86 +2211,176 @@ pub fn desktop_list_activities(
     ))
 }
 
+/// Tambah atau ubah satu pilihan Master Data. Opsi tidak pernah dihapus, hanya
+/// dinonaktifkan: data lama yang memakainya harus tetap terbaca.
 #[tauri::command]
-pub async fn desktop_record_activity(
+pub async fn desktop_save_master_option(
     state: State<'_, DesktopState>,
-    activity: Value,
+    option: Value,
 ) -> Result<Value, CommandError> {
-    let operator = require_permission(&state, "activity.record")?;
-    let kode_item = activity
-        .get("kode_item")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| CommandError::new("ACTIVITY_INVALID", "Kode item wajib diisi."))?
-        .to_owned();
-    let jenis = activity
-        .get("jenis")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| CommandError::new("ACTIVITY_INVALID", "Jenis aktivitas wajib diisi."))?
-        .to_owned();
-    let jumlah = activity.get("jumlah").and_then(Value::as_i64).unwrap_or(0);
-    let keterangan = activity
-        .get("keterangan")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_owned();
+    use rusqlite::OptionalExtension;
+    require_permission(&state, "master_data.manage")?;
+    let invalid = |message: &str| CommandError::new("MASTER_OPTION_INVALID", message);
+    let requested_id = draft_text(&option, "id");
+    let code = clients::normalize_option_code(&draft_text(&option, "code"))
+        .ok_or_else(|| invalid("The code must be 1-20 characters: letters, numbers, _ or -."))?;
+    let label = draft_text(&option, "label");
+    if label.is_empty() || label.chars().count() > clients::OPTION_LABEL_MAX {
+        return Err(invalid("The label must be 1-80 characters."));
+    }
+    let is_active = option.get("is_active").and_then(Value::as_bool).unwrap_or(true);
+    let now = clients::utc_timestamp(storage::now_epoch_seconds());
 
-    // `event_key` dibuat di perangkat dan menjadi kunci idempotensi baris. Karena
-    // dipakai sebagai `ON CONFLICT`, pengiriman ulang event yang sama tidak
-    // pernah menggandakan barisnya.
-    let client_id = sync::ensure_client_id(&state)?;
-    let event_key = sync::new_event_id(&client_id, "activity", "record");
-    let waktu = storage::now_epoch_seconds().to_string();
-    let local_id = sync::new_local_id();
+    let (id, kind, sort_order) = {
+        let connection = storage::database(&state.data_dir)?;
+        let (id, kind, sort_order) = if requested_id.is_empty() {
+            let kind = draft_text(&option, "kind");
+            if !clients::MASTER_OPTION_KINDS.contains(&kind.as_str()) {
+                return Err(invalid("Unknown master data type."));
+            }
+            let next: i64 = connection
+                .query_row(
+                    "SELECT COALESCE(MAX(sort_order), 0) + 10 FROM master_option WHERE kind = ?;",
+                    [&kind],
+                    |row| row.get(0),
+                )
+                .map_err(|_| CommandError::internal())?;
+            (clients::new_uuid(), kind, next)
+        } else {
+            let (kind, sort_order) = connection
+                .query_row(
+                    "SELECT kind, sort_order FROM master_option WHERE id = ?;",
+                    [&requested_id],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+                )
+                .optional()
+                .map_err(|_| CommandError::internal())?
+                .ok_or_else(|| CommandError::new("MASTER_OPTION_NOT_FOUND", "Option not found."))?;
+            (requested_id.clone(), kind, sort_order)
+        };
+        let taken: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM master_option WHERE kind = ? AND code = ? AND id <> ?;",
+                rusqlite::params![&kind, &code, &id],
+                |row| row.get(0),
+            )
+            .map_err(|_| CommandError::internal())?;
+        if taken > 0 {
+            return Err(invalid("Another option of this type already uses that code."));
+        }
+        (id, kind, sort_order)
+    };
 
     let payload = json!({
-        "event_key": event_key,
-        "kode_item": kode_item,
-        "jenis": jenis,
-        "jumlah": jumlah,
-        "keterangan": keterangan,
-        "kode_operator": operator.kode_operator,
-        "waktu": waktu,
+        "id": id,
+        "kind": kind,
+        "code": code,
+        "label": label,
+        "is_active": i64::from(is_active),
+        "sort_order": sort_order,
+        "updated_at": now,
     });
-
-    commit_with_outbox(
-        &state,
-        "activity",
-        "record",
-        &event_key,
-        payload,
-        |transaction| {
-            transaction
-                .execute(
-                    r#"INSERT INTO log_aktivitas
-                        (id_log, event_key, kode_item, jenis, jumlah, keterangan, kode_operator, waktu)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?);"#,
-                    rusqlite::params![
-                        local_id,
-                        &event_key,
-                        &kode_item,
-                        &jenis,
-                        jumlah,
-                        &keterangan,
-                        &operator.kode_operator,
-                        &waktu
-                    ],
-                )
-                .map_err(|_| {
-                    CommandError::new(
-                        "ACTIVITY_SAVE_FAILED",
-                        "Aktivitas tidak dapat dicatat.",
-                    )
-                })?;
-            Ok(())
-        },
-    )?;
+    commit_with_outbox(&state, "master-option", "upsert", &id, payload.clone(), |transaction| {
+        transaction
+            .execute(
+                r#"INSERT INTO master_option (id, kind, code, label, is_active, sort_order, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(id) DO UPDATE SET
+                     code = excluded.code,
+                     label = excluded.label,
+                     is_active = excluded.is_active,
+                     sort_order = excluded.sort_order,
+                     updated_at = excluded.updated_at;"#,
+                rusqlite::params![&id, &kind, &code, &label, i64::from(is_active), sort_order, &now],
+            )
+            .map_err(|_| CommandError::internal())?;
+        Ok(())
+    })?;
 
     let _ = sync::synchronize(&state).await;
-    Ok(json!({ "sukses": true, "event_key": event_key }))
+    Ok(json!({
+        "id": id,
+        "kind": kind,
+        "code": code,
+        "label": label,
+        "is_active": is_active,
+        "sort_order": sort_order,
+        "updated_at": now,
+    }))
+}
+
+/// Awalan kode klien, tag Web, dan tag perangkat ini (bila sudah ada).
+#[tauri::command]
+pub fn desktop_get_client_code_settings(
+    state: State<'_, DesktopState>,
+) -> Result<Value, CommandError> {
+    require_permission(&state, "clients.view")?;
+    Ok(json!({
+        "client_code_prefix": client_code_prefix(&state),
+        "client_code_web_tag": client_code_web_tag(&state),
+        "device_tag": sync::local_device_tag(&state)?,
+    }))
+}
+
+/// Simpan awalan kode klien dan tag Web. Mengganti tag Web butuh koneksi ke
+/// database: tag itu tidak boleh sama dengan tag yang sudah dipegang perangkat.
+#[tauri::command]
+pub async fn desktop_save_client_code_settings(
+    state: State<'_, DesktopState>,
+    settings: Value,
+) -> Result<Value, CommandError> {
+    require_permission(&state, "settings.manage")?;
+    let invalid = |message: &str| CommandError::new("CLIENT_CODE_SETTINGS_INVALID", message);
+    let prefix = clients::normalize_code_prefix(&draft_text(&settings, "client_code_prefix"))
+        .ok_or_else(|| invalid("The client code prefix must be 2-5 letters."))?;
+    let web_tag = clients::normalize_device_tag(&draft_text(&settings, "client_code_web_tag"))
+        .ok_or_else(|| invalid("The Web tag must be exactly 2 letters or numbers."))?;
+    if web_tag != client_code_web_tag(&state) {
+        let turso = state.get_turso_client().map_err(|_| {
+            invalid("Changing the Web tag needs a database connection.")
+        })?;
+        let taken = turso
+            .device_tag_taken(&web_tag)
+            .await
+            .map_err(|_| invalid("Changing the Web tag needs a database connection."))?;
+        if taken {
+            return Err(invalid("That Web tag is already used by a device."));
+        }
+    }
+
+    let client_id = sync::ensure_client_id(&state)?;
+    let mut connection = storage::database(&state.data_dir)?;
+    let transaction = connection
+        .transaction()
+        .map_err(|_| CommandError::internal())?;
+    for (key, value) in [
+        (clients::CLIENT_CODE_PREFIX_SETTING, prefix.as_str()),
+        (clients::CLIENT_CODE_WEB_TAG_SETTING, web_tag.as_str()),
+    ] {
+        transaction
+            .execute(
+                "INSERT INTO setting_gex_system (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value;",
+                rusqlite::params![key, value],
+            )
+            .map_err(|_| CommandError::internal())?;
+        sync::enqueue(
+            &transaction,
+            &client_id,
+            "setting",
+            "update",
+            key,
+            &json!({ "key": key, "value": value }),
+            None,
+        )?;
+    }
+    transaction.commit().map_err(|_| CommandError::internal())?;
+
+    let _ = sync::synchronize(&state).await;
+    Ok(json!({
+        "client_code_prefix": prefix,
+        "client_code_web_tag": web_tag,
+        "device_tag": sync::local_device_tag(&state)?,
+    }))
 }
 
 #[cfg(test)]

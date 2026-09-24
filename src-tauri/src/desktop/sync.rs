@@ -9,6 +9,7 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
 use super::{
+    clients,
     config::DesktopState,
     models::{CommandError, DesktopSyncStatus},
     storage,
@@ -19,7 +20,7 @@ use super::{
 /// `CURRENT_SCHEMA_VERSION` di `web-desktop/src/lib/db-schema.ts` setiap kali
 /// migrasi baru ditambahkan, karena keduanya membaca tabel `schema_migration`
 /// yang sama di Turso.
-pub const CLIENT_SCHEMA_VERSION: i64 = 2;
+pub const CLIENT_SCHEMA_VERSION: i64 = 3;
 
 /// Hanya `cloud > client` yang berbahaya; `cloud <= client` adalah kondisi normal.
 fn is_client_schema_outdated(cloud_version: i64) -> bool {
@@ -30,9 +31,9 @@ fn schema_outdated_error(cloud_version: i64) -> CommandError {
     CommandError::new(
         "SCHEMA_VERSION_OUTDATED",
         format!(
-            "Aplikasi perlu diperbarui. Skema database cloud sudah versi {cloud_version}, \
-             sedangkan aplikasi ini hanya mendukung versi {CLIENT_SCHEMA_VERSION}. \
-             Pengiriman data dihentikan agar kolom versi baru tidak tertimpa data lama."
+            "The app needs an update. The cloud database schema is already version {cloud_version}, \
+             but this app only supports version {CLIENT_SCHEMA_VERSION}. \
+             Sending data was stopped so columns from the newer version are not overwritten with old data."
         ),
     )
 }
@@ -92,40 +93,71 @@ struct SnapshotTable {
 ///   Untuk log transaksional biarkan `false`: baris lokal yang belum pernah
 ///   terkirim tidak boleh dihapus hanya karena cloud belum memilikinya.
 const SNAPSHOT_TABLES: &[SnapshotTable] = &[
+    // Domain MaklonOS. Kolom WAJIB identik dengan `storage.rs`, `turso.rs`,
+    // dan `db-schema.ts`. `delete_missing: true` karena cloud otoritatif untuk
+    // ketiganya; aturan 7 tetap menjaga baris yang belum pernah dilacak server.
     SnapshotTable {
-        payload_key: "items",
-        domain: "item",
-        table: "master_item",
+        payload_key: "clients",
+        domain: "client",
+        table: "clients",
         columns: &[
-            "kode_item",
-            "nama",
-            "kategori",
-            "harga",
-            "satuan",
-            "catatan",
-            "status_aktif",
-            "update_terakhir",
+            "id",
+            "client_code",
+            "name",
+            "phone_normalized",
+            "address",
+            "city",
+            "province",
+            "lifecycle_status",
+            "free_revision_limit",
+            "is_white_label",
+            "assigned_crm_id",
+            "created_by",
+            "created_at",
+            "updated_at",
         ],
-        conflict_column: "kode_item",
-        entity_column: "kode_item",
+        conflict_column: "id",
+        entity_column: "id",
+        delete_missing: true,
+    },
+    // Lead ikut rute `client`: satu event `client/register` membawa kedua baris.
+    SnapshotTable {
+        payload_key: "leads",
+        domain: "client",
+        table: "leads",
+        columns: &[
+            "id",
+            "client_id",
+            "pic_cs_id",
+            "channel_option_id",
+            "product_category_option_id",
+            "needs_notes",
+            "last_followup_at",
+            "last_client_response_at",
+            "total_followups",
+            "created_at",
+            "updated_at",
+        ],
+        conflict_column: "id",
+        entity_column: "id",
         delete_missing: true,
     },
     SnapshotTable {
-        payload_key: "activities",
-        domain: "activity",
-        table: "log_aktivitas",
+        payload_key: "masterOptions",
+        domain: "master-option",
+        table: "master_option",
         columns: &[
-            "event_key",
-            "kode_item",
-            "jenis",
-            "jumlah",
-            "keterangan",
-            "kode_operator",
-            "waktu",
+            "id",
+            "kind",
+            "code",
+            "label",
+            "is_active",
+            "sort_order",
+            "updated_at",
         ],
-        conflict_column: "event_key",
-        entity_column: "event_key",
-        delete_missing: false,
+        conflict_column: "id",
+        entity_column: "id",
+        delete_missing: true,
     },
     SnapshotTable {
         payload_key: "settings",
@@ -171,10 +203,9 @@ const SNAPSHOT_TABLES: &[SnapshotTable] = &[
 /// Producer yang menulis pasangan di luar daftar akan ditolak batas cloud
 /// sebagai konflik dan macet permanen di antrean.
 const CANONICAL_SYNC_ROUTES: &[(&str, &str)] = &[
-    ("item", "create"),
-    ("item", "update"),
-    ("item", "delete"),
-    ("activity", "record"),
+    ("client", "register"),
+    ("client", "update"),
+    ("master-option", "upsert"),
     ("setting", "update"),
     ("setting", "upsert"),
     ("company-profile", "update"),
@@ -545,6 +576,48 @@ pub fn ensure_client_id(state: &DesktopState) -> Result<String, CommandError> {
             |row| row.get(0),
         )
         .map_err(|_| CommandError::internal())
+}
+
+/// Tag perangkat (bagian `<KP>` kode klien) untuk database yang sedang
+/// ditunjuk, atau `None` bila perangkat ini belum pernah mendapatkannya.
+pub fn local_device_tag(state: &DesktopState) -> Result<Option<String>, CommandError> {
+    let client_id = ensure_client_id(state)?;
+    let connection = storage::database(&state.data_dir)?;
+    connection
+        .query_row(
+            "SELECT device_tag FROM desktop_client_identity WHERE client_id = ?;",
+            [&client_id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()
+        .map(Option::flatten)
+        .map_err(|_| CommandError::internal())
+}
+
+/// Minta tag perangkat ke database bila belum punya. Best effort, dijalankan di
+/// AKHIR siklus sync supaya setting `client_code_web_tag` dari cloud sudah
+/// tertarik lebih dulu: tag Web tidak pernah boleh diberikan ke perangkat.
+async fn ensure_device_tag(state: &DesktopState) {
+    if local_device_tag(state).ok().flatten().is_some() {
+        return;
+    }
+    let (Ok(turso), Ok(client_id)) = (state.get_turso_client(), ensure_client_id(state)) else {
+        return;
+    };
+    let web_tag = storage::get_system_setting(&state.data_dir, clients::CLIENT_CODE_WEB_TAG_SETTING)
+        .ok()
+        .flatten()
+        .and_then(|value| clients::normalize_device_tag(&value))
+        .unwrap_or_else(|| clients::DEFAULT_CLIENT_CODE_WEB_TAG.to_owned());
+    let Ok(tag) = turso.register_device_tag(&client_id, &web_tag).await else {
+        return;
+    };
+    if let Ok(connection) = storage::database(&state.data_dir) {
+        let _ = connection.execute(
+            "UPDATE desktop_client_identity SET device_tag = ? WHERE client_id = ?;",
+            params![tag, client_id],
+        );
+    }
 }
 
 pub fn new_event_id(client_id: &str, domain: &str, operation: &str) -> String {
@@ -1233,6 +1306,7 @@ pub async fn synchronize(state: &DesktopState) -> Result<DesktopSyncStatus, Comm
     // di perangkatnya. Sisi web sudah memeriksa `rbac_revision` pada setiap
     // request; perangkat memeriksanya sekali per siklus sinkronisasi.
     enforce_rbac_revision(state).await;
+    ensure_device_tag(state).await;
 
     match pulled {
         Ok(mut status) => {
@@ -1361,8 +1435,9 @@ pub fn status(state: &DesktopState) -> Result<DesktopSyncStatus, CommandError> {
         last_revision,
         last_sync_at,
         table_counts: json!({
-            "items": table_count("master_item"),
-            "activities": table_count("log_aktivitas"),
+            "clients": table_count("clients"),
+            "leads": table_count("leads"),
+            "masterOptions": table_count("master_option"),
         }),
         push_error: None,
         changed_rows: 0,

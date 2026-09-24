@@ -12,6 +12,7 @@ use sha2::{Digest, Sha256};
 use url::Url;
 use zeroize::Zeroizing;
 
+use super::clients;
 use super::models::{CommandError, OperatorUser};
 // Seam transport: dekoder sel Hrana dan jalur SQLite lokal. SQL-nya sama,
 // yang berbeda hanya ke mana ia dikirim.
@@ -401,8 +402,8 @@ const LEGACY_STORED_VALUES_MESSAGE: &str = "This database was created by a pre-r
 const DATABASE_CHECK_CORE_TABLES: [&str; 4] = [
     "app_role",
     "master_operator",
-    "master_item",
-    "log_aktivitas",
+    "clients",
+    "leads",
 ];
 
 #[derive(Clone, Debug, Serialize)]
@@ -420,8 +421,8 @@ pub struct DatabaseCheckResult {
     pub superadmin_count: i64,
     pub superadmin_username: Option<String>,
     pub operator_count: i64,
-    pub karyawan_count: i64,
-    pub attendance_count: i64,
+    pub client_count: i64,
+    pub lead_count: i64,
     pub company_name: Option<String>,
     pub error_code: Option<String>,
     pub error_message: Option<String>,
@@ -442,8 +443,8 @@ impl DatabaseCheckResult {
             superadmin_count: 0,
             superadmin_username: None,
             operator_count: 0,
-            karyawan_count: 0,
-            attendance_count: 0,
+            client_count: 0,
+            lead_count: 0,
             company_name: None,
             error_code: Some(error.code.to_owned()),
             error_message: Some(error.message.clone()),
@@ -609,14 +610,19 @@ struct SnapshotSource {
 /// `sync.rs`; ketidakcocokan membuat tabel itu tampak "tidak pernah berubah".
 const SNAPSHOT_SOURCES: &[SnapshotSource] = &[
     SnapshotSource {
-        payload_key: "items",
-        table: "master_item",
-        sql: "SELECT * FROM master_item ORDER BY kode_item;",
+        payload_key: "clients",
+        table: "clients",
+        sql: "SELECT * FROM clients ORDER BY created_at, id;",
     },
     SnapshotSource {
-        payload_key: "activities",
-        table: "log_aktivitas",
-        sql: "SELECT * FROM log_aktivitas ORDER BY waktu DESC LIMIT 5000;",
+        payload_key: "leads",
+        table: "leads",
+        sql: "SELECT * FROM leads ORDER BY created_at, id;",
+    },
+    SnapshotSource {
+        payload_key: "masterOptions",
+        table: "master_option",
+        sql: "SELECT * FROM master_option ORDER BY kind, sort_order, label;",
     },
     SnapshotSource {
         payload_key: "settings",
@@ -1342,10 +1348,9 @@ impl TursoClient {
                 r#"INSERT OR IGNORE INTO app_permission (permission_key, nama, grup, deskripsi, is_active, sort_order) VALUES
                 ('home.view', 'Home and navigation access', 'Navigation', 'View home and the app menu.', 1, 10),
                 ('dashboard.view', 'Dashboard access', 'Dashboard', 'View summaries and statistics.', 1, 20),
-                ('items.view', 'View items', 'Master data', 'View the item list.', 1, 30),
-                ('items.manage', 'Manage items', 'Master data', 'Add, edit, and deactivate items.', 1, 40),
-                ('activity.view', 'View activity log', 'Operations', 'View activity history.', 1, 50),
-                ('activity.record', 'Record activity', 'Operations', 'Record new activity.', 1, 60),
+                ('clients.view', 'View clients', 'Clients', 'View clients and their leads.', 1, 30),
+                ('clients.manage', 'Manage clients', 'Clients', 'Register new leads and edit client details.', 1, 40),
+                ('master_data.manage', 'Manage master data', 'Master data', 'Maintain lead channels and product categories.', 1, 50),
                 ('password_reset.view', 'View password reset history', 'Operators', 'Review who requested a password recovery, with their verification photo.', 1, 62),
                 ('password_reset.delete', 'Delete password reset history', 'Operators', 'Delete password recovery records and their photos.', 1, 64),
                 ('two_factor.reset', 'Reset another operator''s 2FA', 'Operators', 'Turn off two-step verification for another operator who lost their phone.', 1, 66),
@@ -1375,7 +1380,18 @@ impl TursoClient {
                 WHERE permission_key NOT IN (
                     'roles.manage', 'operators.manage', 'operators.view', 'diagnostics.view',
                     'password_reset.delete', 'two_factor.reset', 'password_reset.approve',
-                    'database_backup.restore', 'items.manage', 'settings.manage'
+                    'database_backup.restore', 'settings.manage'
+                );"#,
+                vec![],
+            ),
+            // Operator bawaan bekerja sebagai CS sampai role divisi dibuat
+            // (PRD F-02). WAJIB sama dengan `DEFAULT_ROLE_PERMISSIONS.operator`
+            // di `catalog.ts` dan seed role 3 di `db-schema.ts`.
+            Statement::new(
+                r#"INSERT OR IGNORE INTO role_permission (role_id, permission_key, is_allowed, updated_at, updated_by)
+                SELECT 3, permission_key, 1, datetime('now'), 'system' FROM app_permission
+                WHERE permission_key IN (
+                    'home.view', 'dashboard.view', 'clients.view', 'clients.manage', 'sync.view'
                 );"#,
                 vec![],
             ),
@@ -1403,50 +1419,90 @@ impl TursoClient {
             Statement::new(
                 r#"INSERT OR IGNORE INTO schema_migration (version, name, applied_at) VALUES
                 (1, 'template-foundation-v1', datetime('now')),
-                (2, 'password-reset-and-two-factor', datetime('now'));"#,
+                (2, 'password-reset-and-two-factor', datetime('now')),
+                (3, 'clients-leads-master-data', datetime('now'));"#,
                 vec![],
             ),
-            // ============ DOMAIN CONTOH — GANTI DENGAN MILIK ANDA ============
-            // Kolom di sini WAJIB identik dengan DDL lokal di `storage.rs`,
-            // `SNAPSHOT_TABLES` di `sync.rs`, dan `db-schema.ts`. Satu kolom yang
-            // berbeda ejaan membuat push tabel itu gagal permanen.
+            // ============ DOMAIN MAKLONOS ============
+            // Kolom di sini WAJIB identik dengan `db-schema.ts` dan, untuk tabel
+            // yang ikut sinkronisasi, dengan DDL lokal di `storage.rs` serta
+            // `SNAPSHOT_TABLES` di `sync.rs`. Satu kolom yang berbeda ejaan membuat
+            // push tabel itu gagal permanen. Tanpa CHECK, FOREIGN KEY, dan UNIQUE
+            // (keputusan G): nilai dan keunikan dijaga aplikasi (`clients.rs`).
             Statement::new(
-                r#"CREATE TABLE IF NOT EXISTS master_item (
-                    id_item INTEGER PRIMARY KEY AUTOINCREMENT,
-                    kode_item TEXT NOT NULL UNIQUE,
-                    nama TEXT NOT NULL,
-                    kategori TEXT,
-                    harga INTEGER NOT NULL DEFAULT 0 CHECK (harga >= 0),
-                    satuan TEXT,
-                    catatan TEXT,
-                    status_aktif TEXT NOT NULL DEFAULT 'Active'
-                        CHECK (status_aktif IN ('Active', 'Inactive')),
-                    update_terakhir TEXT NOT NULL
+                r#"CREATE TABLE IF NOT EXISTS clients (
+                    id TEXT PRIMARY KEY,
+                    client_code TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    phone_normalized TEXT NOT NULL,
+                    address TEXT NOT NULL DEFAULT '',
+                    city TEXT NOT NULL DEFAULT '',
+                    province TEXT NOT NULL DEFAULT '',
+                    lifecycle_status TEXT NOT NULL DEFAULT 'LEAD',
+                    free_revision_limit INTEGER NOT NULL DEFAULT 1,
+                    is_white_label INTEGER NOT NULL DEFAULT 0,
+                    assigned_crm_id INTEGER,
+                    created_by INTEGER,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
                 );"#,
                 vec![],
             ),
             Statement::new(
-                r#"CREATE TABLE IF NOT EXISTS log_aktivitas (
-                    id_log INTEGER PRIMARY KEY AUTOINCREMENT,
-                    event_key TEXT NOT NULL UNIQUE,
-                    kode_item TEXT NOT NULL,
-                    jenis TEXT NOT NULL,
-                    jumlah INTEGER NOT NULL DEFAULT 0,
-                    keterangan TEXT,
-                    kode_operator TEXT,
-                    waktu TEXT NOT NULL
+                r#"CREATE TABLE IF NOT EXISTS leads (
+                    id TEXT PRIMARY KEY,
+                    client_id TEXT NOT NULL,
+                    pic_cs_id INTEGER,
+                    channel_option_id TEXT NOT NULL,
+                    product_category_option_id TEXT NOT NULL,
+                    needs_notes TEXT NOT NULL DEFAULT '',
+                    last_followup_at TEXT NOT NULL DEFAULT '',
+                    last_client_response_at TEXT NOT NULL DEFAULT '',
+                    total_followups INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
                 );"#,
                 vec![],
             ),
             Statement::new(
-                "CREATE INDEX IF NOT EXISTS idx_item_status ON master_item(status_aktif);",
+                r#"CREATE TABLE IF NOT EXISTS master_option (
+                    id TEXT PRIMARY KEY,
+                    kind TEXT NOT NULL,
+                    code TEXT NOT NULL,
+                    label TEXT NOT NULL,
+                    is_active INTEGER NOT NULL DEFAULT 1,
+                    sort_order INTEGER NOT NULL DEFAULT 0,
+                    updated_at TEXT NOT NULL
+                );"#,
+                vec![],
+            ),
+            // Cloud-only: tag dua karakter untuk setiap perangkat, bagian `<KP>`
+            // dari kode klien. Tidak ikut sinkronisasi, jadi UNIQUE aman.
+            Statement::new(
+                r#"CREATE TABLE IF NOT EXISTS device_tag_registry (
+                    tag TEXT PRIMARY KEY,
+                    client_id TEXT NOT NULL UNIQUE,
+                    registered_at TEXT NOT NULL
+                );"#,
                 vec![],
             ),
             Statement::new(
-                "CREATE INDEX IF NOT EXISTS idx_aktivitas_item_waktu ON log_aktivitas(kode_item, waktu);",
+                "CREATE INDEX IF NOT EXISTS idx_clients_phone ON clients(phone_normalized);",
                 vec![],
             ),
-            // =================================================================
+            Statement::new(
+                "CREATE INDEX IF NOT EXISTS idx_clients_code ON clients(client_code);",
+                vec![],
+            ),
+            Statement::new(
+                "CREATE INDEX IF NOT EXISTS idx_leads_client ON leads(client_id);",
+                vec![],
+            ),
+            Statement::new(
+                "CREATE INDEX IF NOT EXISTS idx_master_option_kind ON master_option(kind, sort_order);",
+                vec![],
+            ),
+            // =========================================
 
         ];
 
@@ -1560,11 +1616,7 @@ impl TursoClient {
         // meskipun tidak ada baris baru, sehingga id melompat (mis. 7 -> 69 -> 111).
         // Dijalankan sekali saja karena ensure_schema hanya dipanggil ketika penanda
         // migrasi -2004 belum ada.
-        for (table, primary_key) in [
-            ("master_item", "id_item"),
-            ("log_aktivitas", "id_log"),
-            ("master_operator", "id"),
-        ] {
+        for (table, primary_key) in [("master_operator", "id")] {
             let realign = format!(
                 "UPDATE sqlite_sequence SET seq = (SELECT COALESCE(MAX({primary_key}), 0) FROM {table}) WHERE name = '{table}' AND seq > (SELECT COALESCE(MAX({primary_key}), 0) FROM {table});"
             );
@@ -1600,6 +1652,11 @@ impl TursoClient {
         .await?;
         self.query_one(
             "INSERT OR IGNORE INTO schema_migration (version, name, applied_at) VALUES (-2010, 'english-stored-values-v1', datetime('now'));",
+            vec![],
+        )
+        .await?;
+        self.query_one(
+            "INSERT OR IGNORE INTO schema_migration (version, name, applied_at) VALUES (-2011, 'clients-leads-master-data-v1', datetime('now'));",
             vec![],
         )
         .await?;
@@ -1769,7 +1826,7 @@ impl TursoClient {
             .query_one(
                 // Sentinel WAJIB dinaikkan setiap kali ensure_schema menambah
                 // tabel atau kolom — nilainya di sini dan pada INSERT harus sama.
-                "SELECT COUNT(*) AS total FROM schema_migration WHERE version = -2010;",
+                "SELECT COUNT(*) AS total FROM schema_migration WHERE version = -2011;",
                 vec![],
             )
             .await
@@ -1828,8 +1885,8 @@ impl TursoClient {
             superadmin_count: 0,
             superadmin_username: None,
             operator_count: 0,
-            karyawan_count: 0,
-            attendance_count: 0,
+            client_count: 0,
+            lead_count: 0,
             company_name: None,
             error_code: None,
             error_message: None,
@@ -1866,17 +1923,16 @@ impl TursoClient {
                 .count_scalar("SELECT COUNT(*) AS total FROM master_operator WHERE status = 'Active';")
                 .await?;
         }
-        // Statistik domain contoh. Ganti dua blok ini dengan hitungan yang
-        // benar-benar memberi tahu pengguna "database ini berisi data siapa"
-        // sebelum mereka menghubungkannya.
-        if has_table("master_item") {
-            check.karyawan_count = self
-                .count_scalar("SELECT COUNT(*) AS total FROM master_item;")
+        // "Database ini berisi data siapa": jumlah klien dan lead yang sudah ada,
+        // ditampilkan sebelum pengguna menghubungkannya.
+        if has_table("clients") {
+            check.client_count = self
+                .count_scalar("SELECT COUNT(*) AS total FROM clients;")
                 .await?;
         }
-        if has_table("log_aktivitas") {
-            check.attendance_count = self
-                .count_scalar("SELECT COUNT(*) AS total FROM log_aktivitas;")
+        if has_table("leads") {
+            check.lead_count = self
+                .count_scalar("SELECT COUNT(*) AS total FROM leads;")
                 .await?;
         }
         if has_table("setting_gex_system") {
@@ -1894,6 +1950,93 @@ impl TursoClient {
                 .filter(|name| !name.is_empty());
         }
         Ok(check)
+    }
+
+    /// Kode klien lain yang sudah memakai nomor WhatsApp ini, bila ada.
+    async fn phone_owner(&self, phone: &str, client_id: &str) -> Result<Option<String>, CommandError> {
+        if phone.is_empty() {
+            return Ok(None);
+        }
+        Ok(self
+            .query_one(
+                "SELECT client_code FROM clients WHERE phone_normalized = ? AND id <> ? LIMIT 1;",
+                vec![json!(phone), json!(client_id)],
+            )
+            .await?
+            .to_objects()
+            .into_iter()
+            .next()
+            .and_then(|row| row.get("client_code").and_then(Value::as_str).map(str::to_owned)))
+    }
+
+    async fn device_tag_of(&self, client_id: &str) -> Result<Option<String>, CommandError> {
+        Ok(self
+            .query_one(
+                "SELECT tag FROM device_tag_registry WHERE client_id = ? LIMIT 1;",
+                vec![json!(client_id)],
+            )
+            .await?
+            .to_objects()
+            .into_iter()
+            .next()
+            .and_then(|row| row.get("tag").and_then(Value::as_str).map(str::to_owned)))
+    }
+
+    /// Terbitkan tag perangkat (bagian `<KP>` kode klien) untuk `client_id`
+    /// ini, atau kembalikan tag yang sudah pernah diterbitkan.
+    ///
+    /// Tag Web (`client_code_web_tag`) tidak pernah diberikan ke perangkat.
+    /// `INSERT OR IGNORE` + baca ulang membuat dua perangkat yang mendaftar
+    /// bersamaan tidak pernah mendapat tag yang sama: PK `tag` menolak yang
+    /// kalah, dan ia mencoba tag berikutnya.
+    pub async fn register_device_tag(&self, client_id: &str, web_tag: &str) -> Result<String, CommandError> {
+        self.ensure_schema_current().await?;
+        if let Some(tag) = self.device_tag_of(client_id).await? {
+            return Ok(tag);
+        }
+        let taken = self
+            .count_scalar("SELECT COUNT(*) AS total FROM device_tag_registry;")
+            .await?
+            .max(0) as u32;
+        for index in (taken + 1)..=clients::MAX_CLIENT_SEQUENCE {
+            let Some(tag) = clients::device_tag_from_index(index) else {
+                break;
+            };
+            if tag == web_tag {
+                continue;
+            }
+            let _ = self
+                .query_one(
+                    "INSERT OR IGNORE INTO device_tag_registry (tag, client_id, registered_at) VALUES (?, ?, datetime('now'));",
+                    vec![json!(tag), json!(client_id)],
+                )
+                .await;
+            if let Some(tag) = self.device_tag_of(client_id).await? {
+                return Ok(tag);
+            }
+        }
+        Err(CommandError::new(
+            "DEVICE_TAG_EXHAUSTED",
+            "No device tags are left in this database.",
+        ))
+    }
+
+    /// Apakah tag ini sudah diberikan ke salah satu perangkat.
+    pub async fn device_tag_taken(&self, tag: &str) -> Result<bool, CommandError> {
+        self.ensure_schema_current().await?;
+        Ok(self
+            .query_one(
+                "SELECT COUNT(*) AS total FROM device_tag_registry WHERE tag = ?;",
+                vec![json!(tag)],
+            )
+            .await?
+            .to_objects()
+            .into_iter()
+            .next()
+            .and_then(|row| row.get("total").cloned())
+            .and_then(|value| value.as_i64().or_else(|| value.as_str().and_then(|text| text.parse().ok())))
+            .unwrap_or(0)
+            > 0)
     }
 
     async fn count_scalar(&self, sql: &str) -> Result<i64, CommandError> {
@@ -2782,6 +2925,33 @@ impl TursoClient {
             // hierarki prioritas sumber operasional dan konkurensi optimistis
             // ditegakkan SEBELUM mutasi disusun. Tambahkan guard Anda di sini
             // bila domain Anda punya aturan "siapa boleh menimpa siapa".
+            //
+            // Nomor WhatsApp unik per database, dijaga aplikasi (bukan UNIQUE).
+            // Dua perangkat offline yang mendaftarkan nomor sama: yang kedua
+            // tiba menjadi konflik yang menyebut pemilik nomornya (PRD E-04).
+            // ponytail: ada jeda sempit antara pemeriksaan ini dan transaksi
+            // mutasinya; bila dua push untuk nomor sama tiba di milidetik yang
+            // sama, keduanya bisa lolos. Pindahkan ke guard di dalam transaksi
+            // bila itu pernah terjadi.
+            if domain == "client" {
+                let phone = parsed_payload
+                    .get("phone_normalized")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                if let Some(owner) = self.phone_owner(phone, entity_key).await? {
+                    let message = format!(
+                        "The WhatsApp number {phone} is already registered to client {owner}."
+                    );
+                    push_results.push(json!({
+                        "eventId": event_id,
+                        "status": "conflict",
+                        "reason": message.clone(),
+                        "message": message,
+                        "serverRevision": 0
+                    }));
+                    continue;
+                }
+            }
 
             let collector = StatementCollector::default();
             if let Err(error) =
@@ -3501,17 +3671,16 @@ impl TursoClient {
 /// Daftar ini WAJIB sama persis dengan `CANONICAL_SYNC_ROUTES` di `sync.rs`.
 fn canonical_sync_route(domain: &str, operation: &str) -> Option<(&'static str, &'static str)> {
     let canonical_domain = match domain {
-        "item" | "master_item" => "item",
-        "activity" | "log_aktivitas" | "activity_log" => "activity",
+        "client" | "clients" => "client",
+        "master-option" | "master_option" => "master-option",
         "setting" | "setting_gex_system" => "setting",
         "company-profile" | "company_profile" => "company-profile",
         _ => return None,
     };
     let canonical_operation = match (canonical_domain, operation) {
-        ("item", "create") => "create",
-        ("item", "update") => "update",
-        ("item", "delete") => "delete",
-        ("activity", "record" | "create") => "record",
+        ("client", "register") => "register",
+        ("client", "update") => "update",
+        ("master-option", "upsert") => "upsert",
         ("setting", "update") => "update",
         ("setting", "upsert") => "upsert",
         ("company-profile", "update") => "update",
@@ -3568,100 +3737,136 @@ async fn apply_event_to_turso(
     };
 
     match (domain, operation) {
-        ("item", "create" | "update") => {
-            let kode_item = payload
-                .get("kode_item")
-                .and_then(Value::as_str)
-                .filter(|value| !value.is_empty())
-                .unwrap_or(entity_key);
-            let nama = text("nama");
-            if kode_item.is_empty() || nama.chars().count() < 2 {
+        ("client", "register" | "update") => {
+            // Satu event membawa baris `clients` DAN `leads` supaya registrasi
+            // tidak pernah tiba separuh. `client_code`, `created_by`, dan
+            // `created_at` tidak pernah berubah setelah registrasi; kolom
+            // interaksi lead (`last_*`, `total_followups`) milik F-05 dan tidak
+            // ditimpa pengubahan profil dari perangkat lain.
+            let lead_id = text("lead_id");
+            let name = text("name");
+            let phone = text("phone_normalized");
+            let code = text("client_code");
+            let lifecycle = text("lifecycle_status");
+            let valid = !entity_key.is_empty()
+                && !lead_id.is_empty()
+                && !code.is_empty()
+                && name.trim().chars().count() >= clients::CLIENT_NAME_MIN
+                && clients::normalize_whatsapp(&phone).as_deref() == Some(phone.as_str())
+                && !text("channel_option_id").is_empty()
+                && !text("product_category_option_id").is_empty()
+                && clients::CLIENT_LIFECYCLE_STATUSES.contains(&lifecycle.as_str());
+            if !valid {
                 return Err(CommandError::new(
                     "TURSO_SYNC_PAYLOAD_INVALID",
-                    "Item wajib memiliki kode dan nama minimal dua karakter.",
+                    "The client payload is incomplete or invalid.",
                 ));
             }
-            let status = match text("status_aktif").as_str() {
-                "Inactive" => "Inactive",
-                _ => "Active",
+            let optional_id = |key: &str| -> Value {
+                payload
+                    .get(key)
+                    .filter(|value| value.is_i64())
+                    .cloned()
+                    .unwrap_or(Value::Null)
             };
             turso
                 .query_one(
-                    r#"INSERT INTO master_item
-                        (kode_item, nama, kategori, harga, satuan, catatan, status_aktif, update_terakhir)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))
-                       ON CONFLICT(kode_item) DO UPDATE SET
-                         nama = excluded.nama,
-                         kategori = excluded.kategori,
-                         harga = excluded.harga,
-                         satuan = excluded.satuan,
-                         catatan = excluded.catatan,
-                         status_aktif = excluded.status_aktif,
-                         update_terakhir = excluded.update_terakhir;"#,
+                    r#"INSERT INTO clients
+                        (id, client_code, name, phone_normalized, address, city, province,
+                         lifecycle_status, free_revision_limit, is_white_label, assigned_crm_id,
+                         created_by, created_at, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                       ON CONFLICT(id) DO UPDATE SET
+                         name = excluded.name,
+                         phone_normalized = excluded.phone_normalized,
+                         address = excluded.address,
+                         city = excluded.city,
+                         province = excluded.province,
+                         lifecycle_status = excluded.lifecycle_status,
+                         free_revision_limit = excluded.free_revision_limit,
+                         is_white_label = excluded.is_white_label,
+                         assigned_crm_id = excluded.assigned_crm_id,
+                         updated_at = excluded.updated_at;"#,
                     vec![
-                        json!(kode_item),
-                        json!(nama),
-                        json!(text("kategori")),
-                        json!(number("harga")),
-                        json!(text("satuan")),
-                        json!(text("catatan")),
-                        json!(status),
+                        json!(entity_key),
+                        json!(code),
+                        json!(name),
+                        json!(phone),
+                        json!(text("address")),
+                        json!(text("city")),
+                        json!(text("province")),
+                        json!(lifecycle),
+                        json!(number("free_revision_limit")),
+                        json!(number("is_white_label")),
+                        optional_id("assigned_crm_id"),
+                        optional_id("created_by"),
+                        json!(text("created_at")),
+                        json!(text("updated_at")),
+                    ],
+                )
+                .await?;
+            turso
+                .query_one(
+                    r#"INSERT INTO leads
+                        (id, client_id, pic_cs_id, channel_option_id, product_category_option_id,
+                         needs_notes, last_followup_at, last_client_response_at, total_followups,
+                         created_at, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                       ON CONFLICT(id) DO UPDATE SET
+                         channel_option_id = excluded.channel_option_id,
+                         product_category_option_id = excluded.product_category_option_id,
+                         needs_notes = excluded.needs_notes,
+                         updated_at = excluded.updated_at;"#,
+                    vec![
+                        json!(lead_id),
+                        json!(entity_key),
+                        optional_id("pic_cs_id"),
+                        json!(text("channel_option_id")),
+                        json!(text("product_category_option_id")),
+                        json!(text("needs_notes")),
+                        json!(text("last_followup_at")),
+                        json!(text("last_client_response_at")),
+                        json!(number("total_followups")),
+                        json!(text("created_at")),
+                        json!(text("updated_at")),
                     ],
                 )
                 .await?;
         }
-        ("item", "delete") => {
-            if entity_key.is_empty() {
+        ("master-option", "upsert") => {
+            let kind = text("kind");
+            let code = text("code");
+            let label = text("label");
+            let valid = !entity_key.is_empty()
+                && clients::MASTER_OPTION_KINDS.contains(&kind.as_str())
+                && clients::normalize_option_code(&code).as_deref() == Some(code.as_str())
+                && !label.trim().is_empty()
+                && label.chars().count() <= clients::OPTION_LABEL_MAX;
+            if !valid {
                 return Err(CommandError::new(
                     "TURSO_SYNC_PAYLOAD_INVALID",
-                    "Penghapusan item wajib menyertakan kode item.",
+                    "The master data option is incomplete or invalid.",
                 ));
             }
+            // `kind` sengaja tidak ikut DO UPDATE: opsi tidak pernah pindah jenis.
             turso
                 .query_one(
-                    "DELETE FROM master_item WHERE kode_item = ?;",
-                    vec![json!(entity_key)],
-                )
-                .await?;
-        }
-        ("activity", "record") => {
-            let event_key = payload
-                .get("event_key")
-                .and_then(Value::as_str)
-                .filter(|value| !value.is_empty())
-                .unwrap_or(entity_key);
-            let kode_item = text("kode_item");
-            let jenis = text("jenis");
-            if event_key.is_empty() || kode_item.is_empty() || jenis.is_empty() {
-                return Err(CommandError::new(
-                    "TURSO_SYNC_PAYLOAD_INVALID",
-                    "Aktivitas wajib memiliki event_key, kode item, dan jenis.",
-                ));
-            }
-            let waktu = match text("waktu") {
-                value if value.is_empty() => chrono_like_now_iso(),
-                value => value,
-            };
-            // `DO UPDATE` (bukan `DO NOTHING`) supaya pengiriman ulang tetap
-            // menghasilkan mutasi. Statement yang tidak mengubah apa pun akan
-            // membuat event ditandai konflik oleh pemanggil.
-            turso
-                .query_one(
-                    r#"INSERT INTO log_aktivitas
-                        (event_key, kode_item, jenis, jumlah, keterangan, kode_operator, waktu)
+                    r#"INSERT INTO master_option (id, kind, code, label, is_active, sort_order, updated_at)
                        VALUES (?, ?, ?, ?, ?, ?, ?)
-                       ON CONFLICT(event_key) DO UPDATE SET
-                         jumlah = excluded.jumlah,
-                         keterangan = excluded.keterangan,
-                         waktu = excluded.waktu;"#,
+                       ON CONFLICT(id) DO UPDATE SET
+                         code = excluded.code,
+                         label = excluded.label,
+                         is_active = excluded.is_active,
+                         sort_order = excluded.sort_order,
+                         updated_at = excluded.updated_at;"#,
                     vec![
-                        json!(event_key),
-                        json!(kode_item),
-                        json!(jenis),
-                        json!(number("jumlah")),
-                        json!(text("keterangan")),
-                        json!(text("kode_operator")),
-                        json!(waktu),
+                        json!(entity_key),
+                        json!(kind),
+                        json!(code),
+                        json!(label),
+                        json!(i64::from(number("is_active") != 0)),
+                        json!(number("sort_order")),
+                        json!(text("updated_at")),
                     ],
                 )
                 .await?;
@@ -6107,15 +6312,16 @@ mod tests {
     fn sync_routes_are_canonicalized_and_unsupported_mutations_are_closed() {
         // Alias lama dinormalisasi ke bentuk kanonik...
         assert_eq!(
-            canonical_sync_route("master_item", "create"),
-            Some(("item", "create"))
+            canonical_sync_route("clients", "register"),
+            Some(("client", "register"))
         );
         assert_eq!(
-            canonical_sync_route("log_aktivitas", "create"),
-            Some(("activity", "record"))
+            canonical_sync_route("master_option", "upsert"),
+            Some(("master-option", "upsert"))
         );
         // ...dan pasangan yang tidak terdaftar ditolak, bukan diloloskan.
-        assert_eq!(canonical_sync_route("item", "truncate"), None);
+        assert_eq!(canonical_sync_route("client", "delete"), None);
+        assert_eq!(canonical_sync_route("item", "create"), None);
         assert_eq!(canonical_sync_route("pelanggan", "create"), None);
     }
 
@@ -6167,8 +6373,10 @@ mod tests {
                 "sync_operation_receipt",
                 "setting_gex_system",
                 "company_profile",
-                "master_item",
-                "log_aktivitas",
+                "clients",
+                "leads",
+                "master_option",
+                "device_tag_registry",
             ] {
                 let ada: i64 = connection
                     .query_row(
