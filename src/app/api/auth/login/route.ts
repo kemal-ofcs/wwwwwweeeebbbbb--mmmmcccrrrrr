@@ -14,6 +14,7 @@ import {
   ensureServerDatabaseInitialized,
   getServerDatabase,
 } from "@/lib/server/db";
+import { toApiErrorResponse } from "@/lib/server/http/api-response";
 import {
   JsonBodyError,
   readBoundedJsonBody,
@@ -66,75 +67,83 @@ export async function POST(request: NextRequest) {
     return errorResponse("Wrong username or password.", 401);
   }
 
-  await ensureServerDatabaseInitialized();
-  const database = getServerDatabase();
-  const clientAddress = getClientAddress(request);
-  const rateLimit = await consumeLoginAttempt(
-    database,
-    clientAddress,
-    username,
-  );
-  if (!rateLimit.allowed) {
-    const minutes = Math.floor(rateLimit.retryAfterSeconds / 60);
-    const seconds = rateLimit.retryAfterSeconds % 60;
-    const timeStr =
-      minutes > 0
-        ? `${minutes} minutes${seconds > 0 ? ` ${seconds} seconds` : ""}`
-        : `${seconds} seconds`;
-    const response = errorResponse(
-      `Too many sign-in attempts. The account is temporarily locked for security. Wait ${timeStr} before trying again.`,
-      429,
+  // Tanpa penangkap ini, error database (URL/token salah, skema pra-rilis,
+  // Turso tidak terjangkau) menjadi halaman 500 non-JSON dan layar login hanya
+  // bisa berkata "Invalid authentication response." tanpa penyebab.
+  try {
+    await ensureServerDatabaseInitialized();
+    const database = getServerDatabase();
+    const clientAddress = getClientAddress(request);
+    const rateLimit = await consumeLoginAttempt(
+      database,
+      clientAddress,
+      username,
     );
-    response.headers.set("Retry-After", String(rateLimit.retryAfterSeconds));
+    if (!rateLimit.allowed) {
+      const minutes = Math.floor(rateLimit.retryAfterSeconds / 60);
+      const seconds = rateLimit.retryAfterSeconds % 60;
+      const timeStr =
+        minutes > 0
+          ? `${minutes} minutes${seconds > 0 ? ` ${seconds} seconds` : ""}`
+          : `${seconds} seconds`;
+      const response = errorResponse(
+        `Too many sign-in attempts. The account is temporarily locked for security. Wait ${timeStr} before trying again.`,
+        429,
+      );
+      response.headers.set("Retry-After", String(rateLimit.retryAfterSeconds));
+      return response;
+    }
+
+    const operator = await authenticateWebOperator(username, password);
+    if (!operator) {
+      return errorResponse("Wrong username or password.", 401);
+    }
+
+    // Gerbang 2FA dijalankan SETELAH password terbukti benar, supaya layar login
+    // tidak bisa dipakai memetakan akun mana yang memakai verifikasi dua langkah.
+    const gate = await evaluateTwoFactorGate(
+      database,
+      operator.id,
+      typeof body.totpCode === "string" ? body.totpCode : undefined,
+    );
+    if (gate.outcome === "code_required" || gate.outcome === "code_invalid") {
+      const pesan =
+        gate.outcome === "code_required"
+          ? "Enter the 6-digit code from your authenticator app."
+          : "The verification code does not match. Check the latest code in your authenticator app.";
+      // Penanda `requiresTotp` yang membuat form login menampilkan kolom kode;
+      // password sudah benar, jadi memberitahukannya di sini tidak membocorkan
+      // apa pun yang belum diketahui pemanggil.
+      return NextResponse.json(
+        { sukses: false, pesan, requiresTotp: true },
+        { status: 401, headers: { "Cache-Control": "no-store" } },
+      );
+    }
+    if (gate.outcome === "enrollment_required") {
+      return errorResponse(
+        "This account's role requires two-step verification, but your account has not enrolled yet. Ask an Admin to open 2FA enrollment.",
+        403,
+      );
+    }
+
+    await clearLoginFailures(database, clientAddress, username);
+
+    const session = await createWebSession(
+      operator,
+      request.headers.get("user-agent"),
+    );
+    const response = NextResponse.json(
+      { sukses: true, pesan: "Signed in.", operator },
+      { headers: { "Cache-Control": "no-store" } },
+    );
+    response.cookies.set(
+      WEB_SESSION_COOKIE,
+      session.token,
+      getWebSessionCookieOptions(process.env.NODE_ENV === "production"),
+    );
     return response;
+  } catch (error) {
+    console.error("[auth/login]", error);
+    return toApiErrorResponse(error);
   }
-
-  const operator = await authenticateWebOperator(username, password);
-  if (!operator) {
-    return errorResponse("Wrong username or password.", 401);
-  }
-
-  // Gerbang 2FA dijalankan SETELAH password terbukti benar, supaya layar login
-  // tidak bisa dipakai memetakan akun mana yang memakai verifikasi dua langkah.
-  const gate = await evaluateTwoFactorGate(
-    database,
-    operator.id,
-    typeof body.totpCode === "string" ? body.totpCode : undefined,
-  );
-  if (gate.outcome === "code_required" || gate.outcome === "code_invalid") {
-    const pesan =
-      gate.outcome === "code_required"
-        ? "Enter the 6-digit code from your authenticator app."
-        : "The verification code does not match. Check the latest code in your authenticator app.";
-    // Penanda `requiresTotp` yang membuat form login menampilkan kolom kode;
-    // password sudah benar, jadi memberitahukannya di sini tidak membocorkan
-    // apa pun yang belum diketahui pemanggil.
-    return NextResponse.json(
-      { sukses: false, pesan, requiresTotp: true },
-      { status: 401, headers: { "Cache-Control": "no-store" } },
-    );
-  }
-  if (gate.outcome === "enrollment_required") {
-    return errorResponse(
-      "This account's role requires two-step verification, but your account has not enrolled yet. Ask an Admin to open 2FA enrollment.",
-      403,
-    );
-  }
-
-  await clearLoginFailures(database, clientAddress, username);
-
-  const session = await createWebSession(
-    operator,
-    request.headers.get("user-agent"),
-  );
-  const response = NextResponse.json(
-    { sukses: true, pesan: "Signed in.", operator },
-    { headers: { "Cache-Control": "no-store" } },
-  );
-  response.cookies.set(
-    WEB_SESSION_COOKIE,
-    session.token,
-    getWebSessionCookieOptions(process.env.NODE_ENV === "production"),
-  );
-  return response;
 }

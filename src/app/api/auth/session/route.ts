@@ -4,6 +4,7 @@ import {
   WEB_SESSION_COOKIE,
 } from "@/lib/auth/web-session";
 import { readWebSession, revokeWebSession } from "@/lib/server/auth/session";
+import { toApiErrorResponse } from "@/lib/server/http/api-response";
 import { isSameOriginMutation } from "@/lib/server/http/request-security";
 
 export const runtime = "nodejs";
@@ -20,13 +21,18 @@ export async function POST(request: NextRequest) {
     return noStoreJson({ sukses: false, pesan: "Origin not allowed." }, 403);
   }
 
-  const token = request.cookies.get(WEB_SESSION_COOKIE)?.value ?? "";
-  const operator = await readWebSession(token);
-  if (!operator) {
-    return noStoreJson({ sukses: false, operator: null }, 401);
-  }
+  try {
+    const token = request.cookies.get(WEB_SESSION_COOKIE)?.value ?? "";
+    const operator = await readWebSession(token);
+    if (!operator) {
+      return noStoreJson({ sukses: false, operator: null }, 401);
+    }
 
-  return noStoreJson({ sukses: true, operator });
+    return noStoreJson({ sukses: true, operator });
+  } catch (error) {
+    console.error("[auth/session]", error);
+    return toApiErrorResponse(error);
+  }
 }
 
 export async function DELETE(request: NextRequest) {
