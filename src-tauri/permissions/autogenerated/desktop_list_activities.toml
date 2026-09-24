@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-desktop-list-activities"
+description = "Enables the desktop_list_activities command without any pre-configured scope."
+commands.allow = ["desktop_list_activities"]
+
+[[permission]]
+identifier = "deny-desktop-list-activities"
+description = "Denies the desktop_list_activities command without any pre-configured scope."
+commands.deny = ["desktop_list_activities"]

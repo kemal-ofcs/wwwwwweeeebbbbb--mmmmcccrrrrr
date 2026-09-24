@@ -1,0 +1,141 @@
+"use client";
+
+import {
+  clearForcedLogoutMarker,
+  hasForcedLogoutMarker,
+  setForcedLogoutMarker,
+} from "@/lib/auth/logout-marker";
+import type { OperatorUser } from "@/lib/auth/operator-user";
+import { isDesktopRuntime } from "@/lib/runtime/app-runtime";
+
+interface WebSessionSnapshot {
+  user: OperatorUser | null;
+  isLoading: boolean;
+}
+
+interface AuthApiResponse {
+  sukses: boolean;
+  pesan?: string;
+  operator?: OperatorUser | null;
+  /** Password sudah benar, tinggal kode verifikasi dua langkah. */
+  requiresTotp?: boolean;
+}
+
+const SERVER_SNAPSHOT: WebSessionSnapshot = { user: null, isLoading: true };
+let snapshot: WebSessionSnapshot = SERVER_SNAPSHOT;
+let started = false;
+const listeners = new Set<() => void>();
+
+function emit(next: WebSessionSnapshot) {
+  snapshot = next;
+  for (const listener of listeners) listener();
+}
+
+async function readResponse(response: Response) {
+  try {
+    return (await response.json()) as AuthApiResponse;
+  } catch {
+    return { sukses: false, pesan: "Invalid authentication response." };
+  }
+}
+
+export function subscribeWebSession(listener: () => void) {
+  listeners.add(listener);
+  if (!started && !isDesktopRuntime()) {
+    started = true;
+    void refreshWebSession();
+  }
+  return () => listeners.delete(listener);
+}
+
+export function getWebSessionSnapshot() {
+  return snapshot;
+}
+
+export function getWebSessionServerSnapshot() {
+  return SERVER_SNAPSHOT;
+}
+
+export async function refreshWebSession() {
+  if (isDesktopRuntime()) return null;
+  if (hasForcedLogoutMarker()) {
+    emit({ user: null, isLoading: false });
+    try {
+      await fetch("/api/auth/session", {
+        method: "DELETE",
+        credentials: "same-origin",
+        cache: "no-store",
+        keepalive: true,
+      });
+    } catch {
+      // Marker mempertahankan status logout lokal sampai login baru berhasil.
+    }
+    return null;
+  }
+  try {
+    const response = await fetch("/api/auth/session", {
+      method: "POST",
+      credentials: "same-origin",
+      cache: "no-store",
+    });
+    const body = await readResponse(response);
+    const user = response.ok && body.sukses ? (body.operator ?? null) : null;
+    emit({ user, isLoading: false });
+    return user;
+  } catch {
+    emit({ user: null, isLoading: false });
+    return null;
+  }
+}
+
+export async function loginWebSession(
+  username: string,
+  password: string,
+  totpCode?: string,
+) {
+  try {
+    const response = await fetch("/api/auth/login", {
+      method: "POST",
+      credentials: "same-origin",
+      cache: "no-store",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username, password, totpCode }),
+    });
+    const body = await readResponse(response);
+    if (response.ok && body.sukses && body.operator) {
+      clearForcedLogoutMarker();
+      emit({ user: body.operator, isLoading: false });
+      return { sukses: true, pesan: body.pesan ?? "Signed in." };
+    }
+    emit({ user: null, isLoading: false });
+    return {
+      sukses: false,
+      requiresTotp: body.requiresTotp === true,
+      pesan: body.pesan ?? "Wrong username or password.",
+    };
+  } catch {
+    return {
+      sukses: false,
+      pesan: "The authentication server cannot be reached.",
+    };
+  }
+}
+
+export async function logoutWebSession() {
+  setForcedLogoutMarker();
+  emit({ user: null, isLoading: false });
+  try {
+    await fetch("/api/auth/session", {
+      method: "DELETE",
+      credentials: "same-origin",
+      cache: "no-store",
+      keepalive: true,
+    });
+  } catch {
+    // Logout lokal tetap final; revoke server dicoba lagi saat halaman dimuat.
+  }
+}
+
+export function invalidateWebSession() {
+  if (!isDesktopRuntime()) emit({ user: null, isLoading: false });
+}

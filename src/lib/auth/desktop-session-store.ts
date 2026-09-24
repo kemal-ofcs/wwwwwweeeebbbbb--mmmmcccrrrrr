@@ -1,0 +1,130 @@
+"use client";
+
+import {
+  clearForcedLogoutMarker,
+  hasForcedLogoutMarker,
+  setForcedLogoutMarker,
+} from "@/lib/auth/logout-marker";
+import type { OperatorUser } from "@/lib/auth/operator-user";
+import { isDesktopRuntime } from "@/lib/runtime/app-runtime";
+import { invokeDesktop } from "@/lib/runtime/desktop-commands";
+
+type DesktopSessionMode = "online" | "offline";
+
+interface DesktopLoginResponse {
+  sukses: boolean;
+  pesan: string;
+  operator: OperatorUser;
+  mode: DesktopSessionMode;
+  offlineReady: boolean;
+  offlineValidUntil?: number | null;
+}
+
+interface DesktopSessionSnapshot {
+  user: OperatorUser | null;
+  isLoading: boolean;
+  mode: DesktopSessionMode | null;
+}
+
+const SERVER_SNAPSHOT: DesktopSessionSnapshot = {
+  user: null,
+  isLoading: true,
+  mode: null,
+};
+let snapshot: DesktopSessionSnapshot = SERVER_SNAPSHOT;
+let started = false;
+const listeners = new Set<() => void>();
+
+function emit(next: DesktopSessionSnapshot) {
+  snapshot = next;
+  for (const listener of listeners) listener();
+}
+
+async function refreshDesktopSession() {
+  if (!isDesktopRuntime()) return null;
+  if (hasForcedLogoutMarker()) {
+    emit({ user: null, isLoading: false, mode: null });
+    try {
+      await invokeDesktop<void>("desktop_logout");
+    } catch {
+      // Marker mencegah sesi lama dipulihkan sampai login baru berhasil.
+    }
+    return null;
+  }
+  try {
+    const user = await invokeDesktop<OperatorUser | null>(
+      "desktop_get_session",
+    );
+    emit({ user, isLoading: false, mode: null });
+    return user;
+  } catch {
+    emit({ user: null, isLoading: false, mode: null });
+    return null;
+  }
+}
+
+export function subscribeDesktopSession(listener: () => void) {
+  listeners.add(listener);
+  if (!started && isDesktopRuntime()) {
+    started = true;
+    void refreshDesktopSession();
+  }
+  return () => listeners.delete(listener);
+}
+
+export function getDesktopSessionSnapshot() {
+  return snapshot;
+}
+
+export function getDesktopSessionServerSnapshot() {
+  return SERVER_SNAPSHOT;
+}
+
+export async function loginDesktopSession(
+  identifier: string,
+  password: string,
+  totpCode?: string,
+) {
+  let result: DesktopLoginResponse;
+  try {
+    result = await invokeDesktop<DesktopLoginResponse>("desktop_login", {
+      identifier,
+      password,
+      totpCode: totpCode ?? null,
+    });
+  } catch (error) {
+    // Rust menandai keadaan 2FA lewat kode error, bukan lewat balasan sukses,
+    // karena sesi memang belum boleh terbentuk sampai kodenya terbukti benar.
+    const message =
+      error instanceof Error ? error.message : "Desktop sign-in failed.";
+    const requiresTotp =
+      message.includes("aplikasi autentikator") ||
+      message.includes("6-digit code");
+    emit({ user: null, isLoading: false, mode: null });
+    return { sukses: false, pesan: message, requiresTotp };
+  }
+  if (!result.sukses || !result.operator) {
+    emit({ user: null, isLoading: false, mode: null });
+    return {
+      sukses: false,
+      pesan: result.pesan || "Desktop sign-in failed.",
+    };
+  }
+  clearForcedLogoutMarker();
+  emit({ user: result.operator, isLoading: false, mode: result.mode });
+  return { sukses: true, pesan: result.pesan };
+}
+
+export async function logoutDesktopSession() {
+  setForcedLogoutMarker();
+  emit({ user: null, isLoading: false, mode: null });
+  try {
+    await invokeDesktop<void>("desktop_logout");
+  } catch {
+    // Logout UI tetap final; command dicoba lagi setelah reload.
+  }
+}
+
+export function invalidateDesktopSession() {
+  emit({ user: null, isLoading: false, mode: null });
+}

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-desktop-list-items"
+description = "Enables the desktop_list_items command without any pre-configured scope."
+commands.allow = ["desktop_list_items"]
+
+[[permission]]
+identifier = "deny-desktop-list-items"
+description = "Denies the desktop_list_items command without any pre-configured scope."
+commands.deny = ["desktop_list_items"]

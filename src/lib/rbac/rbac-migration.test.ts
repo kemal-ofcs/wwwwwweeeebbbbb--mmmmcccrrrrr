@@ -1,0 +1,195 @@
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { fileURLToPath } from "node:url";
+import { type Client, createClient } from "@libsql/client";
+import {
+  hashPassword,
+  hashVerifiedPasswordForUpgrade,
+  verifyPassword,
+} from "@/lib/auth/password";
+import { runDatabaseMigrations } from "@/lib/db-migrations";
+import { initDatabaseSchema, isDatabaseSchemaReady } from "@/lib/db-schema";
+import {
+  DEFAULT_ROLE_PERMISSIONS,
+  SUPERADMIN_ONLY_PERMISSIONS,
+} from "@/lib/rbac/catalog";
+
+let client: Client;
+
+beforeAll(async () => {
+  client = createClient({ url: "file::memory:" });
+  await client.execute(`
+    CREATE TABLE master_operator (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      kode_operator TEXT UNIQUE NOT NULL,
+      nama_operator TEXT NOT NULL,
+      username TEXT UNIQUE NOT NULL,
+      password_hash TEXT NOT NULL,
+      role TEXT NOT NULL CHECK(role IN ('Admin', 'Operator', 'Scanner')),
+      status TEXT DEFAULT 'Active'
+    );
+  `);
+  await client.execute(`
+    CREATE TABLE setting_gex_system (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL
+    );
+  `);
+  await client.execute(`
+    INSERT INTO master_operator (
+      kode_operator, nama_operator, username, password_hash, role, status
+    ) VALUES ('OP001', 'Admin Lama', 'admin', 'legacy-password', 'Admin', 'Active');
+  `);
+});
+
+afterAll(() => client.close());
+
+describe("dynamic RBAC migration", () => {
+  test("mendeteksi skema siap agar request berikutnya melewati migrasi", async () => {
+    await initDatabaseSchema(client);
+    expect(await isDatabaseSchemaReady(client)).toBe(true);
+    await initDatabaseSchema(client);
+  });
+
+  test("migrasi idempotent dan mempertahankan operator lama", async () => {
+    await runDatabaseMigrations(client);
+    await runDatabaseMigrations(client);
+
+    const roles = await client.execute(
+      "SELECT role_key FROM app_role ORDER BY role_key;",
+    );
+    expect(roles.rows.map((row) => String(row.role_key))).toEqual([
+      "admin",
+      "operator",
+      "superadmin",
+    ]);
+
+    // Katalog permission yang di-seed harus utuh: role Superadmin memegang
+    // seluruh katalog, dan tidak boleh ada permission yang tercecer.
+    const superadminPermissions = await client.execute(`
+      SELECT COUNT(*) AS total
+      FROM role_permission rp
+      JOIN app_role r ON r.id = rp.role_id
+      WHERE r.role_key = 'superadmin' AND rp.is_allowed = 1;
+    `);
+    const catalogSize = await client.execute(
+      "SELECT COUNT(*) AS total FROM app_permission;",
+    );
+    expect(Number(superadminPermissions.rows[0]?.total)).toBe(
+      Number(catalogSize.rows[0]?.total),
+    );
+
+    const migrations = await client.execute(
+      "SELECT version FROM schema_migration ORDER BY version;",
+    );
+    // Versi 2 adalah kontak operator + pemulihan password + 2FA. Setiap
+    // migrasi baru harus muncul di daftar ini, supaya database hasil migrasi
+    // terbukti sampai pada versi yang sama dengan database yang baru dibuat.
+    expect(migrations.rows.map((row) => Number(row.version))).toEqual([1, 2]);
+
+    const sessionColumns = await client.execute(
+      "PRAGMA table_info(app_session);",
+    );
+    expect(sessionColumns.rows.map((row) => String(row.name))).toEqual(
+      expect.arrayContaining([
+        "session_id",
+        "token_hash",
+        "operator_id",
+        "expires_at",
+        "revoked_at",
+      ]),
+    );
+  });
+
+  test("permission khusus Superadmin tidak masuk default role lain", () => {
+    for (const permissions of Object.values(DEFAULT_ROLE_PERMISSIONS)) {
+      expect(
+        permissions.some((permission) =>
+          SUPERADMIN_ONLY_PERMISSIONS.has(permission),
+        ),
+      ).toBe(false);
+    }
+  });
+});
+
+describe("password hashing", () => {
+  test("memverifikasi PBKDF2 dan mengenali password legacy", async () => {
+    const password = "PasswordAman2026";
+    const stored = await hashPassword(password);
+
+    expect(await verifyPassword(password, stored)).toEqual({
+      valid: true,
+      needsUpgrade: false,
+    });
+    expect((await verifyPassword("PasswordSalah1", stored)).valid).toBe(false);
+    expect(await verifyPassword("legacy-password", "legacy-password")).toEqual({
+      valid: true,
+      needsUpgrade: true,
+    });
+    const upgraded = await hashVerifiedPasswordForUpgrade("legacy-password");
+    expect(await verifyPassword("legacy-password", upgraded)).toEqual({
+      valid: true,
+      needsUpgrade: false,
+    });
+  }, 20000);
+});
+
+describe("provisioning silang Web dan Desktop/Mobile", () => {
+  test("migrasi menambal kolom yang hanya dibuat jalur Rust", async () => {
+    // Database yang lahir dari versi lama: `master_operator` tanpa kolom yang
+    // kini dibuat kedua jalur provisioning. Migrasi Web wajib menambalnya,
+    // supaya klien yang tidak membuat kolom itu tetap bisa memakainya.
+    const legacyClient = createClient({ url: "file::memory:" });
+    try {
+      await legacyClient.execute(`
+        CREATE TABLE master_operator (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          kode_operator TEXT UNIQUE NOT NULL,
+          nama_operator TEXT NOT NULL,
+          username TEXT UNIQUE NOT NULL,
+          password_hash TEXT NOT NULL,
+          role TEXT NOT NULL DEFAULT 'Operator',
+          status TEXT NOT NULL DEFAULT 'Active'
+        );
+      `);
+      await initDatabaseSchema(legacyClient);
+
+      const info = await legacyClient.execute(
+        "PRAGMA table_info(master_operator);",
+      );
+      const columns = info.rows.map((row) => String(row.name));
+      expect(columns).toContain("role_id");
+      expect(columns).toContain("created_at");
+      expect(columns).toContain("updated_at");
+    } finally {
+      legacyClient.close();
+    }
+  }, 20000);
+
+  test("semua ALTER ADD COLUMN memakai default konstan", async () => {
+    // SQLite menolak `ADD COLUMN ... DEFAULT (datetime('now'))`; hanya
+    // `CREATE TABLE` yang boleh memakai default non-konstan. Aturan ini pernah
+    // membuat seluruh migrasi Web gagal di tengah jalan.
+    const source = await Bun.file(
+      fileURLToPath(new URL("../db-migrations.ts", import.meta.url)),
+    ).text();
+    const offenders = [
+      ...source.matchAll(/ADD COLUMN[^"']*DEFAULT\s*\(([^)]*)\)/gi),
+    ].map((match) => match[0]);
+    expect(offenders).toEqual([]);
+  });
+});
+
+describe("production schema initialization", () => {
+  test("tidak membuat operator default legacy", async () => {
+    const productionClient = createClient({ url: "file::memory:" });
+    try {
+      await initDatabaseSchema(productionClient);
+      const operators = await productionClient.execute(
+        "SELECT COUNT(*) AS total FROM master_operator;",
+      );
+      expect(Number(operators.rows[0]?.total)).toBe(0);
+    } finally {
+      productionClient.close();
+    }
+  });
+});

@@ -1,0 +1,62 @@
+[package]
+name = "app_template_desktop"
+version = "0.1.0"
+description = "Template aplikasi 2-tier (Web + Desktop + Mobile)"
+authors = ["you"]
+license = ""
+repository = ""
+edition = "2021"
+rust-version = "1.77.2"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+name = "app_template_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.6.3", features = [] }
+dotenvy = "0.15.7"
+
+[dependencies]
+serde_json = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+log = "0.4"
+tauri = { version = "2.11.3", features = [] }
+tauri-plugin-log = "2"
+tauri-plugin-stronghold = "2.3.1"
+reqwest = { version = "0.13.4", features = ["json", "gzip", "brotli", "deflate"] }
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+sha2 = "0.10.9"
+# TOTP memakai SHA-1 (RFC 6238). Bukan pilihan gaya: Google Authenticator
+# mengabaikan parameter algorithm pada URI otpauth dan selalu memakai SHA-1,
+# sehingga SHA-256 akan menghasilkan kode yang tidak pernah cocok.
+sha1 = "0.10"
+hex = "0.4.3"
+url = "2.5.7"
+zeroize = "1.8.2"
+base64 = "0.22"
+pbkdf2 = { version = "0.12", default-features = false, features = ["hmac"] }
+hmac = "0.12"
+argon2 = "0.5.3"
+aes-gcm = "0.10.3"
+rand_core = { version = "0.6.4", features = ["getrandom"] }
+rust_decimal = { version = "1.36", features = ["serde-with-str", "maths"] }
+# Verifikasi tanda tangan lisensi Ed25519 (`license.rs`). Sudah ada di
+# Cargo.lock lewat rustls, jadi tidak menambah crate baru.
+ring = "0.17"
+
+# MachineGuid Windows untuk kode perangkat lisensi. Sudah ditarik hyper-util.
+[target.'cfg(windows)'.dependencies]
+windows-registry = "0.6"
+
+[dev-dependencies]
+# Hanya untuk tes: `ensure_schema` bersifat async, dan menguji provisioning
+# mode lokal secara utuh menuntut sebuah runtime. Fitur `macros` sengaja tidak
+# dipakai — `LocalTransport` sepenuhnya sinkron, jadi runtime satu-utas yang
+# dibangun manual sudah cukup. Tidak ikut ke binary rilis.
+tempfile = "3.23.0"
+tokio = { version = "1.53.1", features = ["rt"] }
+
+[profile.dev.package.scrypt]
+opt-level = 3
