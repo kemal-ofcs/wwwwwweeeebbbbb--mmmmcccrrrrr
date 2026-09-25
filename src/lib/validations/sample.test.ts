@@ -20,6 +20,7 @@ describe("readBusinessSettings", () => {
       sample_fee_mode: "PER_REQUEST",
       lead_hot_max_days: 3,
       lead_warm_max_days: 7,
+      max_photos_per_sample: 10,
     });
   });
   test("nilai sah dipakai, nilai rusak jatuh ke bawaan satu per satu", () => {
@@ -29,12 +30,14 @@ describe("readBusinessSettings", () => {
         sample_fee_mode: "PAID",
         lead_hot_max_days: "5",
         lead_warm_max_days: "14",
+        max_photos_per_sample: "5",
       }),
     ).toEqual({
       default_free_revision_limit: 2,
       sample_fee_mode: "PAID",
       lead_hot_max_days: 5,
       lead_warm_max_days: 14,
+      max_photos_per_sample: 5,
     });
     expect(
       readBusinessSettings({
@@ -42,12 +45,14 @@ describe("readBusinessSettings", () => {
         sample_fee_mode: "paid",
         lead_hot_max_days: "9",
         lead_warm_max_days: "9",
+        max_photos_per_sample: "0",
       }),
     ).toEqual({
       default_free_revision_limit: 1,
       sample_fee_mode: "PER_REQUEST",
       lead_hot_max_days: 3,
       lead_warm_max_days: 7,
+      max_photos_per_sample: 10,
     });
   });
 });
@@ -58,6 +63,7 @@ describe("validateBusinessSettings", () => {
     sample_fee_mode: "FREE",
     lead_hot_max_days: 0,
     lead_warm_max_days: 1,
+    max_photos_per_sample: 1,
   };
   test("sah", () => {
     expect(validateBusinessSettings(valid)).toEqual({
@@ -88,6 +94,14 @@ describe("validateBusinessSettings", () => {
     [
       { ...valid, lead_warm_max_days: 181 },
       "The Warm limit must be more days than the Hot limit, up to 180.",
+    ],
+    [
+      { ...valid, max_photos_per_sample: 51 },
+      "Photos per sample request must be a whole number from 1 to 50.",
+    ],
+    [
+      { ...valid, max_photos_per_sample: 0 },
+      "Photos per sample request must be a whole number from 1 to 50.",
     ],
   ];
   for (const [draft, message] of cases) {

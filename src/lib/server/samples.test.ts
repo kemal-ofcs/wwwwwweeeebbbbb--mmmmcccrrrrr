@@ -144,6 +144,7 @@ describe("tiket sampel, jalur Web", () => {
         sample_fee_mode: "PER_REQUEST",
         lead_hot_max_days: 3,
         lead_warm_max_days: 7,
+        max_photos_per_sample: 10,
       },
       ADMIN,
     );

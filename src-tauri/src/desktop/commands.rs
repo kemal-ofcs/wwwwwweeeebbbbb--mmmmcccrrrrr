@@ -3044,6 +3044,10 @@ pub async fn desktop_save_business_settings(
     Ok(checked.to_json())
 }
 
+/// Data ringkas foto satu tiket, tanpa isinya. `has_data` = isinya sudah ada
+/// di perangkat ini (buatan sendiri atau pernah dibuka). Cermin `listSampleMedia`.
+const SAMPLE_MEDIA_LIST_SQL: &str = "SELECT m.id, m.purpose, m.byte_size, m.created_by, o.nama_operator AS created_by_name, m.created_at, CASE WHEN m.data_base64 <> '' THEN 1 ELSE 0 END AS has_data FROM media_asset m LEFT JOIN master_operator o ON o.id = m.created_by WHERE m.owner_type = 'sample' AND m.owner_id = ? ORDER BY m.created_at, m.rowid;";
+
 const SAMPLE_LIST_SQL: &str = "SELECT s.*, c.client_code, c.name AS client_name, c.free_revision_limit, o.nama_operator AS pic_crm_name FROM sample_requests s LEFT JOIN clients c ON c.id = s.client_id LEFT JOIN master_operator o ON o.id = s.pic_crm_id";
 
 fn sample_invalid(message: impl Into<String>) -> CommandError {
@@ -3086,7 +3090,13 @@ pub fn desktop_get_sample_request(state: State<'_, DesktopState>, id: String) ->
         "SELECT * FROM sample_feedbacks WHERE sample_request_id = ? ORDER BY iteration_number, recorded_at;",
         &[&id],
     )?;
-    Ok(json!({ "request": request, "status_log": status_log, "feedbacks": feedbacks }))
+    let media = query_json(&connection, SAMPLE_MEDIA_LIST_SQL, &[&id])?;
+    Ok(json!({
+        "request": request,
+        "status_log": status_log,
+        "feedbacks": feedbacks,
+        "media": media,
+    }))
 }
 
 /// Periksa pilihan Master Data dan PIC CRM draft terhadap database lokal.
@@ -3493,6 +3503,133 @@ pub async fn desktop_record_sample_step(
 
     let _ = sync::synchronize(&state).await;
     Ok(json!({ "status": result.status, "revision_index": result.revision_index }))
+}
+
+/// Unggah satu foto terkompresi ke tiket (PRD FR-07). Kompresi sudah terjadi
+/// di webview; di sini diperiksa ulang (`validate_media_upload`), dicatat
+/// di audit, dan diantrekan lewat rute `media/upload`. Cermin `uploadSampleMedia`.
+#[tauri::command]
+pub async fn desktop_upload_sample_media(
+    state: State<'_, DesktopState>,
+    sample_id: String,
+    purpose: String,
+    data_base64: String,
+) -> Result<Value, CommandError> {
+    let operator = require_permission(&state, "samples.manage")?;
+    let byte_size = samples::validate_media_upload(&purpose, &data_base64).map_err(sample_invalid)?;
+    let now = clients::utc_timestamp(storage::now_epoch_seconds());
+    let current = {
+        let connection = storage::database(&state.data_dir)?;
+        let current = query_json(&connection, &format!("{SAMPLE_LIST_SQL} WHERE s.id = ?;"), &[&sample_id])?
+            .into_iter()
+            .next()
+            .ok_or_else(|| CommandError::new("SAMPLE_NOT_FOUND", "Sample request not found."))?;
+        check_media_allowed(&connection, &current, &purpose)?;
+        current
+    };
+    let id = clients::new_uuid();
+    let payload = json!({
+        "id": id,
+        "owner_type": "sample",
+        "owner_id": sample_id,
+        "purpose": purpose,
+        "data_base64": data_base64,
+        "created_by": operator.id,
+        "created_at": now,
+    });
+    let audit = AuditEntry {
+        actor: &operator,
+        action: "sample.photo",
+        entity_type: "sample",
+        entity_id: &sample_id,
+        summary: json!({
+            "client_code": current["client_code"],
+            "brand_name": current["brand_name"],
+            "purpose": purpose,
+            "byte_size": byte_size,
+        }),
+        on_behalf_of: None,
+    };
+    commit_with_outbox(&state, "media", "upload", &id, payload, Some(audit), |transaction| {
+        transaction
+            .execute(
+                samples::MEDIA_INSERT_SQL,
+                rusqlite::params![&id, &sample_id, &purpose, byte_size as i64, &data_base64, operator.id, &now],
+            )
+            .map_err(|_| CommandError::new("MEDIA_SAVE_FAILED", "The photo could not be saved."))?;
+        Ok(())
+    })?;
+    let _ = sync::synchronize(&state).await;
+    Ok(json!({ "id": id, "purpose": purpose, "byte_size": byte_size, "created_at": now }))
+}
+
+/// Aturan unggah per tiket, padanan `checkMediaAllowed` (pesan identik):
+/// tiket belum ditutup, bukti bayar hanya untuk sampel berbayar, dan jumlah
+/// foto di bawah `max_photos_per_sample` (keputusan B/D 1.4b).
+fn check_media_allowed(
+    connection: &rusqlite::Connection,
+    sample: &Value,
+    purpose: &str,
+) -> Result<(), CommandError> {
+    let status = sample["status"].as_str().unwrap_or_default();
+    if samples::SAMPLE_TERMINAL_STATUSES.contains(&status) {
+        return Err(sample_invalid("This sample request is closed."));
+    }
+    if purpose == "PAYMENT_PROOF" && sample["is_paid_sample"].as_i64() != Some(1) {
+        return Err(sample_invalid("Payment proof is only for paid samples."));
+    }
+    let limit = business_settings(connection).max_photos_per_sample;
+    let count: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM media_asset WHERE owner_type = 'sample' AND owner_id = ?;",
+            [sample["id"].as_str().unwrap_or_default()],
+            |row| row.get(0),
+        )
+        .map_err(|_| CommandError::internal())?;
+    if count >= limit {
+        return Err(sample_invalid(format!(
+            "This sample request already has the most photos allowed ({limit})."
+        )));
+    }
+    Ok(())
+}
+
+/// Isi satu foto. Dari perangkat bila sudah ada; bila belum, diambil dari
+/// cloud lalu DISIMPAN di perangkat, sehingga sesudahnya tetap terlihat saat
+/// offline (permintaan pemilik produk, 1.4b). Cermin `getMediaData`.
+#[tauri::command]
+pub async fn desktop_get_media(state: State<'_, DesktopState>, id: String) -> Result<Value, CommandError> {
+    use rusqlite::OptionalExtension;
+    require_permission(&state, "samples.view")?;
+    let local: Option<String> = {
+        let connection = storage::database(&state.data_dir)?;
+        connection
+            .query_row(
+                "SELECT data_base64 FROM media_asset WHERE id = ? AND data_base64 <> '';",
+                [&id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|_| CommandError::internal())?
+    };
+    if let Some(data) = local {
+        return Ok(json!({ "id": id, "mime": samples::MEDIA_MIME, "data_base64": data }));
+    }
+    let offline = || CommandError::new("MEDIA_OFFLINE", "This photo is available when the device is online.");
+    let turso = state.get_turso_client().map_err(|_| offline())?;
+    let data = turso
+        .get_media_data(&id)
+        .await
+        .map_err(|_| offline())?
+        .ok_or_else(|| CommandError::new("MEDIA_NOT_FOUND", "Photo not found."))?;
+    let connection = storage::database(&state.data_dir)?;
+    connection
+        .execute(
+            "UPDATE media_asset SET data_base64 = ? WHERE id = ? AND data_base64 = '';",
+            rusqlite::params![&data, &id],
+        )
+        .map_err(|_| CommandError::internal())?;
+    Ok(json!({ "id": id, "mime": samples::MEDIA_MIME, "data_base64": data }))
 }
 
 #[cfg(test)]

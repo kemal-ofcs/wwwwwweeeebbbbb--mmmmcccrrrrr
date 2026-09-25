@@ -635,6 +635,13 @@ const SNAPSHOT_SOURCES: &[SnapshotSource] = &[
         table: "sample_feedbacks",
         sql: "SELECT * FROM sample_feedbacks ORDER BY recorded_at, id;",
     },
+    // Hanya data ringkas foto: `data_base64` SENGAJA tidak ikut, isinya
+    // diambil satu per satu (`get_media_data`) lalu disimpan di perangkat.
+    SnapshotSource {
+        payload_key: "mediaAssets",
+        table: "media_asset",
+        sql: "SELECT id, owner_type, owner_id, purpose, mime, byte_size, created_by, created_at FROM media_asset ORDER BY created_at, id;",
+    },
     SnapshotSource {
         payload_key: "sampleStatusLog",
         table: "sample_status_log",
@@ -1490,7 +1497,8 @@ impl TursoClient {
                 (4, 'lead-interactions', datetime('now')),
                 (5, 'audit-log-and-division-roles', datetime('now')),
                 (6, 'single-session', datetime('now')),
-                (7, 'sample-requests', datetime('now'));"#,
+                (7, 'sample-requests', datetime('now')),
+                (8, 'media-assets', datetime('now'));"#,
                 vec![],
             ),
             // ============ DOMAIN MAKLONOS ============
@@ -1640,6 +1648,21 @@ impl TursoClient {
                 );"#,
                 vec![],
             ),
+            // Foto (PRD FR-07), hanya-tambah. WAJIB identik dengan `db-schema.ts`.
+            Statement::new(
+                r#"CREATE TABLE IF NOT EXISTS media_asset (
+                    id TEXT PRIMARY KEY,
+                    owner_type TEXT NOT NULL,
+                    owner_id TEXT NOT NULL,
+                    purpose TEXT NOT NULL,
+                    mime TEXT NOT NULL,
+                    byte_size INTEGER NOT NULL,
+                    data_base64 TEXT NOT NULL DEFAULT '',
+                    created_by INTEGER,
+                    created_at TEXT NOT NULL
+                );"#,
+                vec![],
+            ),
             // Cloud-only: tag dua karakter untuk setiap perangkat, bagian `<KP>`
             // dari kode klien. Tidak ikut sinkronisasi, jadi UNIQUE aman.
             Statement::new(
@@ -1688,6 +1711,10 @@ impl TursoClient {
             ),
             Statement::new(
                 "CREATE INDEX IF NOT EXISTS idx_sample_status_log_request ON sample_status_log(sample_request_id, recorded_at);",
+                vec![],
+            ),
+            Statement::new(
+                "CREATE INDEX IF NOT EXISTS idx_media_asset_owner ON media_asset(owner_type, owner_id);",
                 vec![],
             ),
             // =========================================
@@ -1870,6 +1897,11 @@ impl TursoClient {
             vec![],
         )
         .await?;
+        self.query_one(
+            "INSERT OR IGNORE INTO schema_migration (version, name, applied_at) VALUES (-2016, 'media-assets-v1', datetime('now'));",
+            vec![],
+        )
+        .await?;
 
         Ok(())
     }
@@ -2038,7 +2070,7 @@ impl TursoClient {
             .query_one(
                 // Sentinel WAJIB dinaikkan setiap kali ensure_schema menambah
                 // tabel atau kolom — nilainya di sini dan pada INSERT harus sama.
-                "SELECT COUNT(*) AS total FROM schema_migration WHERE version = -2015;",
+                "SELECT COUNT(*) AS total FROM schema_migration WHERE version = -2016;",
                 vec![],
             )
             .await
@@ -2514,6 +2546,19 @@ impl TursoClient {
             Err(message) => message.to_owned(),
             Ok(_) => "The sample step does not match the company rules in the database.".to_owned(),
         }))
+    }
+
+    /// Isi satu foto dari cloud (base64), atau `None` bila tidak ada.
+    pub async fn get_media_data(&self, id: &str) -> Result<Option<String>, CommandError> {
+        self.ensure_schema_current().await?;
+        Ok(self
+            .query_one("SELECT data_base64 FROM media_asset WHERE id = ?;", vec![json!(id)])
+            .await?
+            .to_objects()
+            .into_iter()
+            .next()
+            .and_then(|row| row.get("data_base64").and_then(Value::as_str).map(str::to_owned))
+            .filter(|data| !data.is_empty()))
     }
 
     /// Log audit domain dari cloud (layar Audit). Parameter sama dengan
@@ -3498,6 +3543,37 @@ impl TursoClient {
                 }
             }
 
+            // Foto hanya untuk tiket yang ada di cloud. Event `sample/create`
+            // tiba lebih dulu di antrean yang sama, jadi urutannya terjaga.
+            if domain == "media" {
+                let owner = parsed_payload
+                    .get("owner_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                let found = self
+                    .query_one(
+                        "SELECT COUNT(*) AS total FROM sample_requests WHERE id = ?;",
+                        vec![json!(owner)],
+                    )
+                    .await?
+                    .to_objects()
+                    .into_iter()
+                    .next()
+                    .and_then(|row| row.get("total").and_then(lenient_i64))
+                    .unwrap_or(0);
+                if found == 0 {
+                    let message = "The sample request for this photo does not exist in the database.".to_owned();
+                    push_results.push(json!({
+                        "eventId": event_id,
+                        "status": "conflict",
+                        "reason": message.clone(),
+                        "message": message,
+                        "serverRevision": 0
+                    }));
+                    continue;
+                }
+            }
+
             let collector = StatementCollector::default();
             if let Err(error) =
                 apply_event_to_turso(&collector, domain, operation, entity_key, &parsed_payload)
@@ -4223,6 +4299,7 @@ fn canonical_sync_route(domain: &str, operation: &str) -> Option<(&'static str, 
         "lead-interaction" | "lead_interactions" => "lead-interaction",
         "lead" | "leads" => "lead",
         "sample" | "sample_requests" => "sample",
+        "media" | "media_asset" => "media",
         "audit" | "domain_audit_log" => "audit",
         _ => return None,
     };
@@ -4238,6 +4315,7 @@ fn canonical_sync_route(domain: &str, operation: &str) -> Option<(&'static str, 
         ("sample", "create") => "create",
         ("sample", "update") => "update",
         ("sample", "transition") => "transition",
+        ("media", "upload") => "upload",
         ("audit", "record") => "record",
         _ => return None,
     };
@@ -4666,6 +4744,41 @@ async fn apply_event_to_turso(
                 .query_one(
                     samples::CLIENT_LIFECYCLE_FROM_SAMPLES_SQL,
                     vec![json!(client_id), json!(changed_at)],
+                )
+                .await?;
+        }
+        ("media", "upload") => {
+            // Hanya-tambah (D-13): kiriman ulang diabaikan. Isinya diperiksa
+            // ulang dengan aturan yang sama dengan Web (`validateMediaUpload`),
+            // dan ukurannya dihitung di sini, bukan dipercaya dari payload.
+            let purpose = text("purpose");
+            let data = text("data_base64");
+            let owner_id = text("owner_id");
+            let created_at = text("created_at");
+            let byte_size = samples::validate_media_upload(&purpose, &data)
+                .map_err(|message| CommandError::new("TURSO_SYNC_PAYLOAD_INVALID", message))?;
+            if entity_key.is_empty()
+                || text("owner_type") != "sample"
+                || owner_id.is_empty()
+                || clients::parse_stored_timestamp(&created_at).is_none()
+            {
+                return Err(CommandError::new(
+                    "TURSO_SYNC_PAYLOAD_INVALID",
+                    "The photo is incomplete or invalid.",
+                ));
+            }
+            turso
+                .query_one(
+                    samples::MEDIA_INSERT_SQL,
+                    vec![
+                        json!(entity_key),
+                        json!(owner_id),
+                        json!(purpose),
+                        json!(byte_size),
+                        json!(data),
+                        payload.get("created_by").filter(|value| value.is_i64()).cloned().unwrap_or(Value::Null),
+                        json!(created_at),
+                    ],
                 )
                 .await?;
         }
@@ -7251,6 +7364,7 @@ mod tests {
                 "sample_requests",
                 "sample_feedbacks",
                 "sample_status_log",
+                "media_asset",
             ] {
                 let ada: i64 = connection
                     .query_row(
@@ -7388,6 +7502,71 @@ mod tests {
                 .query_row("SELECT COUNT(*) FROM sample_status_log WHERE sample_request_id = 's1';", [], |row| row.get(0))
                 .expect("riwayat");
             assert_eq!(logs, 1);
+        });
+    }
+
+    /// Foto (PRD FR-07) diperiksa ulang di cloud: bukan WebP atau tiket yang
+    /// tidak ada menjadi konflik; foto sah tersimpan beserta ukuran hitungan cloud.
+    #[test]
+    fn push_foto_diperiksa_ulang_di_cloud() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("runtime uji");
+        runtime.block_on(async {
+            let dir = tempfile::tempdir().expect("direktori sementara");
+            let hub = dir.path().join("app-hub.db");
+            let client = TursoClient::local_file(
+                Url::parse(LOCAL_FILE_ORIGIN).expect("origin lokal"),
+                &hub,
+                Client::new(),
+            );
+            client.ensure_schema().await.expect("provisioning lokal");
+            rusqlite::Connection::open(&hub)
+                .expect("buka hub")
+                .execute_batch(
+                    "INSERT INTO sample_requests (id, client_id, product_category_option_id, sample_qty, brand_name, packaging, deadline_at, ship_to_address, status_changed_at, created_at, updated_at) VALUES ('s1', 'c1', 'cat', 1, 'Aura', 'Jar', '2026-10-31', 'Bandung', '2026-09-25 01:00:00', '2026-09-25 01:00:00', '2026-09-25 01:00:00');",
+                )
+                .expect("tiket uji");
+            let event = |n: u32, owner: &str, data: &str| {
+                json!({
+                    "eventId": format!("evt-{n:064x}"),
+                    "clientId": format!("desktop-{:064x}", 1),
+                    "domain": "media",
+                    "operation": "upload",
+                    "entityKey": format!("m{n}"),
+                    "payload": {
+                        "owner_type": "sample",
+                        "owner_id": owner,
+                        "purpose": "REFERENCE",
+                        "data_base64": data,
+                        "created_by": 7,
+                        "created_at": "2026-09-25 02:00:00",
+                    },
+                })
+            };
+            let results = client
+                .push_events(&[
+                    event(1, "s1", "UklGRgwAAABXRUJQVlA4TA=="),
+                    event(2, "s1", "iVBORw0KGgoAAAANSUhEUg=="),
+                    event(3, "missing", "UklGRgwAAABXRUJQVlA4TA=="),
+                ])
+                .await
+                .expect("push");
+            let statuses: Vec<&str> = results
+                .iter()
+                .map(|result| result["status"].as_str().unwrap_or_default())
+                .collect();
+            assert_eq!(statuses, vec!["applied", "conflict", "conflict"]);
+            assert_eq!(results[1]["message"], json!(samples::MEDIA_NOT_WEBP));
+            let size: i64 = rusqlite::Connection::open(&hub)
+                .expect("buka hub")
+                .query_row("SELECT byte_size FROM media_asset WHERE id = 'm1';", [], |row| row.get(0))
+                .expect("foto");
+            assert_eq!(size, 16);
+            assert_eq!(
+                client.get_media_data("m1").await.expect("ambil"),
+                Some("UklGRgwAAABXRUJQVlA4TA==".to_owned())
+            );
         });
     }
 

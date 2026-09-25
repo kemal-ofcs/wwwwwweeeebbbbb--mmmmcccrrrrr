@@ -4,6 +4,7 @@ import type { Client, Row, Transaction } from "@libsql/client";
 import { type AuditActor, writeAudit } from "@/lib/server/audit";
 import { loadBusinessSettings } from "@/lib/server/business-settings";
 import { ApiRequestError } from "@/lib/server/http/api-response";
+import { listSampleMedia } from "@/lib/server/media";
 import {
   applySampleAction,
   CLIENT_LIFECYCLE_FROM_SAMPLES_SQL,
@@ -87,6 +88,7 @@ export async function getSampleRequest(client: Client, id: unknown) {
     request,
     status_log: statusLog.rows.map(plain),
     feedbacks: feedbacks.rows.map(plain),
+    media: await listSampleMedia(client, key),
   };
 }
 

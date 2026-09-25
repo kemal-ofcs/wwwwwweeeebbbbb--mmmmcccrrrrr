@@ -75,10 +75,23 @@ export interface SampleFeedbackEntry {
   recorded_at: string;
 }
 
+/** Data ringkas satu foto; isinya diambil terpisah lewat `getMedia`. */
+export interface SampleMediaEntry {
+  id: string;
+  purpose: "REFERENCE" | "PAYMENT_PROOF";
+  byte_size: number;
+  created_by: number | null;
+  created_by_name: string | null;
+  created_at: string;
+  /** 1 = isinya sudah ada di perangkat ini (Web selalu 1). */
+  has_data: number;
+}
+
 export interface SampleDetail {
   request: SampleRequestRecord;
   status_log: SampleStatusLogEntry[];
   feedbacks: SampleFeedbackEntry[];
+  media: SampleMediaEntry[];
 }
 
 export interface SampleList {
@@ -206,4 +219,42 @@ export async function saveBusinessSettings(
     { settings },
   );
   return result.settings;
+}
+
+/** Unggah satu foto yang SUDAH dikompresi (`compressImageToWebp`). */
+export async function uploadSampleMedia(
+  sampleId: string,
+  purpose: SampleMediaEntry["purpose"],
+  dataBase64: string,
+): Promise<{ id: string }> {
+  if (isDesktopRuntime()) {
+    return invokeDesktop<{ id: string }>("desktop_upload_sample_media", {
+      sampleId,
+      purpose,
+      dataBase64,
+    });
+  }
+  return requestWebApi<{ id: string }>("/api/samples/media", "POST", {
+    sample_id: sampleId,
+    purpose,
+    data_base64: dataBase64,
+  });
+}
+
+/**
+ * Isi satu foto sebagai data URL. Di perangkat: dari penyimpanan lokal, atau
+ * dari database lalu disimpan lokal sehingga sesudahnya terlihat offline.
+ */
+export async function getMediaDataUrl(id: string): Promise<string> {
+  const result = isDesktopRuntime()
+    ? await invokeDesktop<{ mime: string; data_base64: string }>(
+        "desktop_get_media",
+        { id },
+      )
+    : await requestWebApi<{ mime: string; data_base64: string }>(
+        "/api/samples/media/query",
+        "POST",
+        { id },
+      );
+  return `data:${result.mime};base64,${result.data_base64}`;
 }

@@ -19,6 +19,7 @@ export const BUSINESS_SETTING_KEYS = {
   sampleFeeMode: "sample_fee_mode",
   leadHotMaxDays: "lead_hot_max_days",
   leadWarmMaxDays: "lead_warm_max_days",
+  maxPhotosPerSample: "max_photos_per_sample",
 } as const;
 
 export interface BusinessSettings {
@@ -26,6 +27,8 @@ export interface BusinessSettings {
   sample_fee_mode: SampleFeeMode;
   lead_hot_max_days: number;
   lead_warm_max_days: number;
+  /** Batas foto per tiket sampel (PRD F-07, keputusan B 1.4b). */
+  max_photos_per_sample: number;
 }
 
 export const DEFAULT_BUSINESS_SETTINGS: BusinessSettings = {
@@ -33,11 +36,13 @@ export const DEFAULT_BUSINESS_SETTINGS: BusinessSettings = {
   sample_fee_mode: "PER_REQUEST",
   lead_hot_max_days: 3,
   lead_warm_max_days: 7,
+  max_photos_per_sample: 10,
 };
 
 export const FREE_REVISION_LIMIT_MAX = 20;
 export const LEAD_HOT_MAX_DAYS_LIMIT = 60;
 export const LEAD_WARM_MAX_DAYS_LIMIT = 180;
+export const MAX_PHOTOS_PER_SAMPLE_LIMIT = 50;
 
 function wholeNumber(value: unknown): number | null {
   if (typeof value === "number") {
@@ -96,6 +101,12 @@ export function readBusinessSettings(
       : DEFAULT_BUSINESS_SETTINGS.sample_fee_mode,
     lead_hot_max_days: hot,
     lead_warm_max_days: warm,
+    max_photos_per_sample:
+      inRange(
+        wholeNumber(values[BUSINESS_SETTING_KEYS.maxPhotosPerSample]),
+        1,
+        MAX_PHOTOS_PER_SAMPLE_LIMIT,
+      ) ?? DEFAULT_BUSINESS_SETTINGS.max_photos_per_sample,
   };
 }
 
@@ -138,12 +149,23 @@ export function validateBusinessSettings(
       error: "The Warm limit must be more days than the Hot limit, up to 180.",
     };
   }
+  const photos = inRange(
+    strictInt(draft.max_photos_per_sample),
+    1,
+    MAX_PHOTOS_PER_SAMPLE_LIMIT,
+  );
+  if (photos === null) {
+    return {
+      error: "Photos per sample request must be a whole number from 1 to 50.",
+    };
+  }
   return {
     settings: {
       default_free_revision_limit: limit,
       sample_fee_mode: mode as SampleFeeMode,
       lead_hot_max_days: hot,
       lead_warm_max_days: warm,
+      max_photos_per_sample: photos,
     },
   };
 }
