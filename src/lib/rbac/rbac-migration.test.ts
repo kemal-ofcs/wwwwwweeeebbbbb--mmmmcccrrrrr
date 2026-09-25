@@ -81,10 +81,13 @@ describe("dynamic RBAC migration", () => {
     const migrations = await client.execute(
       "SELECT version FROM schema_migration ORDER BY version;",
     );
-    // Versi 2 adalah kontak operator + pemulihan password + 2FA. Setiap
+    // Versi 2 adalah kontak operator + pemulihan password + 2FA, versi 3
+    // domain MaklonOS (klien, lead, Master Data). Setiap
     // migrasi baru harus muncul di daftar ini, supaya database hasil migrasi
     // terbukti sampai pada versi yang sama dengan database yang baru dibuat.
-    expect(migrations.rows.map((row) => Number(row.version))).toEqual([1, 2]);
+    expect(migrations.rows.map((row) => Number(row.version))).toEqual([
+      1, 2, 3,
+    ]);
 
     const sessionColumns = await client.execute(
       "PRAGMA table_info(app_session);",

@@ -10,6 +10,8 @@ import {
 } from "react";
 import { AppShell } from "@/components/AppShell";
 import { CompanyProfileCard } from "@/components/CompanyProfileCard";
+import { ClientCodeCard } from "@/components/clients/ClientCodeCard";
+import { MasterDataCard } from "@/components/clients/MasterDataCard";
 import { DatabaseBackupCard } from "@/components/DatabaseBackupCard";
 import { LicenseCard } from "@/components/license/LicenseCard";
 import { MailSettingsCard } from "@/components/MailSettingsCard";
@@ -446,6 +448,10 @@ export default function SettingsPage() {
       {hasPermission(user, "settings.manage") ? <CompanyProfileCard /> : null}
 
       {hasPermission(user, "settings.manage") ? <MailSettingsCard /> : null}
+
+      {/* Domain MaklonOS: pilihan form intake dan bentuk kode klien. */}
+      {hasPermission(user, "master_data.manage") ? <MasterDataCard /> : null}
+      {hasPermission(user, "settings.manage") ? <ClientCodeCard /> : null}
 
       {isDesktop ? (
         <section className="app-panel p-4 sm:p-5">

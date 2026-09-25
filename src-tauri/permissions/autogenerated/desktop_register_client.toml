@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-desktop-register-client"
+description = "Enables the desktop_register_client command without any pre-configured scope."
+commands.allow = ["desktop_register_client"]
+
+[[permission]]
+identifier = "deny-desktop-register-client"
+description = "Denies the desktop_register_client command without any pre-configured scope."
+commands.deny = ["desktop_register_client"]

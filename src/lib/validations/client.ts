@@ -22,7 +22,10 @@ export const CLIENT_LIFECYCLE_STATUSES = [
 ] as const;
 export type ClientLifecycleStatus = (typeof CLIENT_LIFECYCLE_STATUSES)[number];
 
-export const MASTER_OPTION_KINDS = ["LEAD_CHANNEL", "PRODUCT_CATEGORY"] as const;
+export const MASTER_OPTION_KINDS = [
+  "LEAD_CHANNEL",
+  "PRODUCT_CATEGORY",
+] as const;
 export type MasterOptionKind = (typeof MASTER_OPTION_KINDS)[number];
 
 export function isMasterOptionKind(value: unknown): value is MasterOptionKind {

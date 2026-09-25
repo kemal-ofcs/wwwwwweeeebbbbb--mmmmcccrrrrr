@@ -1,10 +1,10 @@
 import type { NextRequest } from "next/server";
 import { requireWebPermission } from "@/lib/server/auth/authorize";
+import { getClientCodeSettings } from "@/lib/server/clients";
 import {
   ensureServerDatabaseInitialized,
   getServerDatabase,
 } from "@/lib/server/db";
-import { listItems } from "@/lib/server/example-domain";
 import {
   noStoreJson,
   toApiErrorResponse,
@@ -13,15 +13,15 @@ import { assertSameOriginMutation } from "@/lib/server/http/request-security";
 
 export const runtime = "nodejs";
 
-/** Cerminan `desktop_list_items`. POST karena static export melarang GET. */
+/** Cerminan `desktop_get_client_code_settings`. */
 export async function POST(request: NextRequest) {
   try {
     assertSameOriginMutation(request);
     await ensureServerDatabaseInitialized();
-    await requireWebPermission(request, "items.view");
+    await requireWebPermission(request, "clients.view");
     return noStoreJson({
       sukses: true,
-      items: await listItems(getServerDatabase()),
+      settings: await getClientCodeSettings(getServerDatabase()),
     });
   } catch (error) {
     return toApiErrorResponse(error);

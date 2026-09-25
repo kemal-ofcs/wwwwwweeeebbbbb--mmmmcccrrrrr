@@ -85,11 +85,13 @@ pub fn run() {
             desktop::commands::desktop_get_server_url,
             desktop::commands::desktop_set_server_url,
             // Domain contoh — ganti dengan domain aplikasi Anda
-            desktop::commands::desktop_list_items,
-            desktop::commands::desktop_save_item,
-            desktop::commands::desktop_delete_item,
-            desktop::commands::desktop_list_activities,
-            desktop::commands::desktop_record_activity,
+            desktop::commands::desktop_list_clients,
+            desktop::commands::desktop_register_client,
+            desktop::commands::desktop_update_client,
+            desktop::commands::desktop_list_master_options,
+            desktop::commands::desktop_save_master_option,
+            desktop::commands::desktop_get_client_code_settings,
+            desktop::commands::desktop_save_client_code_settings,
         ])
         .run(tauri::generate_context!())
         .unwrap_or_else(|error| {
