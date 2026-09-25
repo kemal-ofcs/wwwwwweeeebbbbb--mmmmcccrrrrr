@@ -154,11 +154,17 @@ describe("segmen lead", () => {
     test(`${last || "(kosong)"} ${zone}`, () => {
       const computed = daysSinceResponse(last, now, zone);
       expect(computed).toBe(days);
-      expect(leadSegment("LEAD", computed)).toBe(segment as never);
+      expect(leadSegment("LEAD", computed, 3, 7)).toBe(segment as never);
     });
   }
   test("selain LEAD tidak bersegmen", () => {
-    expect(leadSegment("FIRST_ORDER_ACTIVE", 30)).toBeNull();
+    expect(leadSegment("FIRST_ORDER_ACTIVE", 30, 3, 7)).toBeNull();
+  });
+  test("batas dari setelan bisnis", () => {
+    expect(leadSegment("LEAD", 5, 5, 14)).toBe("HOT");
+    expect(leadSegment("LEAD", 14, 5, 14)).toBe("WARM");
+    expect(leadSegment("LEAD", 15, 5, 14)).toBe("COLD");
+    expect(leadSegment("LEAD", 0, 0, 1)).toBe("HOT");
   });
 });
 

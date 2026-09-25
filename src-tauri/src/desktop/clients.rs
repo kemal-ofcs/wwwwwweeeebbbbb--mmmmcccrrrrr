@@ -12,7 +12,14 @@ pub const CLIENT_CODE_PREFIX_SETTING: &str = "client_code_prefix";
 pub const CLIENT_CODE_WEB_TAG_SETTING: &str = "client_code_web_tag";
 
 pub const CLIENT_LIFECYCLE_STATUSES: &[&str] = &["LEAD", "FIRST_ORDER_ACTIVE", "EXISTING_CLIENT"];
-pub const MASTER_OPTION_KINDS: &[&str] = &["LEAD_CHANNEL", "PRODUCT_CATEGORY"];
+pub const MASTER_OPTION_KINDS: &[&str] = &[
+    "LEAD_CHANNEL",
+    "PRODUCT_CATEGORY",
+    // Tiket sampel (PRD FR-06.1, keputusan M): nilainya milik perusahaan.
+    "SAMPLE_KIND",
+    "FORMULATION_TYPE",
+    "REGISTRATION_CATEGORY",
+];
 
 pub const CLIENT_NAME_MIN: usize = 2;
 pub const CLIENT_NAME_MAX: usize = 120;
@@ -187,8 +194,6 @@ pub const LEAD_INTERACTION_KINDS: &[&str] = &["WHATSAPP", "CALL", "VISIT", "MATE
 pub const INTERACTION_NOTES_MAX: usize = 1000;
 pub const INTERACTION_MAX_AGE_SECONDS: i64 = 366 * 86_400;
 pub const INTERACTION_FUTURE_TOLERANCE_SECONDS: i64 = 300;
-pub const HOT_MAX_DAYS: i64 = 3;
-pub const WARM_MAX_DAYS: i64 = 7;
 
 /// Jumlah hari sejak 1970-01-01 untuk tanggal sipil. Kebalikan `civil_from_days`.
 fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
@@ -241,15 +246,16 @@ pub fn days_since_response(last_response_at: &str, now_epoch_seconds: i64, timez
     Some((company_day_number(now_epoch_seconds, timezone) - company_day_number(last, timezone)).max(0))
 }
 
-/// Segmen hanya untuk klien `LEAD` (D-09).
-pub fn lead_segment(lifecycle_status: &str, days: Option<i64>) -> Option<&'static str> {
+/// Segmen hanya untuk klien `LEAD` (D-09). Batasnya dari setelan bisnis
+/// (padanan `leadSegment`).
+pub fn lead_segment(lifecycle_status: &str, days: Option<i64>, hot_max_days: i64, warm_max_days: i64) -> Option<&'static str> {
     if lifecycle_status != "LEAD" {
         return None;
     }
     let days = days?;
-    Some(if days <= HOT_MAX_DAYS {
+    Some(if days <= hot_max_days {
         "HOT"
-    } else if days <= WARM_MAX_DAYS {
+    } else if days <= warm_max_days {
         "WARM"
     } else {
         "COLD"
@@ -482,9 +488,14 @@ mod tests {
         for (last, zone, days, segment) in cases {
             let computed = days_since_response(last, now, zone);
             assert_eq!(computed, *days, "{last} {zone}");
-            assert_eq!(lead_segment("LEAD", computed), *segment, "{last} {zone}");
+            assert_eq!(lead_segment("LEAD", computed, 3, 7), *segment, "{last} {zone}");
         }
-        assert_eq!(lead_segment("FIRST_ORDER_ACTIVE", Some(30)), None);
+        assert_eq!(lead_segment("FIRST_ORDER_ACTIVE", Some(30), 3, 7), None);
+        // Batas dari setelan bisnis (vektor kembar `client.test.ts`).
+        assert_eq!(lead_segment("LEAD", Some(5), 5, 14), Some("HOT"));
+        assert_eq!(lead_segment("LEAD", Some(14), 5, 14), Some("WARM"));
+        assert_eq!(lead_segment("LEAD", Some(15), 5, 14), Some("COLD"));
+        assert_eq!(lead_segment("LEAD", Some(0), 0, 1), Some("HOT"));
     }
 
     #[test]

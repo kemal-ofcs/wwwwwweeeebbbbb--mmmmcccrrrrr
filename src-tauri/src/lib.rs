@@ -102,6 +102,13 @@ pub fn run() {
             desktop::commands::desktop_list_active_sessions,
             desktop::commands::desktop_end_session,
             desktop::commands::desktop_end_operator_sessions,
+            desktop::commands::desktop_get_business_settings,
+            desktop::commands::desktop_save_business_settings,
+            desktop::commands::desktop_list_sample_requests,
+            desktop::commands::desktop_get_sample_request,
+            desktop::commands::desktop_create_sample_request,
+            desktop::commands::desktop_update_sample_request,
+            desktop::commands::desktop_record_sample_step,
         ])
         .run(tauri::generate_context!())
         .unwrap_or_else(|error| {

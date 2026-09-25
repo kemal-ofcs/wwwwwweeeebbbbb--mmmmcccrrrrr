@@ -25,6 +25,10 @@ export type ClientLifecycleStatus = (typeof CLIENT_LIFECYCLE_STATUSES)[number];
 export const MASTER_OPTION_KINDS = [
   "LEAD_CHANNEL",
   "PRODUCT_CATEGORY",
+  // Tiket sampel (PRD FR-06.1, keputusan M): nilainya milik perusahaan.
+  "SAMPLE_KIND",
+  "FORMULATION_TYPE",
+  "REGISTRATION_CATEGORY",
 ] as const;
 export type MasterOptionKind = (typeof MASTER_OPTION_KINDS)[number];
 
@@ -169,9 +173,6 @@ export const INTERACTION_MAX_AGE_SECONDS = 366 * 86_400;
 /** Toleransi jam perangkat yang sedikit lebih cepat daripada jam database. */
 export const INTERACTION_FUTURE_TOLERANCE_SECONDS = 300;
 
-/** Batas segmen dalam hari kalender (FR-05.3): HOT ≤ 3, WARM 4-7, COLD > 7. */
-export const HOT_MAX_DAYS = 3;
-export const WARM_MAX_DAYS = 7;
 export type LeadSegment = "HOT" | "WARM" | "COLD";
 
 export function isLeadInteractionDirection(
@@ -242,14 +243,20 @@ export function daysSinceResponse(
   );
 }
 
-/** Segmen hanya untuk klien `LEAD` (D-09); selain itu `null`. */
+/**
+ * Segmen hanya untuk klien `LEAD` (D-09); selain itu `null`. Batasnya dalam
+ * hari kalender dari setelan bisnis (`lead_hot_max_days`, `lead_warm_max_days`,
+ * bawaan 3 dan 7): HOT ≤ hot, WARM ≤ warm, COLD sesudahnya.
+ */
 export function leadSegment(
   lifecycleStatus: string,
   days: number | null,
+  hotMaxDays: number,
+  warmMaxDays: number,
 ): LeadSegment | null {
   if (lifecycleStatus !== "LEAD" || days === null) return null;
-  if (days <= HOT_MAX_DAYS) return "HOT";
-  if (days <= WARM_MAX_DAYS) return "WARM";
+  if (days <= hotMaxDays) return "HOT";
+  if (days <= warmMaxDays) return "WARM";
   return "COLD";
 }
 

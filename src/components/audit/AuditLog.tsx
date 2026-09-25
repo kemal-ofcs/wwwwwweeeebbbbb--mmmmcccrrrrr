@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { ActiveSessions } from "@/components/audit/ActiveSessions";
+import { SAMPLE_STATUS_LABEL } from "@/components/samples/labels";
 import { FeedbackBanner } from "@/components/ui/FeedbackBanner";
 import { PageHeader } from "@/components/ui/PageHeader";
 import { hasPermission } from "@/lib/auth/access";
@@ -25,6 +26,8 @@ const ENTITY_OPTIONS = [
   ["client", "Clients"],
   ["lead", "Leads"],
   ["master_option", "Master data"],
+  ["sample", "Samples"],
+  ["setting", "Settings"],
   ["session", "Sessions"],
   ["sync", "Sync queue"],
 ] as const;
@@ -32,6 +35,9 @@ const ENTITY_OPTIONS = [
 const KIND_LABEL: Record<string, string> = {
   LEAD_CHANNEL: "lead channel",
   PRODUCT_CATEGORY: "product category",
+  SAMPLE_KIND: "sample kind",
+  FORMULATION_TYPE: "formulation type",
+  REGISTRATION_CATEGORY: "registration category",
 };
 
 type Summary = Record<string, unknown>;
@@ -68,6 +74,14 @@ function describe(entry: AuditEntry, operatorName: (id: number) => string) {
       return `Ended a session of ${operatorName(Number(s.operator_id))}: ${String(s.reason ?? "")}`;
     case "session.end_all":
       return `Ended all sessions of ${operatorName(Number(s.operator_id))}: ${String(s.reason ?? "")}`;
+    case "sample.create":
+      return `Created a ${s.is_paid_sample === false ? "free" : "paid"} sample request "${String(s.brand_name ?? "")}" for ${code}`;
+    case "sample.update":
+      return `Edited sample request "${String(s.brand_name ?? "")}" for ${code}`;
+    case "sample.step":
+      return `Moved sample "${String(s.brand_name ?? "")}" for ${code} from ${SAMPLE_STATUS_LABEL[String(s.from)] ?? String(s.from ?? "")} to ${SAMPLE_STATUS_LABEL[String(s.to)] ?? String(s.to ?? "")}: ${String(s.notes ?? "")}`;
+    case "settings.business":
+      return `Changed business settings: ${String(s.default_free_revision_limit ?? "")} free revisions, sample fee ${String(s.sample_fee_mode ?? "")}, Hot ≤ ${String(s.lead_hot_max_days ?? "")} days, Warm ≤ ${String(s.lead_warm_max_days ?? "")} days`;
     case "sync.quarantine_discard":
       return `Discarded ${String(s.count ?? 0)} unsent change(s) held after a sign-in on another device`;
     default:

@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import {
   type FormEvent,
   useCallback,
@@ -9,6 +10,8 @@ import {
 } from "react";
 import { FeedbackBanner } from "@/components/ui/FeedbackBanner";
 import { Modal } from "@/components/ui/Modal";
+import { hasPermission } from "@/lib/auth/access";
+import { useAuth } from "@/lib/context/AuthContext";
 import {
   type ClientRecord,
   type LeadInteractionRecord,
@@ -73,6 +76,8 @@ export function LeadDetail({
   onClose,
 }: LeadDetailProps) {
   const leadId = client.lead_id ?? "";
+  const { user } = useAuth();
+  const canRequestSample = hasPermission(user, "samples.manage");
   const [history, setHistory] = useState<LeadInteractionRecord[]>([]);
   const [operators, setOperators] = useState<OperatorDirectoryEntry[]>([]);
   const [loading, setLoading] = useState(true);
@@ -205,6 +210,14 @@ export function LeadDetail({
           >
             Edit client details
           </button>
+        ) : null}
+        {canRequestSample ? (
+          <Link
+            href={`/samples?client=${encodeURIComponent(client.id)}`}
+            className="app-btn app-btn-secondary"
+          >
+            New sample request
+          </Link>
         ) : null}
 
         {error ? <FeedbackBanner tone="error">{error}</FeedbackBanner> : null}

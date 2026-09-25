@@ -29,6 +29,7 @@ export interface SyncStatus {
     leads: number;
     masterOptions: number;
     leadInteractions: number;
+    sampleRequests: number;
   };
   /**
    * Terisi bila push gagal tetapi pull tetap berhasil pada siklus yang sama.

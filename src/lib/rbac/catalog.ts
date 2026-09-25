@@ -26,6 +26,10 @@ export const PERMISSION_CATALOG = [
   { key: "leads.view", name: "View leads", group: "Leads" },
   { key: "leads.manage", name: "Manage own leads", group: "Leads" },
   { key: "leads.reassign", name: "Reassign leads", group: "Leads" },
+  // Tiket sampel (PRD F-06). Di MVP pemegang `samples.manage` juga mencatat
+  // langkah RnD dan Finance atas nama divisi itu (D-23).
+  { key: "samples.view", name: "View sample requests", group: "Samples" },
+  { key: "samples.manage", name: "Manage sample requests", group: "Samples" },
   // MENGAJUKAN reset password dan MENGAKTIFKAN 2FA untuk akun sendiri tidak
   // butuh izin apa pun: yang pertama memang terbuka tanpa sesi, yang kedua hak
   // setiap operator atas akunnya. Yang di-RBAC adalah membaca/menghapus jejak
@@ -158,6 +162,8 @@ export const DEFAULT_ROLE_PERMISSIONS: Record<
     "clients.manage",
     "leads.view",
     "leads.manage",
+    "samples.view",
+    "samples.manage",
     "sync.view",
   ],
 };
