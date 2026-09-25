@@ -65,6 +65,12 @@ export const PERMISSION_CATALOG = [
   },
   { key: "operators.view", name: "View operators", group: "Operators" },
   { key: "operators.manage", name: "Manage operators", group: "Operators" },
+  {
+    key: "sessions.manage",
+    name: "Manage active sessions",
+    group: "Operators",
+  },
+  { key: "audit.view", name: "View audit log", group: "Operators" },
   { key: "roles.manage", name: "Manage roles and access", group: "Roles" },
   {
     key: "settings.view",

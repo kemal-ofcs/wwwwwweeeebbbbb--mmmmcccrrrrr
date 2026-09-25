@@ -96,6 +96,7 @@ pub fn run() {
             desktop::commands::desktop_record_lead_interaction,
             desktop::commands::desktop_list_operator_directory,
             desktop::commands::desktop_reassign_lead,
+            desktop::commands::desktop_list_audit_log,
         ])
         .run(tauri::generate_context!())
         .unwrap_or_else(|error| {

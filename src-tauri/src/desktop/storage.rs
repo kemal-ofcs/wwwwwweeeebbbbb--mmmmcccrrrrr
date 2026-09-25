@@ -273,6 +273,18 @@ pub fn initialize(path: &Path) -> Result<(), String> {
         occurred_at TEXT NOT NULL,
         created_at TEXT NOT NULL
       );
+      -- Log audit domain: ditulis di transaksi yang sama dengan mutasinya,
+      -- didorong lewat rute `audit/record`, tidak ditarik ulang dari cloud.
+      CREATE TABLE IF NOT EXISTS domain_audit_log (
+        id TEXT PRIMARY KEY,
+        actor_operator_id INTEGER,
+        on_behalf_of_division TEXT NOT NULL DEFAULT '',
+        action TEXT NOT NULL,
+        entity_type TEXT NOT NULL,
+        entity_id TEXT NOT NULL,
+        summary_json TEXT NOT NULL DEFAULT '{}',
+        occurred_at TEXT NOT NULL
+      );
       -- Direktori operator hanya-baca (nama PIC, pilihan pindah PIC saat
       -- offline). Kolomnya sama dengan `master_operator` cloud supaya DDL
       -- lokal dan cloud tetap bisa hidup di satu berkas (Mode Database Lokal,
@@ -347,6 +359,7 @@ const CLOUD_MIRRORED_TABLES: &[&str] = &[
     "master_option",
     "lead_interactions",
     "master_operator",
+    "domain_audit_log",
 ];
 
 /// Membuang seluruh jejak database cloud lama ketika perangkat dipindahkan ke
@@ -656,6 +669,7 @@ mod tests {
             "master_option",
             "lead_interactions",
             "master_operator",
+            "domain_audit_log",
             "setting_gex_system",
             "desktop_sync_outbox",
             "desktop_sync_cursor",
@@ -825,5 +839,42 @@ mod tests {
         assert_eq!(followup, "2026-09-24 10:00:00");
         assert_eq!(response, "2026-09-23 08:00:00");
         assert_eq!(total, 2);
+    }
+
+    /// Log audit lokal hanya-tambah: kiriman ulang dengan id yang sama tidak
+    /// menimpa baris yang sudah ada (PRD FR-10.2), dan daftar filter berjalan
+    /// di skema lokal. Padanan TS: `src/lib/server/audit.test.ts`.
+    #[test]
+    fn log_audit_lokal_hanya_tambah() {
+        use super::super::clients::{DOMAIN_AUDIT_INSERT_SQL, DOMAIN_AUDIT_LIST_SQL};
+        let directory = tempdir().expect("temporary directory");
+        initialize(directory.path()).expect("schema");
+        let connection = database(directory.path()).expect("database connection");
+        for label in ["asli", "tiruan"] {
+            connection
+                .execute(
+                    DOMAIN_AUDIT_INSERT_SQL,
+                    rusqlite::params![
+                        "audit-1", 7, "CS", "client.update", "client", "client-1",
+                        format!("{{\"name\":\"{label}\"}}"), "2026-09-25 01:00:00"
+                    ],
+                )
+                .expect("insert");
+        }
+        let summary: String = connection
+            .query_row("SELECT summary_json FROM domain_audit_log WHERE id = 'audit-1';", [], |row| row.get(0))
+            .expect("row");
+        assert_eq!(summary, "{\"name\":\"asli\"}");
+        let count = |entity: &str, actor: i64| -> usize {
+            let mut statement = connection.prepare(DOMAIN_AUDIT_LIST_SQL).expect("prepare");
+            statement
+                .query_map(rusqlite::params![entity, actor, "", ""], |_| Ok(()))
+                .expect("query")
+                .count()
+        };
+        assert_eq!(count("", 0), 1);
+        assert_eq!(count("client", 7), 1);
+        assert_eq!(count("lead", 0), 0);
+        assert_eq!(count("", 8), 0);
     }
 }

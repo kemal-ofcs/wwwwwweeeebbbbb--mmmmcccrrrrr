@@ -3,6 +3,7 @@ import "server-only";
 import type { Client } from "@libsql/client";
 import type { OperatorUser } from "@/lib/auth/operator-user";
 import { AuthorizationError } from "@/lib/auth/permission-assertion";
+import { type AuditActor, writeAudit } from "@/lib/server/audit";
 import { ApiRequestError } from "@/lib/server/http/api-response";
 import {
   INTERACTION_NOTES_MAX,
@@ -127,7 +128,7 @@ export async function recordLeadInteraction(
     if ("error" in occurred) leadInvalid(occurred.error);
 
     const lead = await transaction.execute({
-      sql: "SELECT pic_cs_id FROM leads WHERE id = ?;",
+      sql: "SELECT l.pic_cs_id, c.client_code FROM leads l JOIN clients c ON c.id = l.client_id WHERE l.id = ?;",
       args: [leadId],
     });
     const row = lead.rows[0];
@@ -159,6 +160,19 @@ export async function recordLeadInteraction(
         utcTimestamp(now),
       ],
     });
+    await writeAudit(
+      transaction,
+      operator,
+      "lead_interaction.record",
+      "lead",
+      leadId,
+      {
+        client_code: String(row.client_code),
+        interaction_id: id,
+        direction,
+        kind,
+      },
+    );
     await transaction.commit();
     return { id };
   } finally {
@@ -185,22 +199,33 @@ export async function reassignLead(
   client: Client,
   leadId: unknown,
   picCsId: unknown,
+  actor: AuditActor,
 ) {
   const id = typeof leadId === "string" ? leadId.trim() : "";
-  const lead = await client.execute({
-    sql: "SELECT 1 AS found FROM leads WHERE id = ?;",
-    args: [id],
-  });
-  if (!lead.rows[0]) throw new ApiRequestError("Lead not found.", 404);
   const pic =
     typeof picCsId === "number" && Number.isSafeInteger(picCsId) ? picCsId : 0;
-  const active = await client.execute({
-    sql: "SELECT 1 AS found FROM master_operator WHERE id = ? AND COALESCE(status, 'Active') = 'Active';",
-    args: [pic],
-  });
-  if (!active.rows[0]) leadInvalid("Choose an active operator.");
-  await client.execute({
-    sql: "UPDATE leads SET pic_cs_id = ?, updated_at = datetime('now') WHERE id = ?;",
-    args: [pic, id],
-  });
+  const transaction = await client.transaction("write");
+  try {
+    const lead = await transaction.execute({
+      sql: "SELECT c.client_code FROM leads l JOIN clients c ON c.id = l.client_id WHERE l.id = ?;",
+      args: [id],
+    });
+    if (!lead.rows[0]) throw new ApiRequestError("Lead not found.", 404);
+    const active = await transaction.execute({
+      sql: "SELECT 1 AS found FROM master_operator WHERE id = ? AND COALESCE(status, 'Active') = 'Active';",
+      args: [pic],
+    });
+    if (!active.rows[0]) leadInvalid("Choose an active operator.");
+    await transaction.execute({
+      sql: "UPDATE leads SET pic_cs_id = ?, updated_at = datetime('now') WHERE id = ?;",
+      args: [pic, id],
+    });
+    await writeAudit(transaction, actor, "lead.reassign", "lead", id, {
+      client_code: String(lead.rows[0].client_code),
+      pic_cs_id: pic,
+    });
+    await transaction.commit();
+  } finally {
+    transaction.close();
+  }
 }

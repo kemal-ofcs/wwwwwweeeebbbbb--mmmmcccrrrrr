@@ -54,12 +54,24 @@ describe("dynamic RBAC migration", () => {
     await runDatabaseMigrations(client);
     await runDatabaseMigrations(client);
 
+    // Role sistem template + sepuluh role divisi MaklonOS (PRD FR-02). Menjalankan
+    // migrasi dua kali tidak boleh menggandakannya.
     const roles = await client.execute(
       "SELECT role_key FROM app_role ORDER BY role_key;",
     );
     expect(roles.rows.map((row) => String(row.role_key))).toEqual([
       "admin",
+      "crm",
+      "cs",
+      "design",
+      "finance",
+      "legal",
+      "logistics",
       "operator",
+      "ppic",
+      "production_spv",
+      "qc",
+      "rnd",
       "superadmin",
     ]);
 
@@ -82,12 +94,13 @@ describe("dynamic RBAC migration", () => {
       "SELECT version FROM schema_migration ORDER BY version;",
     );
     // Versi 2 adalah kontak operator + pemulihan password + 2FA, versi 3
-    // domain MaklonOS (klien, lead, Master Data), versi 4 interaksi lead.
+    // domain MaklonOS (klien, lead, Master Data), versi 4 interaksi lead,
+    // versi 5 log audit + role divisi.
     // Setiap
     // migrasi baru harus muncul di daftar ini, supaya database hasil migrasi
     // terbukti sampai pada versi yang sama dengan database yang baru dibuat.
     expect(migrations.rows.map((row) => Number(row.version))).toEqual([
-      1, 2, 3, 4,
+      1, 2, 3, 4, 5,
     ]);
 
     const sessionColumns = await client.execute(

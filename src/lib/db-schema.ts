@@ -14,7 +14,7 @@ import { runDatabaseMigrations } from "./db-migrations";
  * Rust DAN migrasi `ALTER TABLE` di `db-migrations.ts`, supaya klien mana pun
  * bisa menyembuhkan database buatan klien lain.
  */
-export const CURRENT_SCHEMA_VERSION = 4;
+export const CURRENT_SCHEMA_VERSION = 5;
 
 /** Tabel yang wajib ada sebelum database dianggap siap dipakai. */
 export const REQUIRED_TABLES = [
@@ -50,6 +50,8 @@ export const REQUIRED_TABLES = [
   "device_tag_registry",
   // Catatan follow up dan respons klien per lead (PRD FR-05), ikut sinkronisasi.
   "lead_interactions",
+  // Log audit domain (PRD F-10): ditulis perangkat dan Web, hanya-tambah.
+  "domain_audit_log",
 ] as const;
 
 export const REQUIRED_TABLE_COUNT = REQUIRED_TABLES.length;
@@ -93,6 +95,17 @@ async function rejectLegacyStoredValues(client: Client) {
     throw new Error(LEGACY_STORED_VALUES_MESSAGE);
   }
 }
+
+/**
+ * Seed role divisi. WAJIB identik (per karakter) dengan seed yang sama di
+ * `turso.rs`; `division-roles.test.ts` membandingkan keduanya. Urutannya
+ * penting: penanda ditulis terakhir.
+ */
+export const DIVISION_ROLE_SEED_SQL = [
+  "INSERT OR IGNORE INTO app_role (role_key, nama_role, deskripsi, is_system, is_superadmin, status, created_at, updated_at) SELECT column1, column2, column3, 0, 0, 'Active', datetime('now'), datetime('now') FROM (VALUES ('cs', 'CS', 'Customer service: registers leads and follows them up.'), ('crm', 'CRM', 'Client relationship after the first order.'), ('rnd', 'R&D', 'Formulation and samples.'), ('finance', 'Finance', 'Invoices and payments.'), ('design', 'Design', 'Mockups and dummies.'), ('legal', 'Legal', 'BPOM, halal, and trademark filings.'), ('ppic', 'PPIC', 'Production planning and materials.'), ('production_spv', 'Production SPV', 'Production floor supervision.'), ('qc', 'QC', 'Quality control and claims.'), ('logistics', 'Logistics', 'Shipping and delivery.')) WHERE NOT EXISTS (SELECT 1 FROM setting_gex_system WHERE key = 'division_roles_seeded');",
+  "INSERT OR IGNORE INTO role_permission (role_id, permission_key, is_allowed, updated_at, updated_by) SELECT r.id, p.permission_key, 1, datetime('now'), 'system' FROM app_role r JOIN app_permission p ON p.permission_key IN ('home.view', 'dashboard.view', 'sync.view') OR (r.role_key IN ('cs', 'crm') AND p.permission_key IN ('clients.view', 'leads.view')) OR (r.role_key = 'cs' AND p.permission_key IN ('clients.manage', 'leads.manage')) WHERE r.role_key IN ('cs', 'crm', 'rnd', 'finance', 'design', 'legal', 'ppic', 'production_spv', 'qc', 'logistics') AND NOT EXISTS (SELECT 1 FROM setting_gex_system WHERE key = 'division_roles_seeded');",
+  "INSERT OR IGNORE INTO setting_gex_system (key, value) VALUES ('division_roles_seeded', '1');",
+];
 
 export async function initDatabaseSchema(client: Client) {
   await rejectLegacyStoredValues(client);
@@ -351,6 +364,20 @@ export async function initDatabaseSchema(client: Client) {
       occurred_at TEXT NOT NULL,
       created_at TEXT NOT NULL
       );`,
+    // Log audit domain (PRD FR-10). Hanya-tambah: rute sync `audit/record`
+    // hanya menyisipkan, dan tidak ada jalur aplikasi yang mengubah atau
+    // menghapusnya. Perangkat menulisnya dalam transaksi yang sama dengan
+    // mutasinya lalu mendorongnya lewat outbox; tabel ini tidak ditarik ulang.
+    `CREATE TABLE IF NOT EXISTS domain_audit_log (
+      id TEXT PRIMARY KEY,
+      actor_operator_id INTEGER,
+      on_behalf_of_division TEXT NOT NULL DEFAULT '',
+      action TEXT NOT NULL,
+      entity_type TEXT NOT NULL,
+      entity_id TEXT NOT NULL,
+      summary_json TEXT NOT NULL DEFAULT '{}',
+      occurred_at TEXT NOT NULL
+      );`,
     // Cloud-only: tag dua karakter yang diterbitkan untuk setiap perangkat,
     // bagian `<KP>` dari kode klien. Tidak ikut sinkronisasi, jadi UNIQUE
     // di sini aman.
@@ -367,6 +394,8 @@ export async function initDatabaseSchema(client: Client) {
     `CREATE INDEX IF NOT EXISTS idx_leads_client ON leads(client_id);`,
     `CREATE INDEX IF NOT EXISTS idx_master_option_kind ON master_option(kind, sort_order);`,
     `CREATE INDEX IF NOT EXISTS idx_lead_interactions_lead ON lead_interactions(lead_id, occurred_at);`,
+    `CREATE INDEX IF NOT EXISTS idx_domain_audit_occurred ON domain_audit_log(occurred_at);`,
+    `CREATE INDEX IF NOT EXISTS idx_domain_audit_entity ON domain_audit_log(entity_type, entity_id);`,
 
     // Seed role bawaan. TIDAK ADA akun bawaan: operator pertama hanya lahir
     // lewat provisioning sekali-pakai, sehingga tidak ada kredensial default
@@ -394,6 +423,8 @@ export async function initDatabaseSchema(client: Client) {
       ('database_backup.export', 'Export database backup', 'System', 'Export the entire database into one backup file.', 1, 66),
       ('database_backup.restore', 'Restore database from backup', 'System', 'Replace all device data with the contents of a backup file.', 1, 67),
       ('operators.view', 'View operators', 'Operators', 'View operator and user account data.', 1, 70),
+      ('sessions.manage', 'Manage active sessions', 'Operators', 'View every operator''s active sessions and end them.', 1, 72),
+      ('audit.view', 'View audit log', 'Operators', 'View who changed clients, leads, and master data, and when.', 1, 74),
       ('operators.manage', 'Manage operators', 'Operators', 'Add and edit app operators.', 1, 80),
       ('roles.manage', 'Manage roles and access', 'Roles', 'Set the permission matrix of each role.', 1, 90),
       ('settings.view', 'View system settings', 'Settings', 'View app and database settings.', 1, 100),
@@ -426,6 +457,10 @@ export async function initDatabaseSchema(client: Client) {
     `INSERT OR IGNORE INTO setting_gex_system (key, value) VALUES
       ('app_name', 'App Template'),
       ('rbac_revision', '1');`,
+
+    // Role divisi (PRD FR-02), sekali saja: dijaga penanda supaya role yang
+    // dihapus atau izin yang dicabut Admin tidak kembali saat skema naik versi.
+    ...DIVISION_ROLE_SEED_SQL,
 
     // Angka 1 di sini disengaja dan TIDAK boleh diikatkan ke
     // `CURRENT_SCHEMA_VERSION`: baris ini menandai fondasi versi 1, sedangkan

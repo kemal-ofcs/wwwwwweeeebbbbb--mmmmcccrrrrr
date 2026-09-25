@@ -18,6 +18,7 @@
     "allow-desktop-record-lead-interaction",
     "allow-desktop-list-operator-directory",
     "allow-desktop-reassign-lead",
+    "allow-desktop-list-audit-log",
     "allow-desktop-get-session",
     "allow-desktop-get-runtime-status",
     "allow-desktop-get-license-status",

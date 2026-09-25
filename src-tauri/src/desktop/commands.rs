@@ -1524,13 +1524,25 @@ pub fn desktop_clear_turso_config(state: State<'_, DesktopState>) -> Result<(), 
 // terkirim dua kali tidak pernah menggandakan baris.
 // ===========================================================================
 
+/// Satu baris log audit domain (PRD FR-10) untuk mutasi yang sedang ditulis.
+struct AuditEntry<'a> {
+    actor: &'a OperatorUser,
+    action: &'static str,
+    entity_type: &'static str,
+    entity_id: &'a str,
+    summary: Value,
+}
+
 /// Tulis satu mutasi lokal beserta event outbox-nya dalam satu transaksi.
+/// Bila `audit` diisi, baris log audit dan event `audit/record`-nya ikut
+/// transaksi yang sama (PRD FR-10.1): mutasi dan jejaknya tidak pernah terpisah.
 fn commit_with_outbox(
     state: &DesktopState,
     domain: &str,
     operation: &str,
     entity_key: &str,
     payload: Value,
+    audit: Option<AuditEntry<'_>>,
     apply: impl FnOnce(&rusqlite::Transaction<'_>) -> Result<(), CommandError>,
 ) -> Result<(), CommandError> {
     let client_id = sync::ensure_client_id(state)?;
@@ -1539,6 +1551,44 @@ fn commit_with_outbox(
         .transaction()
         .map_err(|_| CommandError::internal())?;
     apply(&transaction)?;
+    if let Some(entry) = audit {
+        let id = clients::new_uuid();
+        let occurred_at = clients::utc_timestamp(storage::now_epoch_seconds());
+        let summary = entry.summary.to_string();
+        transaction
+            .execute(
+                clients::DOMAIN_AUDIT_INSERT_SQL,
+                rusqlite::params![
+                    &id,
+                    entry.actor.id,
+                    &entry.actor.role,
+                    entry.action,
+                    entry.entity_type,
+                    entry.entity_id,
+                    &summary,
+                    &occurred_at
+                ],
+            )
+            .map_err(|_| CommandError::internal())?;
+        sync::enqueue(
+            &transaction,
+            &client_id,
+            "audit",
+            "record",
+            &id,
+            &json!({
+                "id": id,
+                "actor_operator_id": entry.actor.id,
+                "on_behalf_of_division": entry.actor.role,
+                "action": entry.action,
+                "entity_type": entry.entity_type,
+                "entity_id": entry.entity_id,
+                "summary_json": summary,
+                "occurred_at": occurred_at,
+            }),
+            None,
+        )?;
+    }
     sync::enqueue(
         &transaction,
         &client_id,
@@ -1694,6 +1744,7 @@ pub async fn desktop_update_company_profile(
         "update",
         "default_company",
         payload.clone(),
+        None,
         move |transaction| {
             let value = |key: &str| -> Option<String> {
                 row.get(key)
@@ -2053,7 +2104,14 @@ pub async fn desktop_register_client(
         "total_followups": 0,
     });
 
-    commit_with_outbox(&state, "client", "register", &id, payload, |transaction| {
+    let audit = AuditEntry {
+        actor: &operator,
+        action: "client.register",
+        entity_type: "client",
+        entity_id: &id,
+        summary: json!({ "client_code": code, "name": draft.name }),
+    };
+    commit_with_outbox(&state, "client", "register", &id, payload, Some(audit), |transaction| {
         transaction
             .execute(
                 r#"INSERT INTO clients
@@ -2095,7 +2153,7 @@ pub async fn desktop_update_client(
     client: Value,
 ) -> Result<Value, CommandError> {
     use rusqlite::OptionalExtension;
-    require_permission(&state, "clients.manage")?;
+    let operator = require_permission(&state, "clients.manage")?;
     let id = draft_text(&client, "id");
     let now = clients::utc_timestamp(storage::now_epoch_seconds());
     let (draft, current) = {
@@ -2171,7 +2229,14 @@ pub async fn desktop_update_client(
         "total_followups": current["total_followups"],
     });
 
-    commit_with_outbox(&state, "client", "update", &id, payload, |transaction| {
+    let audit = AuditEntry {
+        actor: &operator,
+        action: "client.update",
+        entity_type: "client",
+        entity_id: &id,
+        summary: json!({ "client_code": current["client_code"], "name": draft.name }),
+    };
+    commit_with_outbox(&state, "client", "update", &id, payload, Some(audit), |transaction| {
         transaction
             .execute(
                 "UPDATE clients SET name = ?, phone_normalized = ?, address = ?, city = ?, province = ?, updated_at = ? WHERE id = ?;",
@@ -2232,7 +2297,7 @@ pub async fn desktop_save_master_option(
     option: Value,
 ) -> Result<Value, CommandError> {
     use rusqlite::OptionalExtension;
-    require_permission(&state, "master_data.manage")?;
+    let operator = require_permission(&state, "master_data.manage")?;
     let invalid = |message: &str| CommandError::new("MASTER_OPTION_INVALID", message);
     let requested_id = draft_text(&option, "id");
     let code = clients::normalize_option_code(&draft_text(&option, "code"))
@@ -2293,7 +2358,14 @@ pub async fn desktop_save_master_option(
         "sort_order": sort_order,
         "updated_at": now,
     });
-    commit_with_outbox(&state, "master-option", "upsert", &id, payload.clone(), |transaction| {
+    let audit = AuditEntry {
+        actor: &operator,
+        action: "master_option.save",
+        entity_type: "master_option",
+        entity_id: &id,
+        summary: json!({ "kind": kind, "code": code, "label": label, "is_active": is_active }),
+    };
+    commit_with_outbox(&state, "master-option", "upsert", &id, payload.clone(), Some(audit), |transaction| {
         transaction
             .execute(
                 r#"INSERT INTO master_option (id, kind, code, label, is_active, sort_order, updated_at)
@@ -2472,12 +2544,14 @@ pub async fn desktop_record_lead_interaction(
     let now = storage::now_epoch_seconds();
     let occurred = clients::resolve_interaction_time(interaction.get("occurred_at"), now)
         .map_err(lead_invalid)?;
-    {
+    let client_code = {
         let connection = storage::database(&state.data_dir)?;
-        let pic = connection
-            .query_row("SELECT pic_cs_id FROM leads WHERE id = ?;", [&lead_id], |row| {
-                row.get::<_, Option<i64>>(0)
-            })
+        let (pic, code) = connection
+            .query_row(
+                "SELECT l.pic_cs_id, c.client_code FROM leads l JOIN clients c ON c.id = l.client_id WHERE l.id = ?;",
+                [&lead_id],
+                |row| Ok((row.get::<_, Option<i64>>(0)?, row.get::<_, String>(1)?)),
+            )
             .optional()
             .map_err(|_| CommandError::internal())?
             .ok_or_else(|| CommandError::new("LEAD_NOT_FOUND", "Lead not found."))?;
@@ -2487,7 +2561,8 @@ pub async fn desktop_record_lead_interaction(
                 "Only the lead's CS can record on it. Ask an Admin to reassign the lead.",
             ));
         }
-    }
+        code
+    };
 
     let id = clients::new_uuid();
     let occurred_at = clients::utc_timestamp(occurred);
@@ -2502,7 +2577,14 @@ pub async fn desktop_record_lead_interaction(
         "occurred_at": occurred_at,
         "created_at": created_at,
     });
-    commit_with_outbox(&state, "lead-interaction", "record", &id, payload, |transaction| {
+    let audit = AuditEntry {
+        actor: &operator,
+        action: "lead_interaction.record",
+        entity_type: "lead",
+        entity_id: &lead_id,
+        summary: json!({ "client_code": client_code, "interaction_id": id, "direction": direction, "kind": kind }),
+    };
+    commit_with_outbox(&state, "lead-interaction", "record", &id, payload, Some(audit), |transaction| {
         transaction
             .execute(
                 clients::LEAD_SUMMARY_UPDATE_SQL,
@@ -2559,12 +2641,16 @@ pub async fn desktop_reassign_lead(
     pic_cs_id: i64,
 ) -> Result<Value, CommandError> {
     use rusqlite::OptionalExtension;
-    require_permission(&state, "leads.reassign")?;
+    let operator = require_permission(&state, "leads.reassign")?;
     let lead_id = lead_id.trim().to_owned();
-    {
+    let client_code = {
         let connection = storage::database(&state.data_dir)?;
-        connection
-            .query_row("SELECT 1 FROM leads WHERE id = ?;", [&lead_id], |_| Ok(()))
+        let code = connection
+            .query_row(
+                "SELECT c.client_code FROM leads l JOIN clients c ON c.id = l.client_id WHERE l.id = ?;",
+                [&lead_id],
+                |row| row.get::<_, String>(0),
+            )
             .optional()
             .map_err(|_| CommandError::internal())?
             .ok_or_else(|| CommandError::new("LEAD_NOT_FOUND", "Lead not found."))?;
@@ -2579,10 +2665,18 @@ pub async fn desktop_reassign_lead(
         if active.is_none() {
             return Err(lead_invalid("Choose an active operator."));
         }
-    }
+        code
+    };
     let updated_at = clients::utc_timestamp(storage::now_epoch_seconds());
     let payload = json!({ "id": lead_id, "pic_cs_id": pic_cs_id, "updated_at": updated_at });
-    commit_with_outbox(&state, "lead", "reassign", &lead_id, payload, |transaction| {
+    let audit = AuditEntry {
+        actor: &operator,
+        action: "lead.reassign",
+        entity_type: "lead",
+        entity_id: &lead_id,
+        summary: json!({ "client_code": client_code, "pic_cs_id": pic_cs_id }),
+    };
+    commit_with_outbox(&state, "lead", "reassign", &lead_id, payload, Some(audit), |transaction| {
         transaction
             .execute(
                 "UPDATE leads SET pic_cs_id = ?, updated_at = ? WHERE id = ?;",
@@ -2593,6 +2687,60 @@ pub async fn desktop_reassign_lead(
     })?;
     let _ = sync::synchronize(&state).await;
     Ok(json!({ "sukses": true }))
+}
+
+/// Log audit domain (PRD FR-10.3). Online: dari cloud, jadi terlihat seluruh
+/// perangkat dan Web. Offline: hanya catatan yang pernah ditulis perangkat ini,
+/// dan `source` memberitahu layar yang mana.
+#[tauri::command]
+pub async fn desktop_list_audit_log(
+    state: State<'_, DesktopState>,
+    filter: Value,
+) -> Result<Value, CommandError> {
+    require_permission(&state, "audit.view")?;
+    let timezone = {
+        let connection = storage::database(&state.data_dir)?;
+        company_timezone(&connection)
+    };
+    let entity_type = draft_text(&filter, "entity_type");
+    let actor = filter.get("actor_operator_id").and_then(Value::as_i64).unwrap_or(0);
+    let from = clients::company_day_bounds_utc(&draft_text(&filter, "from"), &timezone)
+        .map(|(start, _)| start)
+        .unwrap_or_default();
+    let to = clients::company_day_bounds_utc(&draft_text(&filter, "to"), &timezone)
+        .map(|(_, end)| end)
+        .unwrap_or_default();
+
+    if let Ok(turso) = state.get_turso_client() {
+        let params = vec![json!(entity_type), json!(actor), json!(from), json!(to)];
+        if let Ok(entries) = turso.list_domain_audit(params).await {
+            return Ok(json!({ "source": "cloud", "entries": entries }));
+        }
+    }
+
+    let connection = storage::database(&state.data_dir)?;
+    let mut statement = connection
+        .prepare(clients::DOMAIN_AUDIT_LIST_SQL)
+        .map_err(|_| CommandError::internal())?;
+    let rows = statement
+        .query_map(rusqlite::params![entity_type, actor, from, to], |row| {
+            Ok(json!({
+                "id": row.get::<_, String>(0)?,
+                "actor_operator_id": row.get::<_, Option<i64>>(1)?,
+                "actor_name": row.get::<_, Option<String>>(2)?,
+                "on_behalf_of_division": row.get::<_, String>(3)?,
+                "action": row.get::<_, String>(4)?,
+                "entity_type": row.get::<_, String>(5)?,
+                "entity_id": row.get::<_, String>(6)?,
+                "summary_json": row.get::<_, String>(7)?,
+                "occurred_at": row.get::<_, String>(8)?,
+            }))
+        })
+        .map_err(|_| CommandError::internal())?;
+    let entries = rows
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| CommandError::internal())?;
+    Ok(json!({ "source": "device", "entries": entries }))
 }
 
 #[cfg(test)]

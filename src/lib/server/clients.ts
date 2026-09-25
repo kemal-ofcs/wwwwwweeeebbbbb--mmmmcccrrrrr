@@ -1,6 +1,7 @@
 import "server-only";
 
 import type { Client, Transaction } from "@libsql/client";
+import { type AuditActor, writeAudit } from "@/lib/server/audit";
 import { ApiRequestError } from "@/lib/server/http/api-response";
 import {
   CLIENT_CODE_PREFIX_SETTING,
@@ -287,8 +288,9 @@ export async function getClientCodeSettings(
 export async function registerClient(
   client: Client,
   draftInput: Draft,
-  operatorId: number,
+  actor: AuditActor,
 ) {
+  const operatorId = actor.id;
   const transaction = await client.transaction("write");
   try {
     const draft = await validateClientDraft(transaction, draftInput);
@@ -370,6 +372,10 @@ export async function registerClient(
         timestamp,
       ],
     });
+    await writeAudit(transaction, actor, "client.register", "client", id, {
+      client_code: code,
+      name: draft.name,
+    });
     await transaction.commit();
     return { id, client_code: code };
   } finally {
@@ -381,12 +387,16 @@ export async function registerClient(
  * Ubah data kontak klien dan kebutuhan lead-nya. Kode klien, pembuat, dan
  * kolom interaksi lead tidak ikut berubah — sama dengan `desktop_update_client`.
  */
-export async function updateClient(client: Client, draftInput: Draft) {
+export async function updateClient(
+  client: Client,
+  draftInput: Draft,
+  actor: AuditActor,
+) {
   const id = text(draftInput, "id");
   const transaction = await client.transaction("write");
   try {
     const current = await transaction.execute({
-      sql: `SELECT l.id AS lead_id, l.channel_option_id, l.product_category_option_id
+      sql: `SELECT c.client_code, l.id AS lead_id, l.channel_option_id, l.product_category_option_id
             FROM clients c JOIN leads l ON l.client_id = c.id WHERE c.id = ? LIMIT 1;`,
       args: [id],
     });
@@ -414,6 +424,10 @@ export async function updateClient(client: Client, draftInput: Draft) {
       sql: `UPDATE leads SET channel_option_id = ?, product_category_option_id = ?,
               needs_notes = ?, updated_at = datetime('now') WHERE id = ?;`,
       args: [draft.channel, draft.category, draft.needs, String(row.lead_id)],
+    });
+    await writeAudit(transaction, actor, "client.update", "client", id, {
+      client_code: String(row.client_code),
+      name: draft.name,
     });
     await transaction.commit();
     return { id };
@@ -447,6 +461,7 @@ export async function listMasterOptions(
 export async function saveMasterOption(
   client: Client,
   option: Draft,
+  actor: AuditActor,
 ): Promise<MasterOptionRecord> {
   const invalid = (message: string): never => {
     throw new ApiRequestError(message, 400);
@@ -509,6 +524,19 @@ export async function saveMasterOption(
               updated_at = excluded.updated_at;`,
       args: [id, kind, code, label, isActive ? 1 : 0, sortOrder],
     });
+    await writeAudit(
+      transaction,
+      actor,
+      "master_option.save",
+      "master_option",
+      id,
+      {
+        kind,
+        code,
+        label,
+        is_active: isActive,
+      },
+    );
     const saved = await transaction.execute({
       sql: "SELECT updated_at FROM master_option WHERE id = ?;",
       args: [id],

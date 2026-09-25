@@ -23,11 +23,12 @@ export async function POST(request: NextRequest) {
   try {
     assertSameOriginMutation(request);
     await ensureServerDatabaseInitialized();
-    await requireWebPermission(request, "master_data.manage");
+    const operator = await requireWebPermission(request, "master_data.manage");
     const body = await readJsonBody<MasterOptionBody>(request);
     const option = await saveMasterOption(
       getServerDatabase(),
       (body.option ?? {}) as Record<string, unknown>,
+      operator,
     );
     return noStoreJson({ sukses: true, option });
   } catch (error) {

@@ -1,4 +1,5 @@
 import type { NextRequest } from "next/server";
+import { listDomainAudit } from "@/lib/server/audit";
 import { requireWebPermission } from "@/lib/server/auth/authorize";
 import {
   ensureServerDatabaseInitialized,
@@ -10,26 +11,24 @@ import {
   toApiErrorResponse,
 } from "@/lib/server/http/api-response";
 import { assertSameOriginMutation } from "@/lib/server/http/request-security";
-import { reassignLead } from "@/lib/server/leads";
 
 export const runtime = "nodejs";
 
-/** Cerminan `desktop_reassign_lead`. */
+/** Cerminan `desktop_list_audit_log`. Web selalu membaca dari cloud. */
 export async function POST(request: NextRequest) {
   try {
     assertSameOriginMutation(request);
     await ensureServerDatabaseInitialized();
-    const operator = await requireWebPermission(request, "leads.reassign");
-    const body = await readJsonBody<{ lead_id?: unknown; pic_cs_id?: unknown }>(
-      request,
-    );
-    await reassignLead(
-      getServerDatabase(),
-      body.lead_id,
-      body.pic_cs_id,
-      operator,
-    );
-    return noStoreJson({ sukses: true });
+    await requireWebPermission(request, "audit.view");
+    const body = await readJsonBody<{ filter?: unknown }>(request);
+    return noStoreJson({
+      sukses: true,
+      source: "cloud",
+      entries: await listDomainAudit(
+        getServerDatabase(),
+        (body.filter ?? {}) as Record<string, unknown>,
+      ),
+    });
   } catch (error) {
     return toApiErrorResponse(error);
   }

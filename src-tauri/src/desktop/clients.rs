@@ -287,6 +287,29 @@ pub const LEAD_SUMMARY_UPDATE_SQL: &str = "UPDATE leads SET last_followup_at = C
 /// operator_id, direction, kind, notes, occurred_at, created_at.
 pub const LEAD_INTERACTION_INSERT_SQL: &str = "INSERT INTO lead_interactions (id, lead_id, operator_id, direction, kind, notes, occurred_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO NOTHING;";
 
+/// Sisipkan satu baris log audit; kiriman ulang diabaikan dan baris lama tidak
+/// pernah ditimpa. Dipakai perangkat, handler push, dan Web
+/// (`DOMAIN_AUDIT_INSERT_SQL` di `src/lib/server/audit.ts`, WAJIB identik).
+/// Parameter: id, actor_operator_id, on_behalf_of_division, action,
+/// entity_type, entity_id, summary_json, occurred_at.
+pub const DOMAIN_AUDIT_INSERT_SQL: &str = "INSERT INTO domain_audit_log (id, actor_operator_id, on_behalf_of_division, action, entity_type, entity_id, summary_json, occurred_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO NOTHING;";
+
+/// Daftar log audit, terbaru dulu, paling banyak 200 baris. SQL statis dengan
+/// filter opsional, dipakai cloud, SQLite lokal, dan Web (`DOMAIN_AUDIT_LIST_SQL`
+/// di `src/lib/server/audit.ts`, WAJIB identik). Parameter: ?1 jenis entitas
+/// (`''` = semua), ?2 id pelaku (`0` = semua), ?3 batas awal UTC inklusif,
+/// ?4 batas akhir UTC eksklusif (`''` = tanpa batas).
+pub const DOMAIN_AUDIT_LIST_SQL: &str = "SELECT a.id, a.actor_operator_id, o.nama_operator AS actor_name, a.on_behalf_of_division, a.action, a.entity_type, a.entity_id, a.summary_json, a.occurred_at FROM domain_audit_log a LEFT JOIN master_operator o ON o.id = a.actor_operator_id WHERE (?1 = '' OR a.entity_type = ?1) AND (?2 = 0 OR a.actor_operator_id = ?2) AND (?3 = '' OR a.occurred_at >= ?3) AND (?4 = '' OR a.occurred_at < ?4) ORDER BY a.occurred_at DESC, a.rowid DESC LIMIT 200;";
+
+/// Batas UTC satu hari kalender perusahaan (`YYYY-MM-DD`): awal hari itu dan
+/// awal hari berikutnya, berbentuk `datetime('now')`. Padanan
+/// `companyDayBoundsUtc` di TS.
+pub fn company_day_bounds_utc(date: &str, timezone: &str) -> Option<(String, String)> {
+    let start = parse_stored_timestamp(&format!("{} 00:00:00", date.trim()))?
+        - timezone_offset_hours(timezone) * 3600;
+    Some((utc_timestamp(start), utc_timestamp(start + 86_400)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -441,5 +464,19 @@ mod tests {
             resolve_interaction_time(Some(&serde_json::json!(1.5)), now),
             Err("The interaction time is not valid.")
         );
+    }
+
+    #[test]
+    fn batas_hari_perusahaan() {
+        assert_eq!(
+            company_day_bounds_utc("2026-09-25", "Asia/Jakarta"),
+            Some(("2026-09-24 17:00:00".to_owned(), "2026-09-25 17:00:00".to_owned()))
+        );
+        assert_eq!(
+            company_day_bounds_utc("2026-09-25", "Asia/Jayapura"),
+            Some(("2026-09-24 15:00:00".to_owned(), "2026-09-25 15:00:00".to_owned()))
+        );
+        assert_eq!(company_day_bounds_utc("25-09-2026", "Asia/Jakarta"), None);
+        assert_eq!(company_day_bounds_utc("", "Asia/Jakarta"), None);
     }
 }
