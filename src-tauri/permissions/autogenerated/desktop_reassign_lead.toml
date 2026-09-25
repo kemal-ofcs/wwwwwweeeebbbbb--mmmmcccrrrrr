@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-desktop-reassign-lead"
+description = "Enables the desktop_reassign_lead command without any pre-configured scope."
+commands.allow = ["desktop_reassign_lead"]
+
+[[permission]]
+identifier = "deny-desktop-reassign-lead"
+description = "Denies the desktop_reassign_lead command without any pre-configured scope."
+commands.deny = ["desktop_reassign_lead"]

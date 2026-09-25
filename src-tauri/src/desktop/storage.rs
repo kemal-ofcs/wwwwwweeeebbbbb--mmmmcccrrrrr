@@ -90,7 +90,8 @@ fn ensure_column(
 ///    vault kredensial, audit, dan rate limit login. JANGAN dihapus; seluruh
 ///    aplikasi bergantung padanya, dan nama kolomnya dipakai langsung oleh
 ///    fungsi-fungsi di berkas ini.
-/// 2. **Domain MaklonOS** (`clients`, `leads`, `master_option`) — cache lokal
+/// 2. **Domain MaklonOS** (`clients`, `leads`, `master_option`,
+///    `lead_interactions`, direktori `master_operator`) — cache lokal
 ///    tabel cloud yang ikut sinkronisasi. Keempat lapisan (`storage.rs`,
 ///    `turso.rs`, `SNAPSHOT_TABLES` di `sync.rs`, `db-schema.ts`) WAJIB memakai
 ///    nama tabel dan kolom yang identik.
@@ -262,6 +263,42 @@ pub fn initialize(path: &Path) -> Result<(), String> {
         sort_order INTEGER NOT NULL DEFAULT 0,
         updated_at TEXT NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS lead_interactions (
+        id TEXT PRIMARY KEY,
+        lead_id TEXT NOT NULL,
+        operator_id INTEGER,
+        direction TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        notes TEXT NOT NULL,
+        occurred_at TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
+      -- Direktori operator hanya-baca (nama PIC, pilihan pindah PIC saat
+      -- offline). Kolomnya sama dengan `master_operator` cloud supaya DDL
+      -- lokal dan cloud tetap bisa hidup di satu berkas (Mode Database Lokal,
+      -- `audit:sql`), tetapi SEMUA boleh kosong: snapshot hanya mengisi id,
+      -- kode, nama, dan status. Hash password, kontak, dan rahasia 2FA tidak
+      -- pernah disalin ke perangkat (lihat `SNAPSHOT_SOURCES` di turso.rs).
+      CREATE TABLE IF NOT EXISTS master_operator (
+        id INTEGER PRIMARY KEY,
+        kode_operator TEXT,
+        nama_operator TEXT,
+        username TEXT,
+        password_hash TEXT,
+        role TEXT,
+        role_id INTEGER,
+        email TEXT,
+        no_hp TEXT,
+        totp_secret TEXT,
+        totp_enabled INTEGER,
+        totp_confirmed_at TEXT,
+        totp_recovery_codes TEXT,
+        password_recovery_codes TEXT,
+        password_recovery_created_at TEXT,
+        status TEXT,
+        created_at TEXT,
+        updated_at TEXT
+      );
       -- ====================================================
 
       CREATE INDEX IF NOT EXISTS idx_local_outbox_status_retry
@@ -276,6 +313,8 @@ pub fn initialize(path: &Path) -> Result<(), String> {
         ON leads(client_id);
       CREATE INDEX IF NOT EXISTS idx_local_master_option_kind
         ON master_option(kind, sort_order);
+      CREATE INDEX IF NOT EXISTS idx_local_lead_interactions_lead
+        ON lead_interactions(lead_id, occurred_at);
 
       INSERT OR IGNORE INTO desktop_schema_migration (version, name, applied_at)
       VALUES (1, 'desktop-security-foundation', unixepoch());
@@ -302,7 +341,13 @@ pub fn initialize(path: &Path) -> Result<(), String> {
 /// terlewat akan menyimpan data milik database lama setelah perangkat dipindahkan
 /// ke database baru — data itu tetap tampil di layar dan outbox lamanya justru
 /// terdorong masuk ke database yang baru.
-const CLOUD_MIRRORED_TABLES: &[&str] = &["clients", "leads", "master_option"];
+const CLOUD_MIRRORED_TABLES: &[&str] = &[
+    "clients",
+    "leads",
+    "master_option",
+    "lead_interactions",
+    "master_operator",
+];
 
 /// Membuang seluruh jejak database cloud lama ketika perangkat dipindahkan ke
 /// database Turso yang berbeda.
@@ -609,6 +654,8 @@ mod tests {
             "clients",
             "leads",
             "master_option",
+            "lead_interactions",
+            "master_operator",
             "setting_gex_system",
             "desktop_sync_outbox",
             "desktop_sync_cursor",
@@ -735,5 +782,48 @@ mod tests {
         let second = get_or_create_device_id(directory.path()).expect("device id");
         assert_eq!(first, second);
         assert!(!first.is_empty());
+    }
+
+    /// SQL ringkasan interaksi lead (`clients::LEAD_SUMMARY_UPDATE_SQL`) bekerja
+    /// di skema lokal yang sebenarnya: kiriman ulang tidak menghitung ganda dan
+    /// interaksi yang dicatat mundur tidak memundurkan tanggal. Padanan TS:
+    /// `src/lib/server/leads.test.ts`.
+    #[test]
+    fn ringkasan_interaksi_lead_aman_diulang() {
+        use super::super::clients::{LEAD_INTERACTION_INSERT_SQL, LEAD_SUMMARY_UPDATE_SQL};
+        let directory = tempdir().expect("temporary directory");
+        initialize(directory.path()).expect("schema");
+        let connection = database(directory.path()).expect("database connection");
+        connection
+            .execute(
+                "INSERT INTO leads (id, client_id, pic_cs_id, channel_option_id, product_category_option_id, last_client_response_at, created_at, updated_at) VALUES ('lead-1', 'client-1', 7, 'ch', 'cat', '2026-09-20 00:00:00', '2026-09-20 00:00:00', '2026-09-20 00:00:00');",
+                [],
+            )
+            .expect("lead");
+        let record = |id: &str, direction: &str, at: &str| {
+            connection
+                .execute(LEAD_SUMMARY_UPDATE_SQL, rusqlite::params![direction, at, "lead-1", id])
+                .expect("summary");
+            connection
+                .execute(
+                    LEAD_INTERACTION_INSERT_SQL,
+                    rusqlite::params![id, "lead-1", 7, direction, "CALL", "catatan", at, at],
+                )
+                .expect("insert");
+        };
+        record("a", "OUTBOUND", "2026-09-24 10:00:00");
+        record("a", "OUTBOUND", "2026-09-24 10:00:00");
+        record("b", "OUTBOUND", "2026-09-22 10:00:00");
+        record("c", "INBOUND", "2026-09-23 08:00:00");
+        let (followup, response, total): (String, String, i64) = connection
+            .query_row(
+                "SELECT last_followup_at, last_client_response_at, total_followups FROM leads WHERE id = 'lead-1';",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("lead row");
+        assert_eq!(followup, "2026-09-24 10:00:00");
+        assert_eq!(response, "2026-09-23 08:00:00");
+        assert_eq!(total, 2);
     }
 }

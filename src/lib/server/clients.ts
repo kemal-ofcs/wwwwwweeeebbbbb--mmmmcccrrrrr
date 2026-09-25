@@ -12,8 +12,11 @@ import {
   companyDateStamp,
   DEFAULT_CLIENT_CODE_PREFIX,
   DEFAULT_CLIENT_CODE_WEB_TAG,
+  daysSinceResponse,
   formatClientCode,
   isMasterOptionKind,
+  type LeadSegment,
+  leadSegment,
   type MasterOptionKind,
   nextClientSequence,
   normalizeCodePrefix,
@@ -44,16 +47,21 @@ export interface ClientRecord {
   city: string;
   province: string;
   lifecycle_status: string;
+  /** Dihitung saat dibaca (PRD FR-05.3); `null` untuk klien selain `LEAD`. */
+  segment: LeadSegment | null;
   created_by: number | null;
   created_at: string;
   updated_at: string;
   lead_id: string | null;
   pic_cs_id: number | null;
+  pic_cs_name: string | null;
   channel_option_id: string;
   product_category_option_id: string;
   needs_notes: string;
   last_client_response_at: string;
+  last_followup_at: string;
   total_followups: number;
+  days_since_response: number | null;
 }
 
 export interface MasterOptionRecord {
@@ -91,34 +99,52 @@ function nullableInteger(value: unknown) {
 }
 
 export async function listClients(client: Client): Promise<ClientRecord[]> {
+  // Jam dan zona waktu dari database, bukan dari server Node (aturan 19).
+  const clock = await client.execute(
+    "SELECT CAST(strftime('%s','now') AS INTEGER) AS epoch;",
+  );
+  const now = Number(clock.rows[0]?.epoch);
+  const timezone = await companyTimezone(client);
   const result = await client.execute(
     `SELECT c.id, c.client_code, c.name, c.phone_normalized, c.address, c.city,
             c.province, c.lifecycle_status, c.created_by, c.created_at, c.updated_at,
             l.id AS lead_id, l.pic_cs_id, l.channel_option_id, l.product_category_option_id,
-            l.needs_notes, l.last_client_response_at, l.total_followups
-     FROM clients c LEFT JOIN leads l ON l.client_id = c.id
+            l.needs_notes, l.last_client_response_at, l.total_followups,
+            l.last_followup_at, o.nama_operator AS pic_cs_name
+     FROM clients c
+     LEFT JOIN leads l ON l.client_id = c.id
+     LEFT JOIN master_operator o ON o.id = l.pic_cs_id
      ORDER BY c.created_at DESC, c.id;`,
   );
-  return result.rows.map((row) => ({
-    id: String(row.id),
-    client_code: String(row.client_code),
-    name: String(row.name),
-    phone_normalized: String(row.phone_normalized),
-    address: String(row.address ?? ""),
-    city: String(row.city ?? ""),
-    province: String(row.province ?? ""),
-    lifecycle_status: String(row.lifecycle_status),
-    created_by: nullableInteger(row.created_by),
-    created_at: String(row.created_at),
-    updated_at: String(row.updated_at),
-    lead_id: row.lead_id == null ? null : String(row.lead_id),
-    pic_cs_id: nullableInteger(row.pic_cs_id),
-    channel_option_id: String(row.channel_option_id ?? ""),
-    product_category_option_id: String(row.product_category_option_id ?? ""),
-    needs_notes: String(row.needs_notes ?? ""),
-    last_client_response_at: String(row.last_client_response_at ?? ""),
-    total_followups: Number(row.total_followups ?? 0),
-  }));
+  return result.rows.map((row) => {
+    const lifecycle = String(row.lifecycle_status);
+    const lastResponse = String(row.last_client_response_at ?? "");
+    const days = daysSinceResponse(lastResponse, now, timezone);
+    return {
+      id: String(row.id),
+      client_code: String(row.client_code),
+      name: String(row.name),
+      phone_normalized: String(row.phone_normalized),
+      address: String(row.address ?? ""),
+      city: String(row.city ?? ""),
+      province: String(row.province ?? ""),
+      lifecycle_status: lifecycle,
+      segment: leadSegment(lifecycle, days),
+      created_by: nullableInteger(row.created_by),
+      created_at: String(row.created_at),
+      updated_at: String(row.updated_at),
+      lead_id: row.lead_id == null ? null : String(row.lead_id),
+      pic_cs_id: nullableInteger(row.pic_cs_id),
+      pic_cs_name: row.pic_cs_name == null ? null : String(row.pic_cs_name),
+      channel_option_id: String(row.channel_option_id ?? ""),
+      product_category_option_id: String(row.product_category_option_id ?? ""),
+      needs_notes: String(row.needs_notes ?? ""),
+      last_client_response_at: lastResponse,
+      last_followup_at: String(row.last_followup_at ?? ""),
+      total_followups: Number(row.total_followups ?? 0),
+      days_since_response: days,
+    };
+  });
 }
 
 interface ClientDraft {
@@ -227,7 +253,7 @@ async function readSetting(executor: Executor, key: string) {
   return value == null ? "" : String(value);
 }
 
-async function companyTimezone(executor: Executor) {
+export async function companyTimezone(executor: Executor) {
   const result = await executor.execute(
     "SELECT timezone FROM company_profile WHERE id = 'default_company';",
   );

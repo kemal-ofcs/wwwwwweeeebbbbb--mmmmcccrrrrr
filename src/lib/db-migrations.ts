@@ -205,4 +205,13 @@ export async function runDatabaseMigrations(client: Client) {
           VALUES (3, 'clients-leads-master-data', ?);`,
     args: [new Date().toISOString()],
   });
+
+  // Versi 4: `lead_interactions` + izin `leads.*` (PRD F-05). Tabelnya baru dan
+  // seed izin memakai `INSERT OR IGNORE`, jadi cukup DDL awal `db-schema.ts`.
+  // Nomor dan nama WAJIB sama dengan `turso.rs`.
+  await client.execute({
+    sql: `INSERT OR IGNORE INTO schema_migration (version, name, applied_at)
+          VALUES (4, 'lead-interactions', ?);`,
+    args: [new Date().toISOString()],
+  });
 }

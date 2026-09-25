@@ -179,6 +179,114 @@ pub fn device_tag_from_index(index: u32) -> Option<String> {
     (1..=MAX_CLIENT_SEQUENCE).contains(&index).then(|| base36_pair(index))
 }
 
+// ── Interaksi lead & segmentasi (PRD FR-05) ─────────────────────────────────
+// Padanan TS ada di `src/lib/validations/client.ts`, diuji dengan vektor yang sama.
+
+pub const LEAD_INTERACTION_DIRECTIONS: &[&str] = &["OUTBOUND", "INBOUND"];
+pub const LEAD_INTERACTION_KINDS: &[&str] = &["WHATSAPP", "CALL", "VISIT", "MATERIAL", "OTHER"];
+pub const INTERACTION_NOTES_MAX: usize = 1000;
+pub const INTERACTION_MAX_AGE_SECONDS: i64 = 366 * 86_400;
+pub const INTERACTION_FUTURE_TOLERANCE_SECONDS: i64 = 300;
+pub const HOT_MAX_DAYS: i64 = 3;
+pub const WARM_MAX_DAYS: i64 = 7;
+
+/// Jumlah hari sejak 1970-01-01 untuk tanggal sipil. Kebalikan `civil_from_days`.
+fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
+    let year = if month <= 2 { year - 1 } else { year };
+    let era = year.div_euclid(400);
+    let yoe = year.rem_euclid(400);
+    let mp = (month + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
+}
+
+/// Epoch detik dari `YYYY-MM-DD HH:MM:SS` (boleh `T` dan akhiran `Z`), dibaca
+/// sebagai UTC. Padanan `parseStoredTimestamp`.
+pub fn parse_stored_timestamp(value: &str) -> Option<i64> {
+    let value = value.trim();
+    let value = value.strip_suffix('Z').unwrap_or(value);
+    let bytes = value.as_bytes();
+    if bytes.len() != 19
+        || bytes[4] != b'-'
+        || bytes[7] != b'-'
+        || !(bytes[10] == b' ' || bytes[10] == b'T')
+        || bytes[13] != b':'
+        || bytes[16] != b':'
+    {
+        return None;
+    }
+    let number = |range: std::ops::Range<usize>| -> Option<i64> {
+        let part = &value[range];
+        part.bytes().all(|b| b.is_ascii_digit()).then(|| part.parse().ok())?
+    };
+    let (year, month, day) = (number(0..4)?, number(5..7)?, number(8..10)?);
+    let (hour, minute, second) = (number(11..13)?, number(14..16)?, number(17..19)?);
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return None;
+    }
+    if hour > 23 || minute > 59 || second > 59 {
+        return None;
+    }
+    Some(days_from_civil(year, month, day) * 86_400 + hour * 3600 + minute * 60 + second)
+}
+
+fn company_day_number(epoch_seconds: i64, timezone: &str) -> i64 {
+    (epoch_seconds + timezone_offset_hours(timezone) * 3600).div_euclid(86_400)
+}
+
+/// Hari kalender perusahaan sejak respons terakhir; tidak pernah negatif.
+pub fn days_since_response(last_response_at: &str, now_epoch_seconds: i64, timezone: &str) -> Option<i64> {
+    let last = parse_stored_timestamp(last_response_at)?;
+    Some((company_day_number(now_epoch_seconds, timezone) - company_day_number(last, timezone)).max(0))
+}
+
+/// Segmen hanya untuk klien `LEAD` (D-09).
+pub fn lead_segment(lifecycle_status: &str, days: Option<i64>) -> Option<&'static str> {
+    if lifecycle_status != "LEAD" {
+        return None;
+    }
+    let days = days?;
+    Some(if days <= HOT_MAX_DAYS {
+        "HOT"
+    } else if days <= WARM_MAX_DAYS {
+        "WARM"
+    } else {
+        "COLD"
+    })
+}
+
+/// Waktu interaksi yang diminta atau sekarang bila kosong. Pesan penolakannya
+/// identik dengan `resolveInteractionTime`.
+pub fn resolve_interaction_time(requested: Option<&serde_json::Value>, now_epoch_seconds: i64) -> Result<i64, &'static str> {
+    let Some(requested) = requested.filter(|value| !value.is_null()) else {
+        return Ok(now_epoch_seconds);
+    };
+    let epoch = requested
+        .as_i64()
+        .filter(|value| value.unsigned_abs() <= 9_007_199_254_740_991)
+        .ok_or("The interaction time is not valid.")?;
+    if epoch > now_epoch_seconds + INTERACTION_FUTURE_TOLERANCE_SECONDS {
+        return Err("The interaction time cannot be in the future.");
+    }
+    if epoch < now_epoch_seconds - INTERACTION_MAX_AGE_SECONDS {
+        return Err("The interaction time cannot be more than a year ago.");
+    }
+    Ok(epoch)
+}
+
+/// Ringkasan lead setelah satu interaksi, dijalankan SEBELUM baris interaksinya
+/// disisipkan. Aman diulang dan tidak bergantung urutan: tanggal hanya maju
+/// ("ambil yang terbaru"), dan Jumlah FU hanya bertambah bila interaksi itu
+/// belum pernah tercatat. Dipakai perangkat, handler push cloud, dan jalur Web
+/// (`LEAD_SUMMARY_UPDATE_SQL` di `src/lib/server/leads.ts`, WAJIB identik).
+/// Parameter: ?1 arah, ?2 waktu interaksi, ?3 id lead, ?4 id interaksi.
+pub const LEAD_SUMMARY_UPDATE_SQL: &str = "UPDATE leads SET last_followup_at = CASE WHEN ?1 = 'OUTBOUND' AND ?2 > last_followup_at THEN ?2 ELSE last_followup_at END, last_client_response_at = CASE WHEN ?1 = 'INBOUND' AND ?2 > last_client_response_at THEN ?2 ELSE last_client_response_at END, total_followups = total_followups + CASE WHEN ?1 = 'OUTBOUND' THEN 1 ELSE 0 END WHERE id = ?3 AND NOT EXISTS (SELECT 1 FROM lead_interactions WHERE id = ?4);";
+
+/// Sisipkan satu interaksi; kiriman ulang diabaikan. Parameter: id, lead_id,
+/// operator_id, direction, kind, notes, occurred_at, created_at.
+pub const LEAD_INTERACTION_INSERT_SQL: &str = "INSERT INTO lead_interactions (id, lead_id, operator_id, direction, kind, notes, occurred_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO NOTHING;";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -272,5 +380,66 @@ mod tests {
         assert_eq!(device_tag_from_index(36).as_deref(), Some("10"));
         assert_eq!(device_tag_from_index(1295).as_deref(), Some("ZZ"));
         assert_eq!(device_tag_from_index(0), None);
+    }
+
+    #[test]
+    fn stempel_tersimpan() {
+        assert_eq!(parse_stored_timestamp("2026-09-24 17:00:00"), Some(1790269200));
+        assert_eq!(parse_stored_timestamp("2026-09-24T17:00:00Z"), Some(1790269200));
+        assert_eq!(parse_stored_timestamp(" 2026-12-31 23:30:00 "), Some(1798759800));
+        assert_eq!(parse_stored_timestamp(""), None);
+        assert_eq!(parse_stored_timestamp("2026-09-24"), None);
+        assert_eq!(parse_stored_timestamp("2026-13-01 00:00:00"), None);
+        assert_eq!(parse_stored_timestamp("2026-09-24 24:00:00"), None);
+        assert_eq!(utc_timestamp(parse_stored_timestamp("2026-09-24 17:00:00").unwrap()), "2026-09-24 17:00:00");
+    }
+
+    #[test]
+    fn segmen_lead() {
+        // Sekarang = 2026-09-25 12:00 WIB.
+        let now = 1790312400;
+        let cases: &[(&str, &str, Option<i64>, Option<&str>)] = &[
+            ("2026-09-24 17:00:00", "Asia/Jakarta", Some(0), Some("HOT")),
+            ("2026-09-24 16:59:59", "Asia/Jakarta", Some(1), Some("HOT")),
+            ("2026-09-22 05:00:00", "Asia/Jakarta", Some(3), Some("HOT")),
+            ("2026-09-21 05:00:00", "Asia/Jakarta", Some(4), Some("WARM")),
+            ("2026-09-18 05:00:00", "Asia/Jakarta", Some(7), Some("WARM")),
+            ("2026-09-17 05:00:00", "Asia/Jakarta", Some(8), Some("COLD")),
+            ("2026-09-24 16:30:00", "Asia/Makassar", Some(0), Some("HOT")),
+            ("2026-09-24 16:30:00", "Asia/Jakarta", Some(1), Some("HOT")),
+            ("2026-09-26 05:00:00", "Asia/Jakarta", Some(0), Some("HOT")),
+            ("", "Asia/Jakarta", None, None),
+        ];
+        for (last, zone, days, segment) in cases {
+            let computed = days_since_response(last, now, zone);
+            assert_eq!(computed, *days, "{last} {zone}");
+            assert_eq!(lead_segment("LEAD", computed), *segment, "{last} {zone}");
+        }
+        assert_eq!(lead_segment("FIRST_ORDER_ACTIVE", Some(30)), None);
+    }
+
+    #[test]
+    fn waktu_interaksi() {
+        let now = 1790312400;
+        assert_eq!(resolve_interaction_time(None, now), Ok(now));
+        assert_eq!(resolve_interaction_time(Some(&serde_json::Value::Null), now), Ok(now));
+        assert_eq!(resolve_interaction_time(Some(&serde_json::json!(now - 3600)), now), Ok(now - 3600));
+        assert_eq!(resolve_interaction_time(Some(&serde_json::json!(now + 300)), now), Ok(now + 300));
+        assert_eq!(
+            resolve_interaction_time(Some(&serde_json::json!(now + 301)), now),
+            Err("The interaction time cannot be in the future.")
+        );
+        assert_eq!(
+            resolve_interaction_time(Some(&serde_json::json!(now - 366 * 86_400 - 1)), now),
+            Err("The interaction time cannot be more than a year ago.")
+        );
+        assert_eq!(
+            resolve_interaction_time(Some(&serde_json::json!("kemarin")), now),
+            Err("The interaction time is not valid.")
+        );
+        assert_eq!(
+            resolve_interaction_time(Some(&serde_json::json!(1.5)), now),
+            Err("The interaction time is not valid.")
+        );
     }
 }

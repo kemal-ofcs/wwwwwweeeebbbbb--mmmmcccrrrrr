@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-desktop-list-lead-interactions"
+description = "Enables the desktop_list_lead_interactions command without any pre-configured scope."
+commands.allow = ["desktop_list_lead_interactions"]
+
+[[permission]]
+identifier = "deny-desktop-list-lead-interactions"
+description = "Denies the desktop_list_lead_interactions command without any pre-configured scope."
+commands.deny = ["desktop_list_lead_interactions"]
