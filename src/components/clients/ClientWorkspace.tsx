@@ -57,6 +57,7 @@ const EMPTY_DRAFT: ClientDraft = {
   channel_option_id: "",
   product_category_option_id: "",
   needs_notes: "",
+  free_revision_limit: null,
 };
 
 const SEGMENT_TONE: Record<LeadSegment, StatusTone> = {
@@ -83,6 +84,7 @@ function draftOf(client: ClientRecord): ClientDraft {
     channel_option_id: client.channel_option_id,
     product_category_option_id: client.product_category_option_id,
     needs_notes: client.needs_notes,
+    free_revision_limit: client.free_revision_limit,
   };
 }
 
@@ -396,7 +398,7 @@ export function ClientWorkspace() {
             {clients.length === 0
               ? "No clients yet. Register the first lead to get started."
               : tab === "cold" && !search && !categoryFilter && !picFilter
-                ? "No cold leads. Every lead has responded in the last 7 days."
+                ? "No cold leads. Every lead has responded recently."
                 : "No client matches these filters."}
           </p>
         ) : (
@@ -578,6 +580,31 @@ export function ClientWorkspace() {
                 className="app-input min-h-24 py-2 font-normal"
               />
             </label>
+            {draft.free_revision_limit !== null ? (
+              <label className="app-label grid gap-1.5 sm:max-w-xs">
+                Free sample revisions
+                <input
+                  type="number"
+                  min={0}
+                  max={20}
+                  step={1}
+                  value={draft.free_revision_limit}
+                  onChange={(event) =>
+                    setDraft({
+                      ...draft,
+                      free_revision_limit:
+                        event.target.value === ""
+                          ? 0
+                          : Math.trunc(Number(event.target.value)),
+                    })
+                  }
+                  className="app-input font-normal"
+                />
+                <span className="text-body-sm font-normal text-on-surface-variant">
+                  New clients start with the number set in Business settings.
+                </span>
+              </label>
+            ) : null}
 
             <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
               <button

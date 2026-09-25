@@ -185,6 +185,8 @@ describe("role divisi", () => {
       "home.view",
       "leads.manage",
       "leads.view",
+      "samples.manage",
+      "samples.view",
       "sync.view",
     ]);
     expect(byRole.crm).toEqual([
@@ -192,6 +194,7 @@ describe("role divisi", () => {
       "dashboard.view",
       "home.view",
       "leads.view",
+      "samples.view",
       "sync.view",
     ]);
     expect(byRole.qc).toEqual(["dashboard.view", "home.view", "sync.view"]);

@@ -43,6 +43,8 @@ export async function writeAudit(
   entityType: string,
   entityId: string,
   summary: Record<string, unknown>,
+  /** Divisi yang diwakili (D-23: CS mencatat atas nama RnD/Finance). */
+  onBehalfOf?: string | null,
 ) {
   // Waktu dari database, bentuk sama dengan `clients::utc_timestamp`.
   const clock = await transaction.execute("SELECT datetime('now') AS stamp;");
@@ -51,7 +53,7 @@ export async function writeAudit(
     args: [
       crypto.randomUUID(),
       actor.id,
-      actor.role,
+      onBehalfOf ?? actor.role,
       action,
       entityType,
       entityId,

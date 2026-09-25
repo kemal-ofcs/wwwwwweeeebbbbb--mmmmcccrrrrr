@@ -14,7 +14,7 @@ import { runDatabaseMigrations } from "./db-migrations";
  * Rust DAN migrasi `ALTER TABLE` di `db-migrations.ts`, supaya klien mana pun
  * bisa menyembuhkan database buatan klien lain.
  */
-export const CURRENT_SCHEMA_VERSION = 6;
+export const CURRENT_SCHEMA_VERSION = 7;
 
 /** Tabel yang wajib ada sebelum database dianggap siap dipakai. */
 export const REQUIRED_TABLES = [
@@ -52,6 +52,11 @@ export const REQUIRED_TABLES = [
   "lead_interactions",
   // Log audit domain (PRD F-10): ditulis perangkat dan Web, hanya-tambah.
   "domain_audit_log",
+  // Tiket sampel (PRD F-06): tiket, keputusan klien per iterasi, dan riwayat
+  // langkahnya. Ketiganya ikut sinkronisasi.
+  "sample_requests",
+  "sample_feedbacks",
+  "sample_status_log",
 ] as const;
 
 export const REQUIRED_TABLE_COUNT = REQUIRED_TABLES.length;
@@ -105,6 +110,16 @@ export const DIVISION_ROLE_SEED_SQL = [
   "INSERT OR IGNORE INTO app_role (role_key, nama_role, deskripsi, is_system, is_superadmin, status, created_at, updated_at) SELECT column1, column2, column3, 0, 0, 'Active', datetime('now'), datetime('now') FROM (VALUES ('cs', 'CS', 'Customer service: registers leads and follows them up.'), ('crm', 'CRM', 'Client relationship after the first order.'), ('rnd', 'R&D', 'Formulation and samples.'), ('finance', 'Finance', 'Invoices and payments.'), ('design', 'Design', 'Mockups and dummies.'), ('legal', 'Legal', 'BPOM, halal, and trademark filings.'), ('ppic', 'PPIC', 'Production planning and materials.'), ('production_spv', 'Production SPV', 'Production floor supervision.'), ('qc', 'QC', 'Quality control and claims.'), ('logistics', 'Logistics', 'Shipping and delivery.')) WHERE NOT EXISTS (SELECT 1 FROM setting_gex_system WHERE key = 'division_roles_seeded');",
   "INSERT OR IGNORE INTO role_permission (role_id, permission_key, is_allowed, updated_at, updated_by) SELECT r.id, p.permission_key, 1, datetime('now'), 'system' FROM app_role r JOIN app_permission p ON p.permission_key IN ('home.view', 'dashboard.view', 'sync.view') OR (r.role_key IN ('cs', 'crm') AND p.permission_key IN ('clients.view', 'leads.view')) OR (r.role_key = 'cs' AND p.permission_key IN ('clients.manage', 'leads.manage')) WHERE r.role_key IN ('cs', 'crm', 'rnd', 'finance', 'design', 'legal', 'ppic', 'production_spv', 'qc', 'logistics') AND NOT EXISTS (SELECT 1 FROM setting_gex_system WHERE key = 'division_roles_seeded');",
   "INSERT OR IGNORE INTO setting_gex_system (key, value) VALUES ('division_roles_seeded', '1');",
+];
+
+/**
+ * WAJIB identik dengan seed yang sama di `turso.rs` (dites per karakter).
+ * Dijaga penanda `sample_permissions_seeded`: izin yang dicabut Admin dari
+ * role CS/CRM tidak kembali saat skema naik versi.
+ */
+export const SAMPLE_PERMISSION_SEED_SQL = [
+  "INSERT OR IGNORE INTO role_permission (role_id, permission_key, is_allowed, updated_at, updated_by) SELECT r.id, p.permission_key, 1, datetime('now'), 'system' FROM app_role r JOIN app_permission p ON (r.role_key IN ('cs', 'crm') AND p.permission_key = 'samples.view') OR (r.role_key = 'cs' AND p.permission_key = 'samples.manage') WHERE r.role_key IN ('cs', 'crm') AND NOT EXISTS (SELECT 1 FROM setting_gex_system WHERE key = 'sample_permissions_seeded');",
+  "INSERT OR IGNORE INTO setting_gex_system (key, value) VALUES ('sample_permissions_seeded', '1');",
 ];
 
 export async function initDatabaseSchema(client: Client) {
@@ -380,6 +395,65 @@ export async function initDatabaseSchema(client: Client) {
       summary_json TEXT NOT NULL DEFAULT '{}',
       occurred_at TEXT NOT NULL
       );`,
+    // Tiket sampel (PRD FR-06). `status` dan `revision_index` hanya berubah
+    // lewat rute `sample/transition` yang diperiksa terhadap status cloud
+    // (konflik bila perangkat lain sudah memindahkannya lebih dulu).
+    // `status_changed_at` untuk lencana "sudah berapa lama di status ini".
+    `CREATE TABLE IF NOT EXISTS sample_requests (
+      id TEXT PRIMARY KEY,
+      client_id TEXT NOT NULL,
+      lead_id TEXT NOT NULL DEFAULT '',
+      sample_kind_option_id TEXT NOT NULL DEFAULT '',
+      formulation_type_option_id TEXT NOT NULL DEFAULT '',
+      registration_category_option_id TEXT NOT NULL DEFAULT '',
+      rnd_product_class TEXT NOT NULL DEFAULT '',
+      product_category_option_id TEXT NOT NULL,
+      pic_crm_id INTEGER,
+      sample_qty INTEGER NOT NULL,
+      brand_name TEXT NOT NULL,
+      bpom_product_name TEXT NOT NULL DEFAULT '',
+      claims TEXT NOT NULL DEFAULT '',
+      packaging TEXT NOT NULL,
+      reference_notes TEXT NOT NULL DEFAULT '',
+      client_budget_idr INTEGER,
+      special_requests_json TEXT NOT NULL DEFAULT '{}',
+      deadline_at TEXT NOT NULL,
+      ship_to_address TEXT NOT NULL,
+      is_dummy_required INTEGER NOT NULL DEFAULT 0,
+      is_paid_sample INTEGER NOT NULL DEFAULT 0,
+      revision_index INTEGER NOT NULL DEFAULT 0,
+      is_billable INTEGER NOT NULL DEFAULT 0,
+      status TEXT NOT NULL DEFAULT 'DRAFT',
+      rnd_lead_time_days INTEGER,
+      sent_at TEXT NOT NULL DEFAULT '',
+      status_changed_at TEXT NOT NULL,
+      created_by INTEGER,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+      );`,
+    // Satu baris per keputusan klien atas satu iterasi sampel (ACC/REVISE/REJECT).
+    `CREATE TABLE IF NOT EXISTS sample_feedbacks (
+      id TEXT PRIMARY KEY,
+      sample_request_id TEXT NOT NULL,
+      iteration_number INTEGER NOT NULL,
+      client_decision TEXT NOT NULL,
+      client_notes TEXT NOT NULL DEFAULT '',
+      recorded_by INTEGER,
+      recorded_at TEXT NOT NULL
+      );`,
+    // Riwayat langkah tiket (linimasa SCR-03), hanya-tambah. Ikut snapshot
+    // supaya linimasa tetap terbaca saat offline, berbeda dari log audit.
+    `CREATE TABLE IF NOT EXISTS sample_status_log (
+      id TEXT PRIMARY KEY,
+      sample_request_id TEXT NOT NULL,
+      from_status TEXT NOT NULL,
+      to_status TEXT NOT NULL,
+      action TEXT NOT NULL,
+      notes TEXT NOT NULL,
+      on_behalf_of_division TEXT NOT NULL DEFAULT '',
+      recorded_by INTEGER,
+      recorded_at TEXT NOT NULL
+      );`,
     // Cloud-only: tag dua karakter yang diterbitkan untuk setiap perangkat,
     // bagian `<KP>` dari kode klien. Tidak ikut sinkronisasi, jadi UNIQUE
     // di sini aman.
@@ -398,6 +472,9 @@ export async function initDatabaseSchema(client: Client) {
     `CREATE INDEX IF NOT EXISTS idx_lead_interactions_lead ON lead_interactions(lead_id, occurred_at);`,
     `CREATE INDEX IF NOT EXISTS idx_domain_audit_occurred ON domain_audit_log(occurred_at);`,
     `CREATE INDEX IF NOT EXISTS idx_domain_audit_entity ON domain_audit_log(entity_type, entity_id);`,
+    `CREATE INDEX IF NOT EXISTS idx_sample_requests_client ON sample_requests(client_id);`,
+    `CREATE INDEX IF NOT EXISTS idx_sample_feedbacks_request ON sample_feedbacks(sample_request_id, iteration_number);`,
+    `CREATE INDEX IF NOT EXISTS idx_sample_status_log_request ON sample_status_log(sample_request_id, recorded_at);`,
 
     // Seed role bawaan. TIDAK ADA akun bawaan: operator pertama hanya lahir
     // lewat provisioning sekali-pakai, sehingga tidak ada kredensial default
@@ -418,6 +495,8 @@ export async function initDatabaseSchema(client: Client) {
       ('leads.view', 'View leads', 'Leads', 'View leads, their interactions, and the Cold queue.', 1, 52),
       ('leads.manage', 'Manage own leads', 'Leads', 'Record follow ups and client responses on your own leads.', 1, 54),
       ('leads.reassign', 'Reassign leads', 'Leads', 'Move a lead to another CS and record on any lead.', 1, 56),
+      ('samples.view', 'View sample requests', 'Samples', 'View sample requests and their history.', 1, 58),
+      ('samples.manage', 'Manage sample requests', 'Samples', 'Create sample requests and record each step, including on behalf of RnD and Finance.', 1, 59),
       ('password_reset.view', 'View password reset history', 'Operators', 'Review who requested a password recovery, with their verification photo.', 1, 62),
       ('password_reset.delete', 'Delete password reset history', 'Operators', 'Delete password recovery records and their photos.', 1, 64),
       ('two_factor.reset', 'Reset another operator''s 2FA', 'Operators', 'Turn off two-step verification for another operator who lost their phone.', 1, 66),
@@ -451,7 +530,7 @@ export async function initDatabaseSchema(client: Client) {
       SELECT 3, permission_key, 1, datetime('now'), 'system' FROM app_permission
       WHERE permission_key IN (
         'home.view', 'dashboard.view', 'clients.view', 'clients.manage',
-        'leads.view', 'leads.manage', 'sync.view'
+        'leads.view', 'leads.manage', 'samples.view', 'samples.manage', 'sync.view'
       );`,
 
     // `rbac_revision` WAJIB ada: nilainya yang dipakai Web dan perangkat untuk
@@ -463,6 +542,9 @@ export async function initDatabaseSchema(client: Client) {
     // Role divisi (PRD FR-02), sekali saja: dijaga penanda supaya role yang
     // dihapus atau izin yang dicabut Admin tidak kembali saat skema naik versi.
     ...DIVISION_ROLE_SEED_SQL,
+    // Izin tiket sampel (PRD F-06) untuk role divisi CS dan CRM, sekali saja
+    // seperti `DIVISION_ROLE_SEED_SQL`.
+    ...SAMPLE_PERMISSION_SEED_SQL,
 
     // Angka 1 di sini disengaja dan TIDAK boleh diikatkan ke
     // `CURRENT_SCHEMA_VERSION`: baris ini menandai fondasi versi 1, sedangkan

@@ -1,5 +1,6 @@
 pub mod app_identity;
 pub mod clients;
+pub mod samples;
 pub mod commands;
 pub mod config;
 pub mod license;

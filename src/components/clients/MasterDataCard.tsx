@@ -31,11 +31,18 @@ import {
 const KIND_TITLE: Record<MasterOptionKind, string> = {
   LEAD_CHANNEL: "Lead channels",
   PRODUCT_CATEGORY: "Product categories",
+  SAMPLE_KIND: "Sample kinds",
+  FORMULATION_TYPE: "Formulation types",
+  REGISTRATION_CATEGORY: "Registration categories",
 };
 
 const KIND_HINT: Record<MasterOptionKind, string> = {
   LEAD_CHANNEL: "Where a lead came from, e.g. ADS · Ads, IG · Instagram.",
   PRODUCT_CATEGORY: "What the client wants to make, e.g. SKIN · Skincare.",
+  SAMPLE_KIND: "The kind of sample requested, e.g. LAB · Lab sample.",
+  FORMULATION_TYPE: "How the formula is sourced, e.g. CUSTOM · Custom formula.",
+  REGISTRATION_CATEGORY:
+    "The regulatory route, e.g. NA · Cosmetic, TR · Traditional, MD · Food.",
 };
 
 function emptyDraft(kind: MasterOptionKind): MasterOptionDraft {

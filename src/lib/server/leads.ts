@@ -50,6 +50,8 @@ export interface OperatorDirectoryEntry {
   id: number;
   kode_operator: string;
   nama_operator: string;
+  /** Kunci role (`cs`, `crm`, ...); kosong bila role-nya sudah dihapus. */
+  role_key: string;
 }
 
 type Draft = Record<string, unknown>;
@@ -184,13 +186,15 @@ export async function listOperatorDirectory(
   client: Client,
 ): Promise<OperatorDirectoryEntry[]> {
   const result = await client.execute(
-    `SELECT id, kode_operator, nama_operator FROM master_operator
-     WHERE COALESCE(status, 'Active') = 'Active' ORDER BY nama_operator, id;`,
+    `SELECT m.id, m.kode_operator, m.nama_operator, COALESCE(r.role_key, '') AS role_key
+     FROM master_operator m LEFT JOIN app_role r ON r.id = m.role_id
+     WHERE COALESCE(m.status, 'Active') = 'Active' ORDER BY m.nama_operator, m.id;`,
   );
   return result.rows.map((row) => ({
     id: Number(row.id),
     kode_operator: String(row.kode_operator),
     nama_operator: String(row.nama_operator),
+    role_key: String(row.role_key ?? ""),
   }));
 }
 

@@ -280,6 +280,64 @@ pub fn initialize(path: &Path) -> Result<(), String> {
         occurred_at TEXT NOT NULL,
         created_at TEXT NOT NULL
       );
+      -- Tiket sampel (PRD FR-06), cache milik cloud. WAJIB identik dengan
+      -- `turso.rs` dan `db-schema.ts`.
+      CREATE TABLE IF NOT EXISTS sample_requests (
+        id TEXT PRIMARY KEY,
+        client_id TEXT NOT NULL,
+        lead_id TEXT NOT NULL DEFAULT '',
+        sample_kind_option_id TEXT NOT NULL DEFAULT '',
+        formulation_type_option_id TEXT NOT NULL DEFAULT '',
+        registration_category_option_id TEXT NOT NULL DEFAULT '',
+        rnd_product_class TEXT NOT NULL DEFAULT '',
+        product_category_option_id TEXT NOT NULL,
+        pic_crm_id INTEGER,
+        sample_qty INTEGER NOT NULL,
+        brand_name TEXT NOT NULL,
+        bpom_product_name TEXT NOT NULL DEFAULT '',
+        claims TEXT NOT NULL DEFAULT '',
+        packaging TEXT NOT NULL,
+        reference_notes TEXT NOT NULL DEFAULT '',
+        client_budget_idr INTEGER,
+        special_requests_json TEXT NOT NULL DEFAULT '{}',
+        deadline_at TEXT NOT NULL,
+        ship_to_address TEXT NOT NULL,
+        is_dummy_required INTEGER NOT NULL DEFAULT 0,
+        is_paid_sample INTEGER NOT NULL DEFAULT 0,
+        revision_index INTEGER NOT NULL DEFAULT 0,
+        is_billable INTEGER NOT NULL DEFAULT 0,
+        status TEXT NOT NULL DEFAULT 'DRAFT',
+        rnd_lead_time_days INTEGER,
+        sent_at TEXT NOT NULL DEFAULT '',
+        status_changed_at TEXT NOT NULL,
+        created_by INTEGER,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS sample_feedbacks (
+        id TEXT PRIMARY KEY,
+        sample_request_id TEXT NOT NULL,
+        iteration_number INTEGER NOT NULL,
+        client_decision TEXT NOT NULL,
+        client_notes TEXT NOT NULL DEFAULT '',
+        recorded_by INTEGER,
+        recorded_at TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS sample_status_log (
+        id TEXT PRIMARY KEY,
+        sample_request_id TEXT NOT NULL,
+        from_status TEXT NOT NULL,
+        to_status TEXT NOT NULL,
+        action TEXT NOT NULL,
+        notes TEXT NOT NULL,
+        on_behalf_of_division TEXT NOT NULL DEFAULT '',
+        recorded_by INTEGER,
+        recorded_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_local_sample_requests_client
+        ON sample_requests(client_id);
+      CREATE INDEX IF NOT EXISTS idx_local_sample_status_log_request
+        ON sample_status_log(sample_request_id, recorded_at);
       -- Log audit domain: ditulis di transaksi yang sama dengan mutasinya,
       -- didorong lewat rute `audit/record`, tidak ditarik ulang dari cloud.
       CREATE TABLE IF NOT EXISTS domain_audit_log (
@@ -377,6 +435,9 @@ const CLOUD_MIRRORED_TABLES: &[&str] = &[
     "lead_interactions",
     "master_operator",
     "domain_audit_log",
+    "sample_requests",
+    "sample_feedbacks",
+    "sample_status_log",
 ];
 
 /// Membuang seluruh jejak database cloud lama ketika perangkat dipindahkan ke
@@ -687,6 +748,9 @@ mod tests {
             "lead_interactions",
             "master_operator",
             "domain_audit_log",
+            "sample_requests",
+            "sample_feedbacks",
+            "sample_status_log",
             "setting_gex_system",
             "desktop_sync_outbox",
             "desktop_sync_cursor",

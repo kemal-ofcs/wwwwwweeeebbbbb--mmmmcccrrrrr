@@ -2,6 +2,7 @@ import "server-only";
 
 import type { Client, Transaction } from "@libsql/client";
 import { type AuditActor, writeAudit } from "@/lib/server/audit";
+import { loadBusinessSettings } from "@/lib/server/business-settings";
 import { ApiRequestError } from "@/lib/server/http/api-response";
 import {
   CLIENT_CODE_PREFIX_SETTING,
@@ -26,6 +27,7 @@ import {
   normalizeWhatsapp,
   OPTION_LABEL_MAX,
 } from "@/lib/validations/client";
+import { FREE_REVISION_LIMIT_MAX } from "@/lib/validations/sample";
 
 /**
  * Domain klien, lead, dan Master Data — jalur Web.
@@ -48,6 +50,8 @@ export interface ClientRecord {
   city: string;
   province: string;
   lifecycle_status: string;
+  /** Kuota revisi gratis klien ini (FR-06.5), disalin dari setelan saat dibuat. */
+  free_revision_limit: number;
   /** Dihitung saat dibaca (PRD FR-05.3); `null` untuk klien selain `LEAD`. */
   segment: LeadSegment | null;
   created_by: number | null;
@@ -106,10 +110,11 @@ export async function listClients(client: Client): Promise<ClientRecord[]> {
   );
   const now = Number(clock.rows[0]?.epoch);
   const timezone = await companyTimezone(client);
+  const business = await loadBusinessSettings(client);
   const result = await client.execute(
     `SELECT c.id, c.client_code, c.name, c.phone_normalized, c.address, c.city,
             c.province, c.lifecycle_status, c.created_by, c.created_at, c.updated_at,
-            l.id AS lead_id, l.pic_cs_id, l.channel_option_id, l.product_category_option_id,
+            c.free_revision_limit, l.id AS lead_id, l.pic_cs_id, l.channel_option_id, l.product_category_option_id,
             l.needs_notes, l.last_client_response_at, l.total_followups,
             l.last_followup_at, o.nama_operator AS pic_cs_name
      FROM clients c
@@ -130,7 +135,13 @@ export async function listClients(client: Client): Promise<ClientRecord[]> {
       city: String(row.city ?? ""),
       province: String(row.province ?? ""),
       lifecycle_status: lifecycle,
-      segment: leadSegment(lifecycle, days),
+      free_revision_limit: Number(row.free_revision_limit ?? 0),
+      segment: leadSegment(
+        lifecycle,
+        days,
+        business.lead_hot_max_days,
+        business.lead_warm_max_days,
+      ),
       created_by: nullableInteger(row.created_by),
       created_at: String(row.created_at),
       updated_at: String(row.updated_at),
@@ -339,7 +350,7 @@ export async function registerClient(
               (id, client_code, name, phone_normalized, address, city, province,
                lifecycle_status, free_revision_limit, is_white_label, assigned_crm_id,
                created_by, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, 'LEAD', 1, 0, NULL, ?, ?, ?);`,
+            VALUES (?, ?, ?, ?, ?, ?, ?, 'LEAD', ?, 0, NULL, ?, ?, ?);`,
       args: [
         id,
         code,
@@ -348,6 +359,9 @@ export async function registerClient(
         draft.address,
         draft.city,
         draft.province,
+        // Disalin saat klien dibuat (FR-06.5): mengubah setelan kemudian
+        // tidak mengubah kuota klien lama (kriteria terima FR-11).
+        (await loadBusinessSettings(transaction)).default_free_revision_limit,
         operatorId,
         timestamp,
         timestamp,
@@ -387,6 +401,26 @@ export async function registerClient(
  * Ubah data kontak klien dan kebutuhan lead-nya. Kode klien, pembuat, dan
  * kolom interaksi lead tidak ikut berubah — sama dengan `desktop_update_client`.
  */
+/**
+ * Kuota revisi per klien (FR-06.5), diubah pemegang `clients.manage`.
+ * `null`/tidak dikirim = pertahankan. Cermin `client_free_revision_limit`.
+ */
+function clientFreeRevisionLimit(value: unknown, current: number) {
+  if (value === null || value === undefined) return current;
+  if (
+    typeof value !== "number" ||
+    !Number.isSafeInteger(value) ||
+    value < 0 ||
+    value > FREE_REVISION_LIMIT_MAX
+  ) {
+    throw new ApiRequestError(
+      "Free revisions must be a whole number from 0 to 20.",
+      400,
+    );
+  }
+  return value;
+}
+
 export async function updateClient(
   client: Client,
   draftInput: Draft,
@@ -396,7 +430,8 @@ export async function updateClient(
   const transaction = await client.transaction("write");
   try {
     const current = await transaction.execute({
-      sql: `SELECT c.client_code, l.id AS lead_id, l.channel_option_id, l.product_category_option_id
+      sql: `SELECT c.client_code, c.free_revision_limit, l.id AS lead_id, l.channel_option_id,
+                   l.product_category_option_id
             FROM clients c JOIN leads l ON l.client_id = c.id WHERE c.id = ? LIMIT 1;`,
       args: [id],
     });
@@ -407,16 +442,21 @@ export async function updateClient(
       category: String(row.product_category_option_id),
     });
     await assertPhoneFree(transaction, draft.phone, id);
+    const freeRevisions = clientFreeRevisionLimit(
+      draftInput.free_revision_limit,
+      Number(row.free_revision_limit ?? 0),
+    );
 
     await transaction.execute({
       sql: `UPDATE clients SET name = ?, phone_normalized = ?, address = ?, city = ?,
-              province = ?, updated_at = datetime('now') WHERE id = ?;`,
+              province = ?, free_revision_limit = ?, updated_at = datetime('now') WHERE id = ?;`,
       args: [
         draft.name,
         draft.phone,
         draft.address,
         draft.city,
         draft.province,
+        freeRevisions,
         id,
       ],
     });

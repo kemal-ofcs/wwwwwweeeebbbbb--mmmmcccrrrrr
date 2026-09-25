@@ -13,6 +13,7 @@ use url::Url;
 use zeroize::Zeroizing;
 
 use super::clients;
+use super::samples;
 use super::models::{CommandError, OperatorUser};
 // Seam transport: dekoder sel Hrana dan jalur SQLite lokal. SQL-nya sama,
 // yang berbeda hanya ke mana ia dikirim.
@@ -624,13 +625,30 @@ const SNAPSHOT_SOURCES: &[SnapshotSource] = &[
         table: "lead_interactions",
         sql: "SELECT * FROM lead_interactions ORDER BY occurred_at, id;",
     },
+    SnapshotSource {
+        payload_key: "sampleRequests",
+        table: "sample_requests",
+        sql: "SELECT * FROM sample_requests ORDER BY created_at, id;",
+    },
+    SnapshotSource {
+        payload_key: "sampleFeedbacks",
+        table: "sample_feedbacks",
+        sql: "SELECT * FROM sample_feedbacks ORDER BY recorded_at, id;",
+    },
+    SnapshotSource {
+        payload_key: "sampleStatusLog",
+        table: "sample_status_log",
+        sql: "SELECT * FROM sample_status_log ORDER BY recorded_at, id;",
+    },
     // Direktori operator hanya-baca untuk nama PIC dan pilihan pindah PIC saat
     // offline. SENGAJA hanya empat kolom: hash password, email, nomor HP, dan
     // rahasia 2FA tidak pernah meninggalkan cloud.
     SnapshotSource {
         payload_key: "operatorDirectory",
         table: "master_operator",
-        sql: "SELECT id, kode_operator, nama_operator, status FROM master_operator ORDER BY id;",
+        // `role` diisi `role_key` supaya perangkat tahu siapa CRM (PIC CRM
+        // tiket sampel) tanpa ikut menyalin tabel role.
+        sql: "SELECT m.id, m.kode_operator, m.nama_operator, m.status, r.role_key AS role FROM master_operator m LEFT JOIN app_role r ON r.id = m.role_id ORDER BY m.id;",
     },
     SnapshotSource {
         payload_key: "masterOptions",
@@ -1369,6 +1387,8 @@ impl TursoClient {
                 ('leads.view', 'View leads', 'Leads', 'View leads, their interactions, and the Cold queue.', 1, 52),
                 ('leads.manage', 'Manage own leads', 'Leads', 'Record follow ups and client responses on your own leads.', 1, 54),
                 ('leads.reassign', 'Reassign leads', 'Leads', 'Move a lead to another CS and record on any lead.', 1, 56),
+                ('samples.view', 'View sample requests', 'Samples', 'View sample requests and their history.', 1, 58),
+                ('samples.manage', 'Manage sample requests', 'Samples', 'Create sample requests and record each step, including on behalf of RnD and Finance.', 1, 59),
                 ('password_reset.view', 'View password reset history', 'Operators', 'Review who requested a password recovery, with their verification photo.', 1, 62),
                 ('password_reset.delete', 'Delete password reset history', 'Operators', 'Delete password recovery records and their photos.', 1, 64),
                 ('two_factor.reset', 'Reset another operator''s 2FA', 'Operators', 'Turn off two-step verification for another operator who lost their phone.', 1, 66),
@@ -1412,7 +1432,7 @@ impl TursoClient {
                 SELECT 3, permission_key, 1, datetime('now'), 'system' FROM app_permission
                 WHERE permission_key IN (
                     'home.view', 'dashboard.view', 'clients.view', 'clients.manage',
-                    'leads.view', 'leads.manage', 'sync.view'
+                    'leads.view', 'leads.manage', 'samples.view', 'samples.manage', 'sync.view'
                 );"#,
                 vec![],
             ),
@@ -1440,6 +1460,16 @@ impl TursoClient {
                 "INSERT OR IGNORE INTO setting_gex_system (key, value) VALUES ('division_roles_seeded', '1');",
                 vec![],
             ),
+            // Izin tiket sampel untuk CS/CRM, sekali saja. WAJIB identik dengan
+            // `SAMPLE_PERMISSION_SEED_SQL` di `db-schema.ts` (dites per karakter).
+            Statement::new(
+                "INSERT OR IGNORE INTO role_permission (role_id, permission_key, is_allowed, updated_at, updated_by) SELECT r.id, p.permission_key, 1, datetime('now'), 'system' FROM app_role r JOIN app_permission p ON (r.role_key IN ('cs', 'crm') AND p.permission_key = 'samples.view') OR (r.role_key = 'cs' AND p.permission_key = 'samples.manage') WHERE r.role_key IN ('cs', 'crm') AND NOT EXISTS (SELECT 1 FROM setting_gex_system WHERE key = 'sample_permissions_seeded');",
+                vec![],
+            ),
+            Statement::new(
+                "INSERT OR IGNORE INTO setting_gex_system (key, value) VALUES ('sample_permissions_seeded', '1');",
+                vec![],
+            ),
             // Riwayat versi WAJIB lengkap, bukan hanya fondasinya.
             //
             // `isDatabaseSchemaReady` di `db-schema.ts` menuntut
@@ -1459,7 +1489,8 @@ impl TursoClient {
                 (3, 'clients-leads-master-data', datetime('now')),
                 (4, 'lead-interactions', datetime('now')),
                 (5, 'audit-log-and-division-roles', datetime('now')),
-                (6, 'single-session', datetime('now'));"#,
+                (6, 'single-session', datetime('now')),
+                (7, 'sample-requests', datetime('now'));"#,
                 vec![],
             ),
             // ============ DOMAIN MAKLONOS ============
@@ -1546,6 +1577,69 @@ impl TursoClient {
                 );"#,
                 vec![],
             ),
+            // Tiket sampel (PRD FR-06): tiket, keputusan klien per iterasi, dan
+            // riwayat langkahnya. WAJIB identik dengan `db-schema.ts`.
+            Statement::new(
+                r#"CREATE TABLE IF NOT EXISTS sample_requests (
+                    id TEXT PRIMARY KEY,
+                    client_id TEXT NOT NULL,
+                    lead_id TEXT NOT NULL DEFAULT '',
+                    sample_kind_option_id TEXT NOT NULL DEFAULT '',
+                    formulation_type_option_id TEXT NOT NULL DEFAULT '',
+                    registration_category_option_id TEXT NOT NULL DEFAULT '',
+                    rnd_product_class TEXT NOT NULL DEFAULT '',
+                    product_category_option_id TEXT NOT NULL,
+                    pic_crm_id INTEGER,
+                    sample_qty INTEGER NOT NULL,
+                    brand_name TEXT NOT NULL,
+                    bpom_product_name TEXT NOT NULL DEFAULT '',
+                    claims TEXT NOT NULL DEFAULT '',
+                    packaging TEXT NOT NULL,
+                    reference_notes TEXT NOT NULL DEFAULT '',
+                    client_budget_idr INTEGER,
+                    special_requests_json TEXT NOT NULL DEFAULT '{}',
+                    deadline_at TEXT NOT NULL,
+                    ship_to_address TEXT NOT NULL,
+                    is_dummy_required INTEGER NOT NULL DEFAULT 0,
+                    is_paid_sample INTEGER NOT NULL DEFAULT 0,
+                    revision_index INTEGER NOT NULL DEFAULT 0,
+                    is_billable INTEGER NOT NULL DEFAULT 0,
+                    status TEXT NOT NULL DEFAULT 'DRAFT',
+                    rnd_lead_time_days INTEGER,
+                    sent_at TEXT NOT NULL DEFAULT '',
+                    status_changed_at TEXT NOT NULL,
+                    created_by INTEGER,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );"#,
+                vec![],
+            ),
+            Statement::new(
+                r#"CREATE TABLE IF NOT EXISTS sample_feedbacks (
+                    id TEXT PRIMARY KEY,
+                    sample_request_id TEXT NOT NULL,
+                    iteration_number INTEGER NOT NULL,
+                    client_decision TEXT NOT NULL,
+                    client_notes TEXT NOT NULL DEFAULT '',
+                    recorded_by INTEGER,
+                    recorded_at TEXT NOT NULL
+                );"#,
+                vec![],
+            ),
+            Statement::new(
+                r#"CREATE TABLE IF NOT EXISTS sample_status_log (
+                    id TEXT PRIMARY KEY,
+                    sample_request_id TEXT NOT NULL,
+                    from_status TEXT NOT NULL,
+                    to_status TEXT NOT NULL,
+                    action TEXT NOT NULL,
+                    notes TEXT NOT NULL,
+                    on_behalf_of_division TEXT NOT NULL DEFAULT '',
+                    recorded_by INTEGER,
+                    recorded_at TEXT NOT NULL
+                );"#,
+                vec![],
+            ),
             // Cloud-only: tag dua karakter untuk setiap perangkat, bagian `<KP>`
             // dari kode klien. Tidak ikut sinkronisasi, jadi UNIQUE aman.
             Statement::new(
@@ -1582,6 +1676,18 @@ impl TursoClient {
             ),
             Statement::new(
                 "CREATE INDEX IF NOT EXISTS idx_domain_audit_entity ON domain_audit_log(entity_type, entity_id);",
+                vec![],
+            ),
+            Statement::new(
+                "CREATE INDEX IF NOT EXISTS idx_sample_requests_client ON sample_requests(client_id);",
+                vec![],
+            ),
+            Statement::new(
+                "CREATE INDEX IF NOT EXISTS idx_sample_feedbacks_request ON sample_feedbacks(sample_request_id, iteration_number);",
+                vec![],
+            ),
+            Statement::new(
+                "CREATE INDEX IF NOT EXISTS idx_sample_status_log_request ON sample_status_log(sample_request_id, recorded_at);",
                 vec![],
             ),
             // =========================================
@@ -1759,6 +1865,11 @@ impl TursoClient {
             vec![],
         )
         .await?;
+        self.query_one(
+            "INSERT OR IGNORE INTO schema_migration (version, name, applied_at) VALUES (-2015, 'sample-requests-v1', datetime('now'));",
+            vec![],
+        )
+        .await?;
 
         Ok(())
     }
@@ -1927,7 +2038,7 @@ impl TursoClient {
             .query_one(
                 // Sentinel WAJIB dinaikkan setiap kali ensure_schema menambah
                 // tabel atau kolom — nilainya di sini dan pada INSERT harus sama.
-                "SELECT COUNT(*) AS total FROM schema_migration WHERE version = -2014;",
+                "SELECT COUNT(*) AS total FROM schema_migration WHERE version = -2015;",
                 vec![],
             )
             .await
@@ -2350,6 +2461,59 @@ impl TursoClient {
         ])
         .await?;
         Ok(ended)
+    }
+
+    /// Pemeriksaan tiket sampel sebelum mutasinya disusun. `Some(pesan)` =
+    /// konflik. Lihat pemanggilnya di `push_events`.
+    async fn sample_guard(
+        &self,
+        operation: &str,
+        entity_key: &str,
+        payload: &Value,
+    ) -> Result<Option<String>, CommandError> {
+        let row = self
+            .query_one(
+                "SELECT s.status, s.is_paid_sample, s.revision_index, s.updated_at, COALESCE(c.free_revision_limit, 0) AS free_revision_limit FROM sample_requests s LEFT JOIN clients c ON c.id = s.client_id WHERE s.id = ?;",
+                vec![json!(entity_key)],
+            )
+            .await?
+            .to_objects()
+            .into_iter()
+            .next();
+        let Some(row) = row else {
+            return Ok(Some("This sample request does not exist in the database.".into()));
+        };
+        let cloud_text = |key: &str| row.get(key).and_then(Value::as_str).unwrap_or_default().to_owned();
+        let cloud_int = |key: &str| row.get(key).and_then(lenient_i64).unwrap_or(0);
+        let payload_text = |key: &str| payload.get(key).and_then(Value::as_str).unwrap_or_default().to_owned();
+        let changed = samples::SAMPLE_CHANGED_ELSEWHERE.to_owned();
+        if operation == "update" {
+            return Ok((cloud_text("updated_at") != payload_text("base_updated_at")).then_some(changed));
+        }
+        let base_index = payload.get("base_revision_index").and_then(Value::as_i64).unwrap_or(-1);
+        if cloud_text("status") != payload_text("base_status") || cloud_int("revision_index") != base_index {
+            return Ok(Some(changed));
+        }
+        let state = samples::SampleActionState {
+            status: &payload_text("base_status"),
+            is_paid_sample: cloud_int("is_paid_sample") != 0,
+            revision_index: cloud_int("revision_index"),
+            free_revision_limit: cloud_int("free_revision_limit"),
+        };
+        let expected = samples::apply_sample_action(
+            &state,
+            &payload_text("action"),
+            payload.get("rnd_lead_time_days").and_then(Value::as_i64),
+        );
+        let matches = expected.as_ref().is_ok_and(|result| {
+            result.status == payload_text("status")
+                && result.revision_index == payload.get("revision_index").and_then(Value::as_i64).unwrap_or(-1)
+                && result.is_billable == payload.get("is_billable").and_then(Value::as_bool)
+        });
+        Ok((!matches).then(|| match expected {
+            Err(message) => message.to_owned(),
+            Ok(_) => "The sample step does not match the company rules in the database.".to_owned(),
+        }))
     }
 
     /// Log audit domain dari cloud (layar Audit). Parameter sama dengan
@@ -3313,6 +3477,27 @@ impl TursoClient {
                 }
             }
 
+            // Tiket sampel: langkah dan suntingan hanya berlaku bila tiket di
+            // cloud masih seperti yang dilihat pencatatnya, dan langkahnya
+            // dihitung ulang dengan aturan cloud (PRD FR-06, E-05). Jeda sempit
+            // yang sama dengan guard nomor WhatsApp di atas; WHERE status di
+            // `SAMPLE_TRANSITION_SQL` menutup sisanya.
+            if domain == "sample" && operation != "create" {
+                if let Some(message) = self
+                    .sample_guard(operation, entity_key, &parsed_payload)
+                    .await?
+                {
+                    push_results.push(json!({
+                        "eventId": event_id,
+                        "status": "conflict",
+                        "reason": message.clone(),
+                        "message": message,
+                        "serverRevision": 0
+                    }));
+                    continue;
+                }
+            }
+
             let collector = StatementCollector::default();
             if let Err(error) =
                 apply_event_to_turso(&collector, domain, operation, entity_key, &parsed_payload)
@@ -4037,6 +4222,7 @@ fn canonical_sync_route(domain: &str, operation: &str) -> Option<(&'static str, 
         "company-profile" | "company_profile" => "company-profile",
         "lead-interaction" | "lead_interactions" => "lead-interaction",
         "lead" | "leads" => "lead",
+        "sample" | "sample_requests" => "sample",
         "audit" | "domain_audit_log" => "audit",
         _ => return None,
     };
@@ -4049,6 +4235,9 @@ fn canonical_sync_route(domain: &str, operation: &str) -> Option<(&'static str, 
         ("company-profile", "update") => "update",
         ("lead-interaction", "record") => "record",
         ("lead", "reassign") => "reassign",
+        ("sample", "create") => "create",
+        ("sample", "update") => "update",
+        ("sample", "transition") => "transition",
         ("audit", "record") => "record",
         _ => return None,
     };
@@ -4148,7 +4337,10 @@ async fn apply_event_to_turso(
                          address = excluded.address,
                          city = excluded.city,
                          province = excluded.province,
-                         lifecycle_status = excluded.lifecycle_status,
+                         -- `lifecycle_status` SENGAJA tidak ditimpa: nilainya
+                         -- diturunkan dari tiket sampel di cloud
+                         -- (`CLIENT_LIFECYCLE_FROM_SAMPLES_SQL`), dan salinan
+                         -- perangkat yang menyunting profil bisa sudah basi.
                          free_revision_limit = excluded.free_revision_limit,
                          is_white_label = excluded.is_white_label,
                          assigned_crm_id = excluded.assigned_crm_id,
@@ -4287,6 +4479,193 @@ async fn apply_event_to_turso(
                         json!(occurred_at),
                         json!(text("created_at")),
                     ],
+                )
+                .await?;
+        }
+        ("sample", "create" | "update") => {
+            // Draft divalidasi ulang dengan aturan yang sama dengan perangkat
+            // dan Web. `is_paid_sample` sudah diputuskan pembuatnya menurut
+            // setelan saat itu, jadi di sini diperiksa sebagai pilihan tetap.
+            let paid_mode = if payload.get("is_paid_sample").and_then(Value::as_bool) == Some(true) {
+                "PAID"
+            } else {
+                "FREE"
+            };
+            let draft = samples::validate_sample_draft(payload, paid_mode).map_err(|message| {
+                CommandError::new("TURSO_SYNC_PAYLOAD_INVALID", message)
+            })?;
+            let timestamp = text("updated_at");
+            if entity_key.is_empty() || clients::parse_stored_timestamp(&timestamp).is_none() {
+                return Err(CommandError::new(
+                    "TURSO_SYNC_PAYLOAD_INVALID",
+                    "The sample request is incomplete or invalid.",
+                ));
+            }
+            let field = |key: &str| draft.get(key).cloned().unwrap_or(Value::Null);
+            let flag = |key: &str| json!(i64::from(draft[key].as_bool() == Some(true)));
+            if operation == "create" {
+                let client_id = text("client_id");
+                if client_id.is_empty() {
+                    return Err(CommandError::new(
+                        "TURSO_SYNC_PAYLOAD_INVALID",
+                        "The sample request has no client.",
+                    ));
+                }
+                turso
+                    .query_one(
+                        samples::SAMPLE_INSERT_SQL,
+                        vec![
+                            json!(entity_key),
+                            json!(client_id),
+                            json!(text("lead_id")),
+                            field("sample_kind_option_id"),
+                            field("formulation_type_option_id"),
+                            field("registration_category_option_id"),
+                            field("product_category_option_id"),
+                            field("pic_crm_id"),
+                            field("sample_qty"),
+                            field("brand_name"),
+                            field("bpom_product_name"),
+                            field("claims"),
+                            field("packaging"),
+                            field("reference_notes"),
+                            field("client_budget_idr"),
+                            field("special_requests_json"),
+                            field("deadline_at"),
+                            field("ship_to_address"),
+                            flag("is_dummy_required"),
+                            flag("is_paid_sample"),
+                            json!(timestamp),
+                            payload.get("created_by").filter(|value| value.is_i64()).cloned().unwrap_or(Value::Null),
+                        ],
+                    )
+                    .await?;
+                turso
+                    .query_one(
+                        samples::CLIENT_LIFECYCLE_FROM_SAMPLES_SQL,
+                        vec![json!(client_id), json!(timestamp)],
+                    )
+                    .await?;
+            } else {
+                turso
+                    .query_one(
+                        samples::SAMPLE_UPDATE_SQL,
+                        vec![
+                            json!(entity_key),
+                            field("sample_kind_option_id"),
+                            field("formulation_type_option_id"),
+                            field("registration_category_option_id"),
+                            field("product_category_option_id"),
+                            field("sample_qty"),
+                            field("brand_name"),
+                            field("bpom_product_name"),
+                            field("claims"),
+                            field("packaging"),
+                            field("reference_notes"),
+                            field("special_requests_json"),
+                            flag("is_dummy_required"),
+                            flag("is_paid_sample"),
+                            field("pic_crm_id"),
+                            field("client_budget_idr"),
+                            field("deadline_at"),
+                            field("ship_to_address"),
+                            json!(timestamp),
+                        ],
+                    )
+                    .await?;
+            }
+        }
+        ("sample", "transition") => {
+            // Kecocokan dengan status cloud dan aturan diagram sudah diperiksa
+            // guard di `push_events`; WHERE status/revisi di SQL menjaga sisanya.
+            let status = text("status");
+            let base_status = text("base_status");
+            let action = text("action");
+            let changed_at = text("changed_at");
+            let client_id = text("client_id");
+            let log = payload.get("log").filter(|value| value.is_object());
+            let notes = log
+                .and_then(|log| log.get("notes"))
+                .and_then(Value::as_str)
+                .and_then(samples::normalize_sample_notes);
+            let valid = !entity_key.is_empty()
+                && !client_id.is_empty()
+                && samples::SAMPLE_STATUSES.contains(&status.as_str())
+                && samples::SAMPLE_STATUSES.contains(&base_status.as_str())
+                && samples::SAMPLE_ACTIONS.contains(&action.as_str())
+                && clients::parse_stored_timestamp(&changed_at).is_some()
+                && notes.is_some();
+            let (Some(log), Some(notes), true) = (log, notes, valid) else {
+                return Err(CommandError::new(
+                    "TURSO_SYNC_PAYLOAD_INVALID",
+                    "The sample step is incomplete or invalid.",
+                ));
+            };
+            let optional_int = |value: Option<&Value>| -> Value {
+                value.filter(|value| value.is_i64()).cloned().unwrap_or(Value::Null)
+            };
+            let billable = payload
+                .get("is_billable")
+                .and_then(Value::as_bool)
+                .map_or(Value::Null, |billable| json!(i64::from(billable)));
+            turso
+                .query_one(
+                    samples::SAMPLE_TRANSITION_SQL,
+                    vec![
+                        json!(entity_key),
+                        json!(status),
+                        json!(number("revision_index")),
+                        billable,
+                        optional_int(payload.get("rnd_lead_time_days")),
+                        json!(changed_at),
+                        json!(base_status),
+                        json!(number("base_revision_index")),
+                    ],
+                )
+                .await?;
+            turso
+                .query_one(
+                    samples::SAMPLE_STATUS_LOG_INSERT_SQL,
+                    vec![
+                        json!(log.get("id").and_then(Value::as_str).unwrap_or_default()),
+                        json!(entity_key),
+                        json!(base_status),
+                        json!(status),
+                        json!(action),
+                        json!(notes),
+                        json!(log.get("on_behalf_of_division").and_then(Value::as_str).unwrap_or_default()),
+                        optional_int(log.get("recorded_by")),
+                        json!(changed_at),
+                    ],
+                )
+                .await?;
+            if let Some(feedback) = payload.get("feedback").filter(|value| value.is_object()) {
+                let decision = feedback.get("client_decision").and_then(Value::as_str).unwrap_or_default();
+                if !["ACC", "REVISE", "REJECT"].contains(&decision) {
+                    return Err(CommandError::new(
+                        "TURSO_SYNC_PAYLOAD_INVALID",
+                        "The client decision is invalid.",
+                    ));
+                }
+                turso
+                    .query_one(
+                        samples::SAMPLE_FEEDBACK_INSERT_SQL,
+                        vec![
+                            json!(feedback.get("id").and_then(Value::as_str).unwrap_or_default()),
+                            json!(entity_key),
+                            optional_int(feedback.get("iteration_number")),
+                            json!(decision),
+                            json!(notes),
+                            optional_int(log.get("recorded_by")),
+                            json!(changed_at),
+                        ],
+                    )
+                    .await?;
+            }
+            turso
+                .query_one(
+                    samples::CLIENT_LIFECYCLE_FROM_SAMPLES_SQL,
+                    vec![json!(client_id), json!(changed_at)],
                 )
                 .await?;
         }
@@ -6869,6 +7248,9 @@ mod tests {
                 "device_tag_registry",
                 "lead_interactions",
                 "domain_audit_log",
+                "sample_requests",
+                "sample_feedbacks",
+                "sample_status_log",
             ] {
                 let ada: i64 = connection
                     .query_row(
@@ -6903,6 +7285,109 @@ mod tests {
                 crate::desktop::sync::CLIENT_SCHEMA_VERSION,
                 "versi skema hasil provisioning lokal berbeda dari versi klien"
             );
+        });
+    }
+
+    /// Langkah tiket sampel dicek ulang di cloud (PRD FR-06, E-05): langkah
+    /// yang dicatat dari status yang sudah basi, atau yang tidak cocok dengan
+    /// aturan diagram, menjadi konflik, bukan menimpa diam-diam.
+    #[test]
+    fn push_langkah_sampel_dari_status_basi_menjadi_konflik() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("runtime uji");
+        runtime.block_on(async {
+            let dir = tempfile::tempdir().expect("direktori sementara");
+            let hub = dir.path().join("app-hub.db");
+            let client = TursoClient::local_file(
+                Url::parse(LOCAL_FILE_ORIGIN).expect("origin lokal"),
+                &hub,
+                Client::new(),
+            );
+            client.ensure_schema().await.expect("provisioning lokal");
+            {
+                let connection = rusqlite::Connection::open(&hub).expect("buka hub");
+                connection
+                    .execute_batch(
+                        "INSERT INTO clients (id, client_code, name, phone_normalized, lifecycle_status, free_revision_limit, created_at, updated_at) VALUES ('c1', 'KLN-20260925-0101', 'Aura', '6281200000001', 'LEAD', 1, '2026-09-25 01:00:00', '2026-09-25 01:00:00');",
+                    )
+                    .expect("klien uji");
+            }
+            let mut counter = 0u32;
+            let mut event = |operation: &str, payload: Value| {
+                counter += 1;
+                json!({
+                    "eventId": format!("evt-{counter:064x}"),
+                    "clientId": format!("desktop-{:064x}", 1),
+                    "domain": "sample",
+                    "operation": operation,
+                    "entityKey": "s1",
+                    "payload": payload,
+                })
+            };
+            let step = |base: &str, index: i64, action: &str, status: &str, log: &str| {
+                json!({
+                    "id": "s1",
+                    "client_id": "c1",
+                    "action": action,
+                    "base_status": base,
+                    "base_revision_index": index,
+                    "status": status,
+                    "revision_index": index,
+                    "is_billable": Value::Null,
+                    "rnd_lead_time_days": Value::Null,
+                    "changed_at": "2026-09-25 02:00:00",
+                    "log": { "id": log, "notes": "catatan", "on_behalf_of_division": "CS", "recorded_by": 7 },
+                    "feedback": Value::Null,
+                })
+            };
+            let create = event(
+                "create",
+                json!({
+                    "id": "s1",
+                    "client_id": "c1",
+                    "product_category_option_id": "cat",
+                    "sample_qty": 2,
+                    "brand_name": "Aura Glow",
+                    "packaging": "Dropper",
+                    "deadline_at": "2026-10-31",
+                    "ship_to_address": "Bandung",
+                    "is_dummy_required": false,
+                    "is_paid_sample": false,
+                    "special_requests": {},
+                    "created_by": 7,
+                    "updated_at": "2026-09-25 01:30:00",
+                }),
+            );
+            let submit = event("transition", step("DRAFT", 0, "SUBMIT_TO_RND", "RND_REVIEW", "l1"));
+            // Perangkat kedua mencatat dari status lama yang sama.
+            let stale = event("transition", step("DRAFT", 0, "CANCEL", "CANCELLED", "l2"));
+            // Status tujuan yang tidak sesuai diagram.
+            let forged = event("transition", step("RND_REVIEW", 0, "RND_REJECT", "SAMPLE_SENT", "l3"));
+            let results = client
+                .push_events(&[create, submit, stale, forged])
+                .await
+                .expect("push");
+            let statuses: Vec<&str> = results
+                .iter()
+                .map(|result| result["status"].as_str().unwrap_or_default())
+                .collect();
+            assert_eq!(statuses, vec!["applied", "applied", "conflict", "conflict"]);
+            assert_eq!(results[2]["message"], json!(samples::SAMPLE_CHANGED_ELSEWHERE));
+
+            let connection = rusqlite::Connection::open(&hub).expect("buka hub");
+            let (status, lifecycle): (String, String) = connection
+                .query_row(
+                    "SELECT s.status, c.lifecycle_status FROM sample_requests s JOIN clients c ON c.id = s.client_id WHERE s.id = 's1';",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .expect("tiket");
+            assert_eq!((status.as_str(), lifecycle.as_str()), ("RND_REVIEW", "FIRST_ORDER_ACTIVE"));
+            let logs: i64 = connection
+                .query_row("SELECT COUNT(*) FROM sample_status_log WHERE sample_request_id = 's1';", [], |row| row.get(0))
+                .expect("riwayat");
+            assert_eq!(logs, 1);
         });
     }
 

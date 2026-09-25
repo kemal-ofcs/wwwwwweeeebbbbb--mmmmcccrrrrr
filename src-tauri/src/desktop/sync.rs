@@ -23,7 +23,7 @@ use super::{
 /// `CURRENT_SCHEMA_VERSION` di `web-desktop/src/lib/db-schema.ts` setiap kali
 /// migrasi baru ditambahkan, karena keduanya membaca tabel `schema_migration`
 /// yang sama di Turso.
-pub const CLIENT_SCHEMA_VERSION: i64 = 6;
+pub const CLIENT_SCHEMA_VERSION: i64 = 7;
 
 /// Hanya `cloud > client` yang berbahaya; `cloud <= client` adalah kondisi normal.
 fn is_client_schema_outdated(cloud_version: i64) -> bool {
@@ -173,13 +173,97 @@ const SNAPSHOT_TABLES: &[SnapshotTable] = &[
         delete_missing: false,
         read_only: false,
     },
+    // Tiket sampel (PRD FR-06). Satu rute `sample` untuk ketiga tabel: event
+    // `sample/transition` membawa tiket, riwayat langkah, dan keputusan klien
+    // sekaligus. Tiket `delete_missing: true` (cloud otoritatif, aturan 7 tetap
+    // menjaga baris yang belum terkirim); dua tabel riwayat `false` seperti log
+    // transaksional lain.
+    SnapshotTable {
+        payload_key: "sampleRequests",
+        domain: "sample",
+        table: "sample_requests",
+        columns: &[
+            "id",
+            "client_id",
+            "lead_id",
+            "sample_kind_option_id",
+            "formulation_type_option_id",
+            "registration_category_option_id",
+            "rnd_product_class",
+            "product_category_option_id",
+            "pic_crm_id",
+            "sample_qty",
+            "brand_name",
+            "bpom_product_name",
+            "claims",
+            "packaging",
+            "reference_notes",
+            "client_budget_idr",
+            "special_requests_json",
+            "deadline_at",
+            "ship_to_address",
+            "is_dummy_required",
+            "is_paid_sample",
+            "revision_index",
+            "is_billable",
+            "status",
+            "rnd_lead_time_days",
+            "sent_at",
+            "status_changed_at",
+            "created_by",
+            "created_at",
+            "updated_at",
+        ],
+        conflict_column: "id",
+        entity_column: "id",
+        delete_missing: true,
+        read_only: false,
+    },
+    SnapshotTable {
+        payload_key: "sampleFeedbacks",
+        domain: "sample",
+        table: "sample_feedbacks",
+        columns: &[
+            "id",
+            "sample_request_id",
+            "iteration_number",
+            "client_decision",
+            "client_notes",
+            "recorded_by",
+            "recorded_at",
+        ],
+        conflict_column: "id",
+        entity_column: "id",
+        delete_missing: false,
+        read_only: false,
+    },
+    SnapshotTable {
+        payload_key: "sampleStatusLog",
+        domain: "sample",
+        table: "sample_status_log",
+        columns: &[
+            "id",
+            "sample_request_id",
+            "from_status",
+            "to_status",
+            "action",
+            "notes",
+            "on_behalf_of_division",
+            "recorded_by",
+            "recorded_at",
+        ],
+        conflict_column: "id",
+        entity_column: "id",
+        delete_missing: false,
+        read_only: false,
+    },
     // Direktori operator hanya-baca: tidak punya rute outbox, cloud
     // otoritatif penuh. Hanya empat kolom (lihat `SNAPSHOT_SOURCES`).
     SnapshotTable {
         payload_key: "operatorDirectory",
         domain: "operator",
         table: "master_operator",
-        columns: &["id", "kode_operator", "nama_operator", "status"],
+        columns: &["id", "kode_operator", "nama_operator", "status", "role"],
         conflict_column: "id",
         entity_column: "id",
         delete_missing: true,
@@ -254,6 +338,9 @@ const CANONICAL_SYNC_ROUTES: &[(&str, &str)] = &[
     ("master-option", "upsert"),
     ("lead-interaction", "record"),
     ("lead", "reassign"),
+    ("sample", "create"),
+    ("sample", "update"),
+    ("sample", "transition"),
     // Log audit hanya-dorong: tidak ada di `SNAPSHOT_TABLES` karena tumbuh
     // tanpa batas dan hanya dibaca dari cloud (layar Audit).
     ("audit", "record"),
@@ -1797,6 +1884,7 @@ pub fn status(state: &DesktopState) -> Result<DesktopSyncStatus, CommandError> {
             "leads": table_count("leads"),
             "masterOptions": table_count("master_option"),
             "leadInteractions": table_count("lead_interactions"),
+            "sampleRequests": table_count("sample_requests"),
         }),
         push_error: None,
         changed_rows: 0,

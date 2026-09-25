@@ -29,6 +29,8 @@ export interface ClientRecord {
   city: string;
   province: string;
   lifecycle_status: string;
+  /** Kuota revisi gratis (FR-06.5), disalin dari setelan saat klien dibuat. */
+  free_revision_limit: number;
   /** Dihitung backend saat dibaca; `null` untuk klien selain `LEAD`. */
   segment: LeadSegment | null;
   created_by: number | null;
@@ -57,6 +59,11 @@ export interface ClientDraft {
   channel_option_id: string;
   product_category_option_id: string;
   needs_notes: string;
+  /**
+   * Kuota revisi gratis klien. `null` saat registrasi: backend menyalinnya
+   * dari setelan bisnis. Saat edit, nilai klien yang sedang disunting.
+   */
+  free_revision_limit: number | null;
 }
 
 export interface MasterOptionRecord {
@@ -198,6 +205,8 @@ export interface OperatorDirectoryEntry {
   id: number;
   kode_operator: string;
   nama_operator: string;
+  /** Kunci role (`cs`, `crm`, ...); kosong bila role-nya sudah dihapus. */
+  role_key: string;
 }
 
 export async function listLeadInteractions(
