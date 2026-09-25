@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-desktop-update-client"
+description = "Enables the desktop_update_client command without any pre-configured scope."
+commands.allow = ["desktop_update_client"]
+
+[[permission]]
+identifier = "deny-desktop-update-client"
+description = "Denies the desktop_update_client command without any pre-configured scope."
+commands.deny = ["desktop_update_client"]

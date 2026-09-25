@@ -23,8 +23,7 @@ interface NavItem {
  * Menyembunyikan menu saja tidak pernah cukup: backend tetap wajib memeriksa.
  */
 const NAV_ITEMS: readonly NavItem[] = [
-  { area: "items", href: "/items", label: "Items" },
-  { area: "activity", href: "/activity", label: "Activity" },
+  { area: "clients", href: "/clients", label: "Clients" },
   { area: "operators", href: "/operators", label: "Operators" },
   {
     area: "password_reset",

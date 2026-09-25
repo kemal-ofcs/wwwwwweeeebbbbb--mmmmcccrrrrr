@@ -2,11 +2,13 @@ use std::{collections::HashMap, env, path::PathBuf};
 
 const DESKTOP_COMMANDS: &[&str] = &[
     "desktop_get_database_config",
-    "desktop_list_items",
-    "desktop_save_item",
-    "desktop_delete_item",
-    "desktop_list_activities",
-    "desktop_record_activity",
+    "desktop_list_clients",
+    "desktop_register_client",
+    "desktop_update_client",
+    "desktop_list_master_options",
+    "desktop_save_master_option",
+    "desktop_get_client_code_settings",
+    "desktop_save_client_code_settings",
     "desktop_get_session",
     "desktop_get_runtime_status",
     "desktop_get_license_status",

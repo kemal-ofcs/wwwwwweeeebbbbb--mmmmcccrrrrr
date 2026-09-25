@@ -1,10 +1,10 @@
 import type { NextRequest } from "next/server";
 import { requireWebPermission } from "@/lib/server/auth/authorize";
+import { saveMasterOption } from "@/lib/server/clients";
 import {
   ensureServerDatabaseInitialized,
   getServerDatabase,
 } from "@/lib/server/db";
-import { recordActivity } from "@/lib/server/example-domain";
 import {
   noStoreJson,
   readJsonBody,
@@ -14,19 +14,22 @@ import { assertSameOriginMutation } from "@/lib/server/http/request-security";
 
 export const runtime = "nodejs";
 
-/** Cerminan `desktop_record_activity`; operatornya diambil dari sesi, bukan body. */
+interface MasterOptionBody {
+  option?: unknown;
+}
+
+/** Cerminan `desktop_save_master_option`: tambah atau ubah satu pilihan. */
 export async function POST(request: NextRequest) {
   try {
     assertSameOriginMutation(request);
     await ensureServerDatabaseInitialized();
-    const actor = await requireWebPermission(request, "activity.record");
-    const body = await readJsonBody<Record<string, unknown>>(request);
-    const eventKey = await recordActivity(
+    await requireWebPermission(request, "master_data.manage");
+    const body = await readJsonBody<MasterOptionBody>(request);
+    const option = await saveMasterOption(
       getServerDatabase(),
-      body ?? {},
-      actor.kode_operator,
+      (body.option ?? {}) as Record<string, unknown>,
     );
-    return noStoreJson({ sukses: true, event_key: eventKey });
+    return noStoreJson({ sukses: true, option });
   } catch (error) {
     return toApiErrorResponse(error);
   }

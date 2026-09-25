@@ -2349,31 +2349,36 @@ pub async fn desktop_save_client_code_settings(
     }
 
     let client_id = sync::ensure_client_id(&state)?;
-    let mut connection = storage::database(&state.data_dir)?;
-    let transaction = connection
-        .transaction()
-        .map_err(|_| CommandError::internal())?;
-    for (key, value) in [
-        (clients::CLIENT_CODE_PREFIX_SETTING, prefix.as_str()),
-        (clients::CLIENT_CODE_WEB_TAG_SETTING, web_tag.as_str()),
-    ] {
-        transaction
-            .execute(
-                "INSERT INTO setting_gex_system (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value;",
-                rusqlite::params![key, value],
-            )
+    // Koneksi dan transaksi SQLite tidak `Send`: keduanya wajib sudah ditutup
+    // sebelum `sync::synchronize(...).await` di bawah, atau command ini tidak
+    // bisa didaftarkan ke `generate_handler!`.
+    {
+        let mut connection = storage::database(&state.data_dir)?;
+        let transaction = connection
+            .transaction()
             .map_err(|_| CommandError::internal())?;
-        sync::enqueue(
-            &transaction,
-            &client_id,
-            "setting",
-            "update",
-            key,
-            &json!({ "key": key, "value": value }),
-            None,
-        )?;
+        for (key, value) in [
+            (clients::CLIENT_CODE_PREFIX_SETTING, prefix.as_str()),
+            (clients::CLIENT_CODE_WEB_TAG_SETTING, web_tag.as_str()),
+        ] {
+            transaction
+                .execute(
+                    "INSERT INTO setting_gex_system (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value;",
+                    rusqlite::params![key, value],
+                )
+                .map_err(|_| CommandError::internal())?;
+            sync::enqueue(
+                &transaction,
+                &client_id,
+                "setting",
+                "update",
+                key,
+                &json!({ "key": key, "value": value }),
+                None,
+            )?;
+        }
+        transaction.commit().map_err(|_| CommandError::internal())?;
     }
-    transaction.commit().map_err(|_| CommandError::internal())?;
 
     let _ = sync::synchronize(&state).await;
     Ok(json!({

@@ -35,7 +35,12 @@ async function readResponse(response: Response) {
   try {
     return (await response.json()) as AuthApiResponse;
   } catch {
-    return { sukses: false, pesan: "Invalid authentication response." };
+    // Status HTTP membedakan server yang crash (500) dari fungsi yang habis
+    // waktu (504) tanpa harus membuka log server.
+    return {
+      sukses: false,
+      pesan: `Invalid authentication response (HTTP ${response.status}).`,
+    };
   }
 }
 

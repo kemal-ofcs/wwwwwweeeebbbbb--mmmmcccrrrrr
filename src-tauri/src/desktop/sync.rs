@@ -634,15 +634,6 @@ pub fn new_event_id(client_id: &str, domain: &str, operation: &str) -> String {
     format!("evt-{}", hex::encode(hasher.finalize()))
 }
 
-pub fn new_local_id() -> i64 {
-    let nanos = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
-        .unwrap_or(1);
-    const MAX_SAFE_JSON_INTEGER: u128 = 9_007_199_254_740_991;
-    -((nanos % (MAX_SAFE_JSON_INTEGER - 1)) as i64 + 1)
-}
-
 pub fn enqueue(
     transaction: &Transaction<'_>,
     client_id: &str,
@@ -1124,11 +1115,11 @@ fn apply_push_results(
             }
 
             // Titik pasang rekonsiliasi ID. Aplikasi asal memakai blok di sini
-            // untuk menukar id lokal sementara (bernilai negatif, dibuat
-            // `new_local_id`) dengan id yang baru diberikan server, lalu
-            // meng-cascade-nya ke tabel anak dan ke payload outbox yang masih
-            // mengantre. Template ini memakai kunci bisnis (`kode_item`,
-            // `event_key`) sehingga tidak memerlukannya. Kalau domain Anda
+            // untuk menukar id lokal sementara (bernilai negatif) dengan id
+            // yang baru diberikan server, lalu meng-cascade-nya ke tabel anak
+            // dan ke payload outbox yang masih mengantre. Domain MaklonOS
+            // memakai UUID buatan perangkat (`clients::new_uuid`) sehingga
+            // tidak memerlukannya. Kalau domain Anda
             // memakai id numerik dari server, tambahkan penukaran itu di sini —
             // sebelum baris ini, outbox yang mengantre masih memuat id lama.
         } else if sync_status == "conflict" {
