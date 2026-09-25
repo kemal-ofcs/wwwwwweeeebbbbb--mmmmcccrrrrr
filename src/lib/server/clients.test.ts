@@ -14,6 +14,10 @@ import { type Client, createClient } from "@libsql/client";
 import { initDatabaseSchema } from "@/lib/db-schema";
 
 mock.module("server-only", () => ({}));
+
+const ADMIN = { id: 1, role: "Admin" };
+const actor = (id: number) => ({ id, role: "CS" });
+
 const domain = await import("@/lib/server/clients");
 
 let client: Client;
@@ -39,18 +43,26 @@ beforeEach(async () => {
     "DELETE FROM setting_gex_system WHERE key IN ('client_code_prefix', 'client_code_web_tag');",
   );
   channelId = (
-    await domain.saveMasterOption(client, {
-      kind: "LEAD_CHANNEL",
-      code: "ig",
-      label: "Instagram",
-    })
+    await domain.saveMasterOption(
+      client,
+      {
+        kind: "LEAD_CHANNEL",
+        code: "ig",
+        label: "Instagram",
+      },
+      ADMIN,
+    )
   ).id;
   categoryId = (
-    await domain.saveMasterOption(client, {
-      kind: "PRODUCT_CATEGORY",
-      code: "SKIN",
-      label: "Skincare",
-    })
+    await domain.saveMasterOption(
+      client,
+      {
+        kind: "PRODUCT_CATEGORY",
+        code: "SKIN",
+        label: "Skincare",
+      },
+      ADMIN,
+    )
   ).id;
 });
 
@@ -76,7 +88,7 @@ function draft(overrides: Record<string, unknown> = {}) {
 // tabel yang sama, jadi bentuk baris dan pesan penolakannya wajib sama.
 describe("klien, jalur Web", () => {
   test("registrasi membuat klien LEAD + lead dengan kode tag Web", async () => {
-    const saved = await domain.registerClient(client, draft(), 7);
+    const saved = await domain.registerClient(client, draft(), actor(7));
     expect(saved.client_code).toMatch(/^KLN-\d{8}-WB01$/);
 
     const [row] = await domain.listClients(client);
@@ -99,7 +111,7 @@ describe("klien, jalur Web", () => {
   });
 
   test("urutan kode naik, awalan dan tag mengikuti Pengaturan", async () => {
-    await domain.registerClient(client, draft(), 1);
+    await domain.registerClient(client, draft(), actor(1));
     await domain.saveClientCodeSettings(client, {
       client_code_prefix: "cus",
       client_code_web_tag: "w1",
@@ -107,21 +119,25 @@ describe("klien, jalur Web", () => {
     const second = await domain.registerClient(
       client,
       draft({ phone: "081299990000" }),
-      1,
+      actor(1),
     );
     expect(second.client_code).toMatch(/^CUS-\d{8}-W101$/);
     const third = await domain.registerClient(
       client,
       draft({ phone: "081299990001" }),
-      1,
+      actor(1),
     );
     expect(third.client_code).toMatch(/^CUS-\d{8}-W102$/);
   });
 
   test("nomor WhatsApp yang sama ditolak dengan menyebut pemiliknya", async () => {
-    const first = await domain.registerClient(client, draft(), 1);
+    const first = await domain.registerClient(client, draft(), actor(1));
     await expect(
-      domain.registerClient(client, draft({ phone: "+62 812 3456 7890" }), 1),
+      domain.registerClient(
+        client,
+        draft({ phone: "+62 812 3456 7890" }),
+        actor(1),
+      ),
     ).rejects.toThrow(
       `The WhatsApp number 6281234567890 is already registered to client ${first.client_code}.`,
     );
@@ -129,10 +145,10 @@ describe("klien, jalur Web", () => {
 
   test("masukan tidak sah ditolak dengan pesan yang sama seperti Rust", async () => {
     await expect(
-      domain.registerClient(client, draft({ name: "A" }), 1),
+      domain.registerClient(client, draft({ name: "A" }), actor(1)),
     ).rejects.toThrow("The client name must be 2-120 characters.");
     await expect(
-      domain.registerClient(client, draft({ phone: "12345" }), 1),
+      domain.registerClient(client, draft({ phone: "12345" }), actor(1)),
     ).rejects.toThrow(
       "Enter a valid WhatsApp number that starts with 0 or 62.",
     );
@@ -140,28 +156,36 @@ describe("klien, jalur Web", () => {
       domain.registerClient(
         client,
         draft({ channel_option_id: categoryId }),
-        1,
+        actor(1),
       ),
     ).rejects.toThrow("Choose an active lead channel.");
     expect(await domain.listClients(client)).toHaveLength(0);
   });
 
   test("opsi nonaktif tidak bisa dipilih klien baru, tetapi klien lama tetap bisa disunting", async () => {
-    const saved = await domain.registerClient(client, draft(), 1);
-    await domain.saveMasterOption(client, {
-      id: channelId,
-      code: "IG",
-      label: "Instagram",
-      is_active: false,
-    });
+    const saved = await domain.registerClient(client, draft(), actor(1));
+    await domain.saveMasterOption(
+      client,
+      {
+        id: channelId,
+        code: "IG",
+        label: "Instagram",
+        is_active: false,
+      },
+      ADMIN,
+    );
     await expect(
-      domain.registerClient(client, draft({ phone: "081200001111" }), 1),
+      domain.registerClient(client, draft({ phone: "081200001111" }), actor(1)),
     ).rejects.toThrow("Choose an active lead channel.");
 
-    await domain.updateClient(client, {
-      ...draft({ name: "Rina Beauty Official" }),
-      id: saved.id,
-    });
+    await domain.updateClient(
+      client,
+      {
+        ...draft({ name: "Rina Beauty Official" }),
+        id: saved.id,
+      },
+      ADMIN,
+    );
     const [row] = await domain.listClients(client);
     expect(row).toMatchObject({
       name: "Rina Beauty Official",
@@ -172,24 +196,36 @@ describe("klien, jalur Web", () => {
 
   test("kode Master Data unik per jenis dan jenis asing ditolak", async () => {
     await expect(
-      domain.saveMasterOption(client, {
-        kind: "LEAD_CHANNEL",
-        code: "IG",
-        label: "Instagram lagi",
-      }),
+      domain.saveMasterOption(
+        client,
+        {
+          kind: "LEAD_CHANNEL",
+          code: "IG",
+          label: "Instagram lagi",
+        },
+        ADMIN,
+      ),
     ).rejects.toThrow("Another option of this type already uses that code.");
     // Kode sama di jenis berbeda boleh.
-    await domain.saveMasterOption(client, {
-      kind: "PRODUCT_CATEGORY",
-      code: "IG",
-      label: "Kategori IG",
-    });
+    await domain.saveMasterOption(
+      client,
+      {
+        kind: "PRODUCT_CATEGORY",
+        code: "IG",
+        label: "Kategori IG",
+      },
+      ADMIN,
+    );
     await expect(
-      domain.saveMasterOption(client, {
-        kind: "SUPPLIER",
-        code: "X",
-        label: "X",
-      }),
+      domain.saveMasterOption(
+        client,
+        {
+          kind: "SUPPLIER",
+          code: "X",
+          label: "X",
+        },
+        ADMIN,
+      ),
     ).rejects.toThrow("Unknown master data type.");
   });
 

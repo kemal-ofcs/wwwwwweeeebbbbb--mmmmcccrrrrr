@@ -25,6 +25,7 @@ interface NavItem {
 const NAV_ITEMS: readonly NavItem[] = [
   { area: "clients", href: "/clients", label: "Clients" },
   { area: "operators", href: "/operators", label: "Operators" },
+  { area: "audit", href: "/audit", label: "Audit" },
   {
     area: "password_reset",
     href: "/password-reset-history",

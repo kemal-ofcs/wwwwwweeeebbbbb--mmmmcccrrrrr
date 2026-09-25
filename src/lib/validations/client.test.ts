@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   companyDateStamp,
+  companyDayBoundsUtc,
   daysSinceResponse,
   formatClientCode,
   leadSegment,
@@ -184,5 +185,21 @@ describe("resolveInteractionTime", () => {
     expect(resolveInteractionTime(1.5, now)).toEqual({
       error: "The interaction time is not valid.",
     });
+  });
+});
+
+describe("companyDayBoundsUtc", () => {
+  // Vektor kembar `batas_hari_perusahaan` di `clients.rs`.
+  test("awal hari dan awal hari berikutnya dalam UTC", () => {
+    expect(companyDayBoundsUtc("2026-09-25", "Asia/Jakarta")).toEqual([
+      "2026-09-24 17:00:00",
+      "2026-09-25 17:00:00",
+    ]);
+    expect(companyDayBoundsUtc("2026-09-25", "Asia/Jayapura")).toEqual([
+      "2026-09-24 15:00:00",
+      "2026-09-25 15:00:00",
+    ]);
+    expect(companyDayBoundsUtc("25-09-2026", "Asia/Jakarta")).toBeNull();
+    expect(companyDayBoundsUtc("", "Asia/Jakarta")).toBeNull();
   });
 });

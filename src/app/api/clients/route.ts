@@ -32,7 +32,7 @@ export async function POST(request: NextRequest) {
     const saved = await registerClient(
       getServerDatabase(),
       draftOf(body),
-      operator.id,
+      operator,
     );
     return noStoreJson({ sukses: true, ...saved });
   } catch (error) {
@@ -45,9 +45,13 @@ export async function PUT(request: NextRequest) {
   try {
     assertSameOriginMutation(request);
     await ensureServerDatabaseInitialized();
-    await requireWebPermission(request, "clients.manage");
+    const operator = await requireWebPermission(request, "clients.manage");
     const body = await readJsonBody<ClientMutationBody>(request);
-    const saved = await updateClient(getServerDatabase(), draftOf(body));
+    const saved = await updateClient(
+      getServerDatabase(),
+      draftOf(body),
+      operator,
+    );
     return noStoreJson({ sukses: true, ...saved });
   } catch (error) {
     return toApiErrorResponse(error);

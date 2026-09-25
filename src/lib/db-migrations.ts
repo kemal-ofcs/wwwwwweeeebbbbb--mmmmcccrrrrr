@@ -214,4 +214,13 @@ export async function runDatabaseMigrations(client: Client) {
           VALUES (4, 'lead-interactions', ?);`,
     args: [new Date().toISOString()],
   });
+
+  // Versi 5: `domain_audit_log`, izin `sessions.manage`/`audit.view`, dan role
+  // divisi (PRD F-02, F-10). Seluruhnya DDL/seed awal `db-schema.ts`; baris ini
+  // hanya mencatat versinya. Nomor dan nama WAJIB sama dengan `turso.rs`.
+  await client.execute({
+    sql: `INSERT OR IGNORE INTO schema_migration (version, name, applied_at)
+          VALUES (5, 'audit-log-and-division-roles', ?);`,
+    args: [new Date().toISOString()],
+  });
 }

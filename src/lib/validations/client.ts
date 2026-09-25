@@ -276,3 +276,17 @@ export function resolveInteractionTime(
   }
   return { epoch: requested };
 }
+
+/**
+ * Batas UTC satu hari kalender perusahaan (`YYYY-MM-DD`): awal hari itu dan
+ * awal hari berikutnya. Padanan `company_day_bounds_utc` di `clients.rs`.
+ */
+export function companyDayBoundsUtc(
+  date: string,
+  timezone: string,
+): [string, string] | null {
+  const midnight = parseStoredTimestamp(`${date.trim()} 00:00:00`);
+  if (midnight === null) return null;
+  const start = midnight - timezoneOffsetHours(timezone) * 3600;
+  return [utcTimestamp(start), utcTimestamp(start + 86_400)];
+}

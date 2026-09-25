@@ -15,6 +15,10 @@ import type { OperatorUser } from "@/lib/auth/operator-user";
 import { initDatabaseSchema } from "@/lib/db-schema";
 
 mock.module("server-only", () => ({}));
+
+const ADMIN = { id: 1, role: "Admin" };
+const actor = (id: number) => ({ id, role: "CS" });
+
 const clients = await import("@/lib/server/clients");
 const leads = await import("@/lib/server/leads");
 
@@ -67,16 +71,24 @@ beforeEach(async () => {
   await client.execute("DELETE FROM leads;");
   await client.execute("DELETE FROM clients;");
   await client.execute("DELETE FROM master_option;");
-  const channel = await clients.saveMasterOption(client, {
-    kind: "LEAD_CHANNEL",
-    code: "IG",
-    label: "Instagram",
-  });
-  const category = await clients.saveMasterOption(client, {
-    kind: "PRODUCT_CATEGORY",
-    code: "SKIN",
-    label: "Skincare",
-  });
+  const channel = await clients.saveMasterOption(
+    client,
+    {
+      kind: "LEAD_CHANNEL",
+      code: "IG",
+      label: "Instagram",
+    },
+    ADMIN,
+  );
+  const category = await clients.saveMasterOption(
+    client,
+    {
+      kind: "PRODUCT_CATEGORY",
+      code: "SKIN",
+      label: "Skincare",
+    },
+    ADMIN,
+  );
   await clients.registerClient(
     client,
     {
@@ -85,7 +97,7 @@ beforeEach(async () => {
       channel_option_id: channel.id,
       product_category_option_id: category.id,
     },
-    7,
+    actor(7),
   );
   const [row] = await clients.listClients(client);
   leadId = row?.lead_id ?? "";
@@ -288,9 +300,9 @@ describe("interaksi lead, jalur Web", () => {
   });
 
   test("pindah PIC hanya ke operator aktif", async () => {
-    await leads.reassignLead(client, leadId, 8);
+    await leads.reassignLead(client, leadId, 8, ADMIN);
     expect(Number((await leadRow())?.pic_cs_id)).toBe(8);
-    await expect(leads.reassignLead(client, leadId, 9)).rejects.toThrow(
+    await expect(leads.reassignLead(client, leadId, 9, ADMIN)).rejects.toThrow(
       "Choose an active operator.",
     );
     const directory = await leads.listOperatorDirectory(client);

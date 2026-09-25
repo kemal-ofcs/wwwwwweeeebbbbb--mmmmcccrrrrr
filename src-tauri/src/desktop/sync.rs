@@ -20,7 +20,7 @@ use super::{
 /// `CURRENT_SCHEMA_VERSION` di `web-desktop/src/lib/db-schema.ts` setiap kali
 /// migrasi baru ditambahkan, karena keduanya membaca tabel `schema_migration`
 /// yang sama di Turso.
-pub const CLIENT_SCHEMA_VERSION: i64 = 4;
+pub const CLIENT_SCHEMA_VERSION: i64 = 5;
 
 /// Hanya `cloud > client` yang berbahaya; `cloud <= client` adalah kondisi normal.
 fn is_client_schema_outdated(cloud_version: i64) -> bool {
@@ -251,6 +251,9 @@ const CANONICAL_SYNC_ROUTES: &[(&str, &str)] = &[
     ("master-option", "upsert"),
     ("lead-interaction", "record"),
     ("lead", "reassign"),
+    // Log audit hanya-dorong: tidak ada di `SNAPSHOT_TABLES` karena tumbuh
+    // tanpa batas dan hanya dibaca dari cloud (layar Audit).
+    ("audit", "record"),
     ("setting", "update"),
     ("setting", "upsert"),
     ("company-profile", "update"),

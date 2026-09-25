@@ -13,6 +13,7 @@ const DESKTOP_COMMANDS: &[&str] = &[
     "desktop_record_lead_interaction",
     "desktop_list_operator_directory",
     "desktop_reassign_lead",
+    "desktop_list_audit_log",
     "desktop_get_session",
     "desktop_get_runtime_status",
     "desktop_get_license_status",

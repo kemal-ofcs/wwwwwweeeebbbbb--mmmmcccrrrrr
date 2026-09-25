@@ -1374,6 +1374,8 @@ impl TursoClient {
                 ('database_backup.export', 'Export database backup', 'System', 'Export the entire database into one backup file.', 1, 66),
                 ('database_backup.restore', 'Restore database from backup', 'System', 'Replace all device data with the contents of a backup file.', 1, 67),
                 ('operators.view', 'View operators', 'Operators', 'View operator and user account data.', 1, 70),
+                ('sessions.manage', 'Manage active sessions', 'Operators', 'View every operator''s active sessions and end them.', 1, 72),
+                ('audit.view', 'View audit log', 'Operators', 'View who changed clients, leads, and master data, and when.', 1, 74),
                 ('operators.manage', 'Manage operators', 'Operators', 'Add and edit app operators.', 1, 80),
                 ('roles.manage', 'Manage roles and access', 'Roles', 'Set the permission matrix of each role.', 1, 90),
                 ('settings.view', 'View system settings', 'Settings', 'View app and database settings.', 1, 100),
@@ -1421,6 +1423,21 @@ impl TursoClient {
                 ('rbac_revision', '1');"#,
                 vec![],
             ),
+            // Role divisi (PRD FR-02), sekali saja: dijaga penanda
+            // `division_roles_seeded`. WAJIB identik dengan
+            // `DIVISION_ROLE_SEED_SQL` di `db-schema.ts` (dites per karakter).
+            Statement::new(
+                "INSERT OR IGNORE INTO app_role (role_key, nama_role, deskripsi, is_system, is_superadmin, status, created_at, updated_at) SELECT column1, column2, column3, 0, 0, 'Active', datetime('now'), datetime('now') FROM (VALUES ('cs', 'CS', 'Customer service: registers leads and follows them up.'), ('crm', 'CRM', 'Client relationship after the first order.'), ('rnd', 'R&D', 'Formulation and samples.'), ('finance', 'Finance', 'Invoices and payments.'), ('design', 'Design', 'Mockups and dummies.'), ('legal', 'Legal', 'BPOM, halal, and trademark filings.'), ('ppic', 'PPIC', 'Production planning and materials.'), ('production_spv', 'Production SPV', 'Production floor supervision.'), ('qc', 'QC', 'Quality control and claims.'), ('logistics', 'Logistics', 'Shipping and delivery.')) WHERE NOT EXISTS (SELECT 1 FROM setting_gex_system WHERE key = 'division_roles_seeded');",
+                vec![],
+            ),
+            Statement::new(
+                "INSERT OR IGNORE INTO role_permission (role_id, permission_key, is_allowed, updated_at, updated_by) SELECT r.id, p.permission_key, 1, datetime('now'), 'system' FROM app_role r JOIN app_permission p ON p.permission_key IN ('home.view', 'dashboard.view', 'sync.view') OR (r.role_key IN ('cs', 'crm') AND p.permission_key IN ('clients.view', 'leads.view')) OR (r.role_key = 'cs' AND p.permission_key IN ('clients.manage', 'leads.manage')) WHERE r.role_key IN ('cs', 'crm', 'rnd', 'finance', 'design', 'legal', 'ppic', 'production_spv', 'qc', 'logistics') AND NOT EXISTS (SELECT 1 FROM setting_gex_system WHERE key = 'division_roles_seeded');",
+                vec![],
+            ),
+            Statement::new(
+                "INSERT OR IGNORE INTO setting_gex_system (key, value) VALUES ('division_roles_seeded', '1');",
+                vec![],
+            ),
             // Riwayat versi WAJIB lengkap, bukan hanya fondasinya.
             //
             // `isDatabaseSchemaReady` di `db-schema.ts` menuntut
@@ -1438,7 +1455,8 @@ impl TursoClient {
                 (1, 'template-foundation-v1', datetime('now')),
                 (2, 'password-reset-and-two-factor', datetime('now')),
                 (3, 'clients-leads-master-data', datetime('now')),
-                (4, 'lead-interactions', datetime('now'));"#,
+                (4, 'lead-interactions', datetime('now')),
+                (5, 'audit-log-and-division-roles', datetime('now'));"#,
                 vec![],
             ),
             // ============ DOMAIN MAKLONOS ============
@@ -1510,6 +1528,21 @@ impl TursoClient {
                 );"#,
                 vec![],
             ),
+            // Log audit domain (PRD FR-10), hanya-tambah: rute `audit/record`
+            // hanya menyisipkan dan tidak ada jalur yang mengubah/menghapus.
+            Statement::new(
+                r#"CREATE TABLE IF NOT EXISTS domain_audit_log (
+                    id TEXT PRIMARY KEY,
+                    actor_operator_id INTEGER,
+                    on_behalf_of_division TEXT NOT NULL DEFAULT '',
+                    action TEXT NOT NULL,
+                    entity_type TEXT NOT NULL,
+                    entity_id TEXT NOT NULL,
+                    summary_json TEXT NOT NULL DEFAULT '{}',
+                    occurred_at TEXT NOT NULL
+                );"#,
+                vec![],
+            ),
             // Cloud-only: tag dua karakter untuk setiap perangkat, bagian `<KP>`
             // dari kode klien. Tidak ikut sinkronisasi, jadi UNIQUE aman.
             Statement::new(
@@ -1538,6 +1571,14 @@ impl TursoClient {
             ),
             Statement::new(
                 "CREATE INDEX IF NOT EXISTS idx_lead_interactions_lead ON lead_interactions(lead_id, occurred_at);",
+                vec![],
+            ),
+            Statement::new(
+                "CREATE INDEX IF NOT EXISTS idx_domain_audit_occurred ON domain_audit_log(occurred_at);",
+                vec![],
+            ),
+            Statement::new(
+                "CREATE INDEX IF NOT EXISTS idx_domain_audit_entity ON domain_audit_log(entity_type, entity_id);",
                 vec![],
             ),
             // =========================================
@@ -1700,6 +1741,11 @@ impl TursoClient {
         .await?;
         self.query_one(
             "INSERT OR IGNORE INTO schema_migration (version, name, applied_at) VALUES (-2012, 'lead-interactions-v1', datetime('now'));",
+            vec![],
+        )
+        .await?;
+        self.query_one(
+            "INSERT OR IGNORE INTO schema_migration (version, name, applied_at) VALUES (-2013, 'audit-log-and-division-roles-v1', datetime('now'));",
             vec![],
         )
         .await?;
@@ -1869,7 +1915,7 @@ impl TursoClient {
             .query_one(
                 // Sentinel WAJIB dinaikkan setiap kali ensure_schema menambah
                 // tabel atau kolom — nilainya di sini dan pada INSERT harus sama.
-                "SELECT COUNT(*) AS total FROM schema_migration WHERE version = -2012;",
+                "SELECT COUNT(*) AS total FROM schema_migration WHERE version = -2013;",
                 vec![],
             )
             .await
@@ -2062,6 +2108,35 @@ impl TursoClient {
             "DEVICE_TAG_EXHAUSTED",
             "No device tags are left in this database.",
         ))
+    }
+
+    /// Log audit domain dari cloud (layar Audit). Parameter sama dengan
+    /// `clients::DOMAIN_AUDIT_LIST_SQL`.
+    pub async fn list_domain_audit(&self, params: Vec<Value>) -> Result<Vec<Value>, CommandError> {
+        self.ensure_schema_current().await?;
+        Ok(self
+            .query_one(clients::DOMAIN_AUDIT_LIST_SQL, params)
+            .await?
+            .to_objects()
+            .into_iter()
+            .map(|row| {
+                let text = |key: &str| row.get(key).and_then(Value::as_str).unwrap_or_default().to_owned();
+                let actor = row
+                    .get("actor_operator_id")
+                    .and_then(|value| value.as_i64().or_else(|| value.as_str().and_then(|v| v.parse().ok())));
+                json!({
+                    "id": text("id"),
+                    "actor_operator_id": actor,
+                    "actor_name": row.get("actor_name").and_then(Value::as_str),
+                    "on_behalf_of_division": text("on_behalf_of_division"),
+                    "action": text("action"),
+                    "entity_type": text("entity_type"),
+                    "entity_id": text("entity_id"),
+                    "summary_json": text("summary_json"),
+                    "occurred_at": text("occurred_at"),
+                })
+            })
+            .collect())
     }
 
     /// Apakah tag ini sudah diberikan ke salah satu perangkat.
@@ -3642,15 +3717,15 @@ impl TursoClient {
                 "The permission list contains inactive or unknown keys.",
             ));
         }
-        let mut stmts = vec![Statement::new(
-            "DELETE FROM role_permission WHERE role_id = ?;",
-            vec![json!(role_id)],
-        )];
-
-        for p_key in permissions {
+        // Setiap izin katalog disimpan sebagai baris 0/1, sama dengan jalur Web
+        // (`role-admin.ts`). Izin yang dicabut TIDAK dihapus: seed
+        // `INSERT OR IGNORE` yang berjalan tiap kali skema naik versi akan
+        // memberikannya kembali secara diam-diam bila barisnya hilang.
+        let mut stmts = Vec::with_capacity(available.len() + 1);
+        for p_key in &available {
             stmts.push(Statement::new(
-                "INSERT INTO role_permission (role_id, permission_key, is_allowed, updated_at, updated_by) VALUES (?, ?, 1, datetime('now'), 'system');",
-                vec![json!(role_id), json!(p_key)],
+                "INSERT INTO role_permission (role_id, permission_key, is_allowed, updated_at, updated_by) VALUES (?, ?, ?, datetime('now'), 'system') ON CONFLICT(role_id, permission_key) DO UPDATE SET is_allowed = excluded.is_allowed, updated_at = excluded.updated_at, updated_by = excluded.updated_by;",
+                vec![json!(role_id), json!(p_key), json!(i64::from(permissions.contains(p_key)))],
             ));
         }
 
@@ -3720,6 +3795,7 @@ fn canonical_sync_route(domain: &str, operation: &str) -> Option<(&'static str, 
         "company-profile" | "company_profile" => "company-profile",
         "lead-interaction" | "lead_interactions" => "lead-interaction",
         "lead" | "leads" => "lead",
+        "audit" | "domain_audit_log" => "audit",
         _ => return None,
     };
     let canonical_operation = match (canonical_domain, operation) {
@@ -3731,6 +3807,7 @@ fn canonical_sync_route(domain: &str, operation: &str) -> Option<(&'static str, 
         ("company-profile", "update") => "update",
         ("lead-interaction", "record") => "record",
         ("lead", "reassign") => "reassign",
+        ("audit", "record") => "record",
         _ => return None,
     };
     Some((canonical_domain, canonical_operation))
@@ -3967,6 +4044,45 @@ async fn apply_event_to_turso(
                         json!(notes),
                         json!(occurred_at),
                         json!(text("created_at")),
+                    ],
+                )
+                .await?;
+        }
+        ("audit", "record") => {
+            // Hanya-tambah: kiriman ulang diabaikan, baris yang sudah ada tidak
+            // pernah ditimpa (PRD FR-10.2).
+            let action = text("action");
+            let entity_type = text("entity_type");
+            let entity_id = text("entity_id");
+            let occurred_at = text("occurred_at");
+            let valid = !entity_key.is_empty()
+                && !action.is_empty()
+                && !entity_type.is_empty()
+                && !entity_id.is_empty()
+                && clients::parse_stored_timestamp(&occurred_at).is_some();
+            if !valid {
+                return Err(CommandError::new(
+                    "TURSO_SYNC_PAYLOAD_INVALID",
+                    "The audit entry is incomplete or invalid.",
+                ));
+            }
+            let actor = payload
+                .get("actor_operator_id")
+                .filter(|value| value.is_i64())
+                .cloned()
+                .unwrap_or(Value::Null);
+            turso
+                .query_one(
+                    clients::DOMAIN_AUDIT_INSERT_SQL,
+                    vec![
+                        json!(entity_key),
+                        actor,
+                        json!(text("on_behalf_of_division")),
+                        json!(action),
+                        json!(entity_type),
+                        json!(entity_id),
+                        json!(text("summary_json")),
+                        json!(occurred_at),
                     ],
                 )
                 .await?;
@@ -6442,6 +6558,9 @@ mod tests {
         assert_eq!(canonical_sync_route("leads", "reassign"), Some(("lead", "reassign")));
         assert_eq!(canonical_sync_route("lead-interaction", "delete"), None);
         assert_eq!(canonical_sync_route("lead", "update"), None);
+        assert_eq!(canonical_sync_route("domain_audit_log", "record"), Some(("audit", "record")));
+        assert_eq!(canonical_sync_route("audit", "delete"), None);
+        assert_eq!(canonical_sync_route("audit", "update"), None);
         assert_eq!(canonical_sync_route("client", "delete"), None);
         assert_eq!(canonical_sync_route("item", "create"), None);
         assert_eq!(canonical_sync_route("pelanggan", "create"), None);
@@ -6500,6 +6619,7 @@ mod tests {
                 "master_option",
                 "device_tag_registry",
                 "lead_interactions",
+                "domain_audit_log",
             ] {
                 let ada: i64 = connection
                     .query_row(
