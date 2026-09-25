@@ -19,16 +19,19 @@ pub const SETTING_DEFAULT_FREE_REVISION_LIMIT: &str = "default_free_revision_lim
 pub const SETTING_SAMPLE_FEE_MODE: &str = "sample_fee_mode";
 pub const SETTING_LEAD_HOT_MAX_DAYS: &str = "lead_hot_max_days";
 pub const SETTING_LEAD_WARM_MAX_DAYS: &str = "lead_warm_max_days";
+pub const SETTING_MAX_PHOTOS_PER_SAMPLE: &str = "max_photos_per_sample";
 pub const BUSINESS_SETTING_KEYS: &[&str] = &[
     SETTING_DEFAULT_FREE_REVISION_LIMIT,
     SETTING_SAMPLE_FEE_MODE,
     SETTING_LEAD_HOT_MAX_DAYS,
     SETTING_LEAD_WARM_MAX_DAYS,
+    SETTING_MAX_PHOTOS_PER_SAMPLE,
 ];
 
 pub const FREE_REVISION_LIMIT_MAX: i64 = 20;
 pub const LEAD_HOT_MAX_DAYS_LIMIT: i64 = 60;
 pub const LEAD_WARM_MAX_DAYS_LIMIT: i64 = 180;
+pub const MAX_PHOTOS_PER_SAMPLE_LIMIT: i64 = 50;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BusinessSettings {
@@ -36,6 +39,7 @@ pub struct BusinessSettings {
     pub sample_fee_mode: &'static str,
     pub lead_hot_max_days: i64,
     pub lead_warm_max_days: i64,
+    pub max_photos_per_sample: i64,
 }
 
 impl Default for BusinessSettings {
@@ -45,6 +49,7 @@ impl Default for BusinessSettings {
             sample_fee_mode: "PER_REQUEST",
             lead_hot_max_days: 3,
             lead_warm_max_days: 7,
+            max_photos_per_sample: 10,
         }
     }
 }
@@ -56,6 +61,7 @@ impl BusinessSettings {
             "sample_fee_mode": self.sample_fee_mode,
             "lead_hot_max_days": self.lead_hot_max_days,
             "lead_warm_max_days": self.lead_warm_max_days,
+            "max_photos_per_sample": self.max_photos_per_sample,
         })
     }
 
@@ -66,6 +72,7 @@ impl BusinessSettings {
             (SETTING_SAMPLE_FEE_MODE, self.sample_fee_mode.to_owned()),
             (SETTING_LEAD_HOT_MAX_DAYS, self.lead_hot_max_days.to_string()),
             (SETTING_LEAD_WARM_MAX_DAYS, self.lead_warm_max_days.to_string()),
+            (SETTING_MAX_PHOTOS_PER_SAMPLE, self.max_photos_per_sample.to_string()),
         ]
     }
 }
@@ -108,6 +115,12 @@ pub fn read_business_settings(values: &HashMap<String, String>) -> BusinessSetti
         sample_fee_mode: mode.unwrap_or(defaults.sample_fee_mode),
         lead_hot_max_days: hot,
         lead_warm_max_days: warm,
+        max_photos_per_sample: in_range(
+            stored_int(values.get(SETTING_MAX_PHOTOS_PER_SAMPLE)),
+            1,
+            MAX_PHOTOS_PER_SAMPLE_LIMIT,
+        )
+        .unwrap_or(defaults.max_photos_per_sample),
     }
 }
 
@@ -130,11 +143,14 @@ pub fn validate_business_settings(draft: &Value) -> Result<BusinessSettings, &'s
     let warm = in_range(strict_int(draft.get("lead_warm_max_days")), 1, LEAD_WARM_MAX_DAYS_LIMIT)
         .filter(|warm| *warm > hot)
         .ok_or("The Warm limit must be more days than the Hot limit, up to 180.")?;
+    let photos = in_range(strict_int(draft.get("max_photos_per_sample")), 1, MAX_PHOTOS_PER_SAMPLE_LIMIT)
+        .ok_or("Photos per sample request must be a whole number from 1 to 50.")?;
     Ok(BusinessSettings {
         default_free_revision_limit: limit,
         sample_fee_mode: mode,
         lead_hot_max_days: hot,
         lead_warm_max_days: warm,
+        max_photos_per_sample: photos,
     })
 }
 
@@ -486,6 +502,51 @@ pub const SAMPLE_FEEDBACK_INSERT_SQL: &str = "INSERT INTO sample_feedbacks (id, 
 pub const SAMPLE_CHANGED_ELSEWHERE: &str =
     "This sample request was changed on another device first. Sync, check its current status, then record the step again.";
 
+// ---------------------------------------------------------------------------
+// Foto (PRD FR-07). Padanan `src/lib/validations/media.ts`, vektor kembar.
+// Kompresi dikerjakan webview; di sini hanya pemeriksaan ulang hasilnya.
+// ---------------------------------------------------------------------------
+
+pub const SAMPLE_MEDIA_PURPOSES: &[&str] = &["REFERENCE", "PAYMENT_PROOF"];
+pub const MEDIA_MIME: &str = "image/webp";
+pub const MEDIA_MAX_BYTES: usize = 307_200;
+pub const MEDIA_TOO_LARGE: &str =
+    "The image is still over 300 KB after compression. Crop the parts you do not need, then upload it again.";
+pub const MEDIA_NOT_WEBP: &str = "The photo is not a valid WebP image.";
+pub const MEDIA_PURPOSE_INVALID: &str = "Choose what the photo is for.";
+
+/// Sisipkan satu foto (hanya-tambah), dipakai cloud, SQLite lokal, dan Web
+/// (`MEDIA_INSERT_SQL` di `media.ts`, WAJIB identik). ?1 id, ?2 id tiket,
+/// ?3 jenis, ?4 ukuran, ?5 data base64, ?6 pengunggah, ?7 waktu.
+pub const MEDIA_INSERT_SQL: &str = "INSERT INTO media_asset (id, owner_type, owner_id, purpose, mime, byte_size, data_base64, created_by, created_at) VALUES (?1, 'sample', ?2, ?3, 'image/webp', ?4, ?5, ?6, ?7) ON CONFLICT(id) DO NOTHING;";
+
+/// Padanan `validateMediaUpload`: jenis sah, base64 standar ketat, WebP
+/// sungguhan (`RIFF....WEBP`), paling besar `MEDIA_MAX_BYTES`. Mengembalikan
+/// ukuran biner.
+pub fn validate_media_upload(purpose: &str, data_base64: &str) -> Result<usize, &'static str> {
+    use base64::Engine as _;
+    if !SAMPLE_MEDIA_PURPOSES.contains(&purpose) {
+        return Err(MEDIA_PURPOSE_INVALID);
+    }
+    // Ukuran dihitung dari panjang teks dulu, supaya kiriman raksasa ditolak
+    // sebelum didekode ke memori.
+    if data_base64.is_empty() || data_base64.len() % 4 != 0 {
+        return Err(MEDIA_NOT_WEBP);
+    }
+    let padding = data_base64.bytes().rev().take_while(|byte| *byte == b'=').count();
+    let size = data_base64.len() / 4 * 3 - padding.min(2);
+    if size > MEDIA_MAX_BYTES {
+        return Err(MEDIA_TOO_LARGE);
+    }
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(data_base64)
+        .map_err(|_| MEDIA_NOT_WEBP)?;
+    if bytes.len() < 12 || &bytes[0..4] != b"RIFF" || &bytes[8..12] != b"WEBP" {
+        return Err(MEDIA_NOT_WEBP);
+    }
+    Ok(bytes.len())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -510,12 +571,14 @@ mod tests {
                 ("sample_fee_mode", "PAID"),
                 ("lead_hot_max_days", "5"),
                 ("lead_warm_max_days", "14"),
+                ("max_photos_per_sample", "5"),
             ]),
             BusinessSettings {
                 default_free_revision_limit: 2,
                 sample_fee_mode: "PAID",
                 lead_hot_max_days: 5,
                 lead_warm_max_days: 14,
+                max_photos_per_sample: 5,
             }
         );
         assert_eq!(
@@ -524,6 +587,7 @@ mod tests {
                 ("sample_fee_mode", "paid"),
                 ("lead_hot_max_days", "9"),
                 ("lead_warm_max_days", "9"),
+                ("max_photos_per_sample", "0"),
             ]),
             BusinessSettings::default()
         );
@@ -536,6 +600,7 @@ mod tests {
             "sample_fee_mode": "FREE",
             "lead_hot_max_days": 0,
             "lead_warm_max_days": 1,
+            "max_photos_per_sample": 1,
         });
         assert_eq!(
             validate_business_settings(&valid),
@@ -544,6 +609,7 @@ mod tests {
                 sample_fee_mode: "FREE",
                 lead_hot_max_days: 0,
                 lead_warm_max_days: 1,
+                max_photos_per_sample: 1,
             })
         );
         let with = |key: &str, value: Value| {
@@ -558,6 +624,14 @@ mod tests {
         assert_eq!(
             with("lead_warm_max_days", json!(181)),
             "The Warm limit must be more days than the Hot limit, up to 180."
+        );
+        assert_eq!(
+            with("max_photos_per_sample", json!(51)),
+            "Photos per sample request must be a whole number from 1 to 50."
+        );
+        assert_eq!(
+            with("max_photos_per_sample", json!(0)),
+            "Photos per sample request must be a whole number from 1 to 50."
         );
         let mut same = valid.clone();
         same["lead_hot_max_days"] = json!(5);
@@ -676,6 +750,33 @@ mod tests {
             changed[*key] = value.clone();
             assert_eq!(validate_sample_draft(&changed, "PER_REQUEST").unwrap_err(), *message, "{key}");
         }
+    }
+
+    #[test]
+    fn media_upload_divalidasi() {
+        use base64::Engine as _;
+        const TINY_WEBP: &str = "UklGRgwAAABXRUJQVlA4TA==";
+        const PNG: &str = "iVBORw0KGgoAAAANSUhEUg==";
+        let cases: &[(&str, &str, Result<usize, &str>)] = &[
+            ("REFERENCE", TINY_WEBP, Ok(16)),
+            ("PAYMENT_PROOF", TINY_WEBP, Ok(16)),
+            ("MOCKUP", TINY_WEBP, Err(MEDIA_PURPOSE_INVALID)),
+            ("REFERENCE", PNG, Err(MEDIA_NOT_WEBP)),
+            ("REFERENCE", "not base64!", Err(MEDIA_NOT_WEBP)),
+            ("REFERENCE", "UklGRgwAAABXRUJQVlA4TA", Err(MEDIA_NOT_WEBP)),
+            ("REFERENCE", "", Err(MEDIA_NOT_WEBP)),
+            ("REFERENCE", "UklGRg==", Err(MEDIA_NOT_WEBP)),
+        ];
+        for (purpose, data, expected) in cases {
+            assert_eq!(validate_media_upload(purpose, data), *expected, "{purpose} {data}");
+        }
+        let webp_of = |size: usize| {
+            let mut raw = vec![0u8; size];
+            raw[..12].copy_from_slice(b"RIFF\0\0\0\0WEBP");
+            base64::engine::general_purpose::STANDARD.encode(raw)
+        };
+        assert_eq!(validate_media_upload("REFERENCE", &webp_of(MEDIA_MAX_BYTES)), Ok(MEDIA_MAX_BYTES));
+        assert_eq!(validate_media_upload("REFERENCE", &webp_of(MEDIA_MAX_BYTES + 1)), Err(MEDIA_TOO_LARGE));
     }
 
     #[test]

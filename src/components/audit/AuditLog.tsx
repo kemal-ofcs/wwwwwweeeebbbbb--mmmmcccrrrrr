@@ -80,8 +80,10 @@ function describe(entry: AuditEntry, operatorName: (id: number) => string) {
       return `Edited sample request "${String(s.brand_name ?? "")}" for ${code}`;
     case "sample.step":
       return `Moved sample "${String(s.brand_name ?? "")}" for ${code} from ${SAMPLE_STATUS_LABEL[String(s.from)] ?? String(s.from ?? "")} to ${SAMPLE_STATUS_LABEL[String(s.to)] ?? String(s.to ?? "")}: ${String(s.notes ?? "")}`;
+    case "sample.photo":
+      return `Added a ${s.purpose === "PAYMENT_PROOF" ? "payment proof" : "reference"} photo (${Math.round(Number(s.byte_size ?? 0) / 1024)} KB) to sample "${String(s.brand_name ?? "")}" for ${code}`;
     case "settings.business":
-      return `Changed business settings: ${String(s.default_free_revision_limit ?? "")} free revisions, sample fee ${String(s.sample_fee_mode ?? "")}, Hot ≤ ${String(s.lead_hot_max_days ?? "")} days, Warm ≤ ${String(s.lead_warm_max_days ?? "")} days`;
+      return `Changed business settings: ${String(s.default_free_revision_limit ?? "")} free revisions, sample fee ${String(s.sample_fee_mode ?? "")}, Hot ≤ ${String(s.lead_hot_max_days ?? "")} days, Warm ≤ ${String(s.lead_warm_max_days ?? "")} days, ${String(s.max_photos_per_sample ?? "")} photos per sample`;
     case "sync.quarantine_discard":
       return `Discarded ${String(s.count ?? 0)} unsent change(s) held after a sign-in on another device`;
     default:

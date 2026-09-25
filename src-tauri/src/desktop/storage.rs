@@ -334,6 +334,21 @@ pub fn initialize(path: &Path) -> Result<(), String> {
         recorded_by INTEGER,
         recorded_at TEXT NOT NULL
       );
+      -- Foto: data ringkas ditarik dari cloud; `data_base64` terisi untuk foto
+      -- buatan perangkat ini dan foto yang pernah dibuka ('' = belum diambil).
+      CREATE TABLE IF NOT EXISTS media_asset (
+        id TEXT PRIMARY KEY,
+        owner_type TEXT NOT NULL,
+        owner_id TEXT NOT NULL,
+        purpose TEXT NOT NULL,
+        mime TEXT NOT NULL,
+        byte_size INTEGER NOT NULL,
+        data_base64 TEXT NOT NULL DEFAULT '',
+        created_by INTEGER,
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_local_media_asset_owner
+        ON media_asset(owner_type, owner_id);
       CREATE INDEX IF NOT EXISTS idx_local_sample_requests_client
         ON sample_requests(client_id);
       CREATE INDEX IF NOT EXISTS idx_local_sample_status_log_request
@@ -438,6 +453,7 @@ const CLOUD_MIRRORED_TABLES: &[&str] = &[
     "sample_requests",
     "sample_feedbacks",
     "sample_status_log",
+    "media_asset",
 ];
 
 /// Membuang seluruh jejak database cloud lama ketika perangkat dipindahkan ke
@@ -751,6 +767,7 @@ mod tests {
             "sample_requests",
             "sample_feedbacks",
             "sample_status_log",
+            "media_asset",
             "setting_gex_system",
             "desktop_sync_outbox",
             "desktop_sync_cursor",

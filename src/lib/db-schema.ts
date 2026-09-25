@@ -14,7 +14,7 @@ import { runDatabaseMigrations } from "./db-migrations";
  * Rust DAN migrasi `ALTER TABLE` di `db-migrations.ts`, supaya klien mana pun
  * bisa menyembuhkan database buatan klien lain.
  */
-export const CURRENT_SCHEMA_VERSION = 7;
+export const CURRENT_SCHEMA_VERSION = 8;
 
 /** Tabel yang wajib ada sebelum database dianggap siap dipakai. */
 export const REQUIRED_TABLES = [
@@ -57,6 +57,8 @@ export const REQUIRED_TABLES = [
   "sample_requests",
   "sample_feedbacks",
   "sample_status_log",
+  // Foto (PRD F-07). Isi gambar tidak pernah ikut snapshot perangkat.
+  "media_asset",
 ] as const;
 
 export const REQUIRED_TABLE_COUNT = REQUIRED_TABLES.length;
@@ -454,6 +456,21 @@ export async function initDatabaseSchema(client: Client) {
       recorded_by INTEGER,
       recorded_at TEXT NOT NULL
       );`,
+    // Foto terkompresi (PRD FR-07), terpisah dari baris pemiliknya supaya query
+    // daftar tidak membawa biner. Hanya-tambah (D-13). Perangkat menarik kolom
+    // selain `data_base64`; isinya diambil satu per satu saat dibuka, lalu
+    // disimpan di perangkat. `''` di perangkat = belum pernah diambil.
+    `CREATE TABLE IF NOT EXISTS media_asset (
+      id TEXT PRIMARY KEY,
+      owner_type TEXT NOT NULL,
+      owner_id TEXT NOT NULL,
+      purpose TEXT NOT NULL,
+      mime TEXT NOT NULL,
+      byte_size INTEGER NOT NULL,
+      data_base64 TEXT NOT NULL DEFAULT '',
+      created_by INTEGER,
+      created_at TEXT NOT NULL
+      );`,
     // Cloud-only: tag dua karakter yang diterbitkan untuk setiap perangkat,
     // bagian `<KP>` dari kode klien. Tidak ikut sinkronisasi, jadi UNIQUE
     // di sini aman.
@@ -475,6 +492,7 @@ export async function initDatabaseSchema(client: Client) {
     `CREATE INDEX IF NOT EXISTS idx_sample_requests_client ON sample_requests(client_id);`,
     `CREATE INDEX IF NOT EXISTS idx_sample_feedbacks_request ON sample_feedbacks(sample_request_id, iteration_number);`,
     `CREATE INDEX IF NOT EXISTS idx_sample_status_log_request ON sample_status_log(sample_request_id, recorded_at);`,
+    `CREATE INDEX IF NOT EXISTS idx_media_asset_owner ON media_asset(owner_type, owner_id);`,
 
     // Seed role bawaan. TIDAK ADA akun bawaan: operator pertama hanya lahir
     // lewat provisioning sekali-pakai, sehingga tidak ada kredensial default

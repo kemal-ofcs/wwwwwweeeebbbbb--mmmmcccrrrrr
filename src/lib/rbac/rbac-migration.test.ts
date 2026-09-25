@@ -100,7 +100,7 @@ describe("dynamic RBAC migration", () => {
     // migrasi baru harus muncul di daftar ini, supaya database hasil migrasi
     // terbukti sampai pada versi yang sama dengan database yang baru dibuat.
     expect(migrations.rows.map((row) => Number(row.version))).toEqual([
-      1, 2, 3, 4, 5, 6, 7,
+      1, 2, 3, 4, 5, 6, 7, 8,
     ]);
 
     const sessionColumns = await client.execute(

@@ -13,6 +13,7 @@ import {
   FREE_REVISION_LIMIT_MAX,
   LEAD_HOT_MAX_DAYS_LIMIT,
   LEAD_WARM_MAX_DAYS_LIMIT,
+  MAX_PHOTOS_PER_SAMPLE_LIMIT,
   type SampleFeeMode,
 } from "@/lib/validations/sample";
 
@@ -206,6 +207,24 @@ export function BusinessSettingsCard({ canManage }: { canManage: boolean }) {
               <span className="text-body-sm font-normal text-on-surface-variant">
                 Longer than this is Cold.
               </span>
+            </label>
+            <label className="app-label grid gap-1.5">
+              Photos per sample request
+              <input
+                required
+                type="number"
+                min={1}
+                max={MAX_PHOTOS_PER_SAMPLE_LIMIT}
+                step={1}
+                value={settings.max_photos_per_sample}
+                onChange={(event) =>
+                  setSettings({
+                    ...settings,
+                    max_photos_per_sample: wholeNumber(event.target.value),
+                  })
+                }
+                className="app-input font-normal"
+              />
             </label>
           </fieldset>
           {canManage ? (

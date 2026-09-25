@@ -23,7 +23,7 @@ use super::{
 /// `CURRENT_SCHEMA_VERSION` di `web-desktop/src/lib/db-schema.ts` setiap kali
 /// migrasi baru ditambahkan, karena keduanya membaca tabel `schema_migration`
 /// yang sama di Turso.
-pub const CLIENT_SCHEMA_VERSION: i64 = 7;
+pub const CLIENT_SCHEMA_VERSION: i64 = 8;
 
 /// Hanya `cloud > client` yang berbahaya; `cloud <= client` adalah kondisi normal.
 fn is_client_schema_outdated(cloud_version: i64) -> bool {
@@ -237,6 +237,28 @@ const SNAPSHOT_TABLES: &[SnapshotTable] = &[
         delete_missing: false,
         read_only: false,
     },
+    // Foto (PRD FR-07): hanya data ringkas. `data_base64` SENGAJA tidak ada di
+    // daftar kolom, jadi pull tidak pernah menimpa isi foto yang sudah tersimpan
+    // di perangkat. Hanya-tambah, `delete_missing: false`.
+    SnapshotTable {
+        payload_key: "mediaAssets",
+        domain: "media",
+        table: "media_asset",
+        columns: &[
+            "id",
+            "owner_type",
+            "owner_id",
+            "purpose",
+            "mime",
+            "byte_size",
+            "created_by",
+            "created_at",
+        ],
+        conflict_column: "id",
+        entity_column: "id",
+        delete_missing: false,
+        read_only: false,
+    },
     SnapshotTable {
         payload_key: "sampleStatusLog",
         domain: "sample",
@@ -341,6 +363,7 @@ const CANONICAL_SYNC_ROUTES: &[(&str, &str)] = &[
     ("sample", "create"),
     ("sample", "update"),
     ("sample", "transition"),
+    ("media", "upload"),
     // Log audit hanya-dorong: tidak ada di `SNAPSHOT_TABLES` karena tumbuh
     // tanpa batas dan hanya dibaca dari cloud (layar Audit).
     ("audit", "record"),
@@ -1073,7 +1096,33 @@ fn mark_batch_failed(state: &DesktopState, event_ids: &[String], message: &str) 
     }
 }
 
-fn pending_events(state: &DesktopState) -> Result<(String, Vec<Value>), CommandError> {
+/// Batas ukuran satu batch push (PRD F-07, keputusan C 1.4b). Satu foto
+/// terkirim sebagai ~400 KB base64; tanpa batas ini perangkat yang lama offline
+/// mengirim 50 foto (~20 MB) dalam satu request yang rawan putus di jaringan HP.
+const PUSH_BATCH_MAX_BYTES: usize = 4 * 1024 * 1024;
+
+/// Potong batch agar total payload ≤ `PUSH_BATCH_MAX_BYTES`, minimal satu
+/// event (satu event tidak pernah melebihi batas outbox). `true` = ada event
+/// yang ditinggal untuk batch berikutnya.
+fn limit_batch_by_size(events: Vec<Value>) -> (Vec<Value>, bool) {
+    let mut total = 0usize;
+    let mut kept = Vec::with_capacity(events.len());
+    let count = events.len();
+    for event in events {
+        let size = event.get("payload").map_or(0, |payload| payload.to_string().len());
+        if !kept.is_empty() && total + size > PUSH_BATCH_MAX_BYTES {
+            break;
+        }
+        total += size;
+        kept.push(event);
+    }
+    let truncated = kept.len() < count;
+    (kept, truncated)
+}
+
+/// Event siap kirim, paling banyak 50 dan paling besar `PUSH_BATCH_MAX_BYTES`.
+/// `true` pada nilai ketiga = batch dipotong karena ukuran; masih ada sisa.
+fn pending_events(state: &DesktopState) -> Result<(String, Vec<Value>, bool), CommandError> {
     let client_id = ensure_client_id(state)?;
     let connection = storage::database(&state.data_dir)?;
     let mut statement = connection
@@ -1121,11 +1170,11 @@ fn pending_events(state: &DesktopState) -> Result<(String, Vec<Value>), CommandE
             }))
         })
         .map_err(|_| CommandError::internal())?;
-    Ok((
-        client_id,
+    let (events, truncated) = limit_batch_by_size(
         rows.collect::<Result<Vec<_>, _>>()
             .map_err(|_| CommandError::internal())?,
-    ))
+    );
+    Ok((client_id, events, truncated))
 }
 
 fn validate_push_results(
@@ -1360,7 +1409,7 @@ pub async fn push_outbox(state: &DesktopState) -> Result<(), CommandError> {
         // dikirim, supaya sync idle tidak menambah round-trip ke Turso.
         let mut schema_checked = false;
         for _ in 0..MAX_PUSH_BATCHES_PER_CYCLE {
-            let (_client_id, events) = pending_events(state)?;
+            let (_client_id, events, truncated) = pending_events(state)?;
             if events.is_empty() {
                 return Ok(());
             }
@@ -1392,7 +1441,7 @@ pub async fn push_outbox(state: &DesktopState) -> Result<(), CommandError> {
                 );
                 return Err(error);
             }
-            if event_ids.len() < 50 {
+            if event_ids.len() < 50 && !truncated {
                 return Ok(());
             }
         }
@@ -2066,6 +2115,77 @@ mod tests {
     /// benar-benar terputus berhenti menguras outbox, berkas hub tertinggal,
     /// lalu ekspor cadangan dan promosi ke cloud kehilangan data tanpa satu pun
     /// pesan error.
+    /// Foto yang sudah pernah diunduh ke perangkat tidak terhapus oleh pull
+    /// berikutnya (permintaan pemilik produk, 1.4b): snapshot hanya membawa
+    /// data ringkas, dan upsert-nya tidak menyentuh `data_base64`.
+    #[test]
+    fn pull_foto_tidak_menghapus_isi_yang_sudah_diunduh() {
+        let directory = tempdir().expect("direktori sementara");
+        storage::initialize(directory.path()).expect("skema lokal");
+        let state = DesktopState {
+            server_origin: RwLock::new(
+                crate::desktop::app_identity::DEFAULT_SERVER_ORIGIN.to_owned(),
+            ),
+            offline_max_age_hours: 24,
+            data_dir: directory.path().to_path_buf(),
+            http: Client::new(),
+            turso_config: RwLock::new(None),
+            session: Mutex::new(None),
+            vault_lock: Mutex::new(()),
+        };
+        let meta = |id: &str| {
+            serde_json::json!({
+                "id": id, "owner_type": "sample", "owner_id": "s1", "purpose": "REFERENCE",
+                "mime": "image/webp", "byte_size": 16, "created_by": 7,
+                "created_at": "2026-09-25 01:00:00",
+            })
+        };
+        super::apply_snapshot_with_pulse(
+            &state,
+            &serde_json::json!({ "revision": 1, "mediaAssets": [meta("m1"), meta("m2")] }),
+            None,
+        )
+        .expect("pull pertama");
+        let connection = storage::database(&state.data_dir).expect("db");
+        connection
+            .execute("UPDATE media_asset SET data_base64 = 'UklGRgwAAABXRUJQVlA4TA==' WHERE id = 'm1';", [])
+            .expect("simpan isi foto");
+        drop(connection);
+        super::apply_snapshot_with_pulse(
+            &state,
+            &serde_json::json!({ "revision": 2, "mediaAssets": [meta("m1"), meta("m2")] }),
+            None,
+        )
+        .expect("pull kedua");
+        let connection = storage::database(&state.data_dir).expect("db");
+        let data: Vec<String> = connection
+            .prepare("SELECT data_base64 FROM media_asset ORDER BY id;")
+            .expect("query")
+            .query_map([], |row| row.get(0))
+            .expect("rows")
+            .collect::<Result<_, _>>()
+            .expect("data");
+        assert_eq!(data, vec!["UklGRgwAAABXRUJQVlA4TA==".to_owned(), String::new()]);
+    }
+
+    /// Batch push dibatasi ukuran (keputusan C 1.4b): foto tidak pernah
+    /// terkirim sebagai satu request raksasa, dan event pertama selalu lolos.
+    #[test]
+    fn batch_push_dibatasi_ukuran() {
+        let photo = |id: u32| {
+            serde_json::json!({ "eventId": id, "payload": { "data_base64": "A".repeat(400 * 1024) } })
+        };
+        let small = |id: u32| serde_json::json!({ "eventId": id, "payload": { "x": 1 } });
+        let (kept, truncated) = super::limit_batch_by_size((0..12).map(photo).collect());
+        assert_eq!(kept.len(), 10);
+        assert!(truncated);
+        let (kept, truncated) = super::limit_batch_by_size((0..50).map(small).collect());
+        assert_eq!((kept.len(), truncated), (50, false));
+        let huge = serde_json::json!({ "eventId": 1, "payload": { "data": "A".repeat(5 * 1024 * 1024) } });
+        let (kept, truncated) = super::limit_batch_by_size(vec![huge, small(2)]);
+        assert_eq!((kept.len(), truncated), (1, true));
+    }
+
     /// Sesi tunggal (PRD FR-03): entri milik sesi yang tersusul dikarantina,
     /// tidak didorong, dan jumlah outbox tidak berkurang sampai pemiliknya
     /// memilih Kirim atau Buang. Entri operator lain tidak ikut.
@@ -2110,7 +2230,7 @@ mod tests {
 
         let _ = super::supersede(&state, 7, Some("sesi-lama"), "SUPERSEDED");
 
-        let (_, siap_kirim) = super::pending_events(&state).expect("pending");
+        let (_, siap_kirim, _) = super::pending_events(&state).expect("pending");
         let ids: Vec<&str> = siap_kirim
             .iter()
             .filter_map(|event| event["eventId"].as_str())

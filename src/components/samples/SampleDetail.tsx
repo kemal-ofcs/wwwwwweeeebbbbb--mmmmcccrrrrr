@@ -30,6 +30,7 @@ import {
   SAMPLE_STATUS_LABEL,
   SAMPLE_STATUS_TONE,
 } from "./labels";
+import { SamplePhotos } from "./SamplePhotos";
 
 /**
  * Detail tiket sampel (SCR-03): ringkasan, kuota revisi, linimasa langkah,
@@ -254,6 +255,14 @@ export function SampleDetail({
               />
               <DetailRow label="PIC CRM" value={request.pic_crm_name ?? ""} />
             </dl>
+
+            <SamplePhotos
+              sampleId={request.id}
+              media={data.media}
+              canUpload={canManage && !closed}
+              canUploadPaymentProof={request.is_paid_sample === 1}
+              onUploaded={() => void load()}
+            />
 
             {canManage && !closed ? (
               <button

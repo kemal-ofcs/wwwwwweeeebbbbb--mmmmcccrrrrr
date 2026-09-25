@@ -31,6 +31,8 @@
     "allow-desktop-create-sample-request",
     "allow-desktop-update-sample-request",
     "allow-desktop-record-sample-step",
+    "allow-desktop-upload-sample-media",
+    "allow-desktop-get-media",
     "allow-desktop-get-session",
     "allow-desktop-get-runtime-status",
     "allow-desktop-get-license-status",

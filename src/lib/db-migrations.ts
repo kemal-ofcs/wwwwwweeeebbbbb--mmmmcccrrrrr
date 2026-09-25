@@ -253,4 +253,12 @@ export async function runDatabaseMigrations(client: Client) {
           VALUES (7, 'sample-requests', ?);`,
     args: [new Date().toISOString()],
   });
+
+  // Versi 8: `media_asset` (PRD F-07). Tabelnya baru, jadi cukup DDL awal
+  // `db-schema.ts`. Nomor dan nama WAJIB sama dengan `turso.rs`.
+  await client.execute({
+    sql: `INSERT OR IGNORE INTO schema_migration (version, name, applied_at)
+          VALUES (8, 'media-assets', ?);`,
+    args: [new Date().toISOString()],
+  });
 }

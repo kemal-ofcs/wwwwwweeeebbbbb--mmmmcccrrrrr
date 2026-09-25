@@ -50,6 +50,7 @@ export async function saveBusinessSettings(
       ["sample_fee_mode", BUSINESS_SETTING_KEYS.sampleFeeMode],
       ["lead_hot_max_days", BUSINESS_SETTING_KEYS.leadHotMaxDays],
       ["lead_warm_max_days", BUSINESS_SETTING_KEYS.leadWarmMaxDays],
+      ["max_photos_per_sample", BUSINESS_SETTING_KEYS.maxPhotosPerSample],
     ] as const) {
       await transaction.execute({
         sql: "INSERT INTO setting_gex_system (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value;",
