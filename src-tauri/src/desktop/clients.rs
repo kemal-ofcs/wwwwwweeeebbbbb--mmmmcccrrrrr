@@ -301,6 +301,52 @@ pub const DOMAIN_AUDIT_INSERT_SQL: &str = "INSERT INTO domain_audit_log (id, act
 /// ?4 batas akhir UTC eksklusif (`''` = tanpa batas).
 pub const DOMAIN_AUDIT_LIST_SQL: &str = "SELECT a.id, a.actor_operator_id, o.nama_operator AS actor_name, a.on_behalf_of_division, a.action, a.entity_type, a.entity_id, a.summary_json, a.occurred_at FROM domain_audit_log a LEFT JOIN master_operator o ON o.id = a.actor_operator_id WHERE (?1 = '' OR a.entity_type = ?1) AND (?2 = 0 OR a.actor_operator_id = ?2) AND (?3 = '' OR a.occurred_at >= ?3) AND (?4 = '' OR a.occurred_at < ?4) ORDER BY a.occurred_at DESC, a.rowid DESC LIMIT 200;";
 
+/// Sesi tunggal (PRD FR-03). Konstanta di bawah dipakai cloud dari Rust dan
+/// dari Web (`src/lib/server/sessions.ts`), WAJIB identik: satu database
+/// dilayani keduanya, dan waktu di `app_session` bercampur bentuk ISO (Web)
+/// dengan `datetime('now')` (perangkat), sehingga setiap perbandingan waktu
+/// memakai `julianday()`, tidak pernah perbandingan teks.
+///
+/// Login online terakhir menang: cabut sesi lain milik operator ini.
+/// Parameter: ?1 id operator.
+pub const SESSION_SUPERSEDE_SQL: &str = "UPDATE app_session SET revoked_at = datetime('now'), revoked_reason = 'SUPERSEDED' WHERE operator_id = ?1 AND revoked_at IS NULL;";
+
+/// Buang sesi kedaluwarsa dan sesi yang dicabut lebih dari 30 hari lalu.
+/// Sesi yang baru dicabut SENGAJA disimpan: perangkat yang lama offline
+/// membandingkan sesi yang lahir setelah kontak terakhirnya, termasuk yang
+/// sudah logout, dan layar login Web membaca alasan pencabutannya.
+pub const SESSION_PURGE_SQL: &str = "DELETE FROM app_session WHERE julianday(expires_at) <= julianday('now') OR (revoked_at IS NOT NULL AND julianday(revoked_at) < julianday('now') - 30);";
+
+/// Sesi offline yang tersambung lagi tersusul bila cloud punya sesi operator
+/// ini yang lahir SETELAH kontak online terakhir perangkat (PRD FR-03 butir 3),
+/// termasuk yang sudah logout. Tanpa catatan kontak (perangkat dari versi
+/// sebelum sesi tunggal) yang dihitung hanya sesi yang masih aktif.
+/// Parameter: ?1 id operator, ?2 kontak terakhir atau NULL.
+pub const OFFLINE_SESSION_SUPERSEDED_SQL: &str = "SELECT datetime('now') AS now, (SELECT COUNT(*) FROM app_session WHERE operator_id = ?1 AND ((?2 IS NULL AND revoked_at IS NULL) OR julianday(created_at) > julianday(?2))) AS total;";
+
+/// Sesi aktif semua operator (layar Audit & Sesi), terakhir terlihat dulu.
+pub const ACTIVE_SESSION_LIST_SQL: &str = "SELECT s.session_id, s.operator_id, o.nama_operator AS operator_name, s.client_kind, s.device_label, s.created_at, s.last_seen_at FROM app_session s LEFT JOIN master_operator o ON o.id = s.operator_id WHERE s.revoked_at IS NULL AND julianday(s.expires_at) > julianday('now') ORDER BY julianday(s.last_seen_at) DESC, s.rowid DESC LIMIT 500;";
+
+/// Akhiri satu sesi. Parameter: ?1 id sesi, ?2 alasan tersimpan.
+pub const SESSION_END_SQL: &str = "UPDATE app_session SET revoked_at = datetime('now'), revoked_reason = ?2 WHERE session_id = ?1 AND revoked_at IS NULL;";
+
+/// Akhiri semua sesi seorang operator. Parameter: ?1 id operator, ?2 alasan.
+pub const SESSION_END_OPERATOR_SQL: &str = "UPDATE app_session SET revoked_at = datetime('now'), revoked_reason = ?2 WHERE operator_id = ?1 AND revoked_at IS NULL;";
+
+/// Alasan yang disimpan saat pemegang `sessions.manage` mengakhiri sesi.
+/// Alasan tertulisnya masuk log audit, bukan ke baris sesi.
+pub const SESSION_ENDED_BY_ADMIN: &str = "ENDED_BY_ADMIN";
+
+/// Alasan pengakhiran wajib diisi, 3-300 karakter (PRD SCR-07).
+pub fn session_end_reason(value: &str) -> Result<String, &'static str> {
+    let reason = value.trim();
+    let length = reason.chars().count();
+    if !(3..=300).contains(&length) {
+        return Err("Give a reason of 3-300 characters for ending the session.");
+    }
+    Ok(reason.to_owned())
+}
+
 /// Batas UTC satu hari kalender perusahaan (`YYYY-MM-DD`): awal hari itu dan
 /// awal hari berikutnya, berbentuk `datetime('now')`. Padanan
 /// `companyDayBoundsUtc` di TS.

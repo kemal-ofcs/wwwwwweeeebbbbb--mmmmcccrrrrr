@@ -7,6 +7,7 @@ import { type AppArea, canAccessArea } from "@/lib/auth/access";
 import { useAuth } from "@/lib/context/AuthContext";
 import { AutoSyncRunner } from "./AutoSyncRunner";
 import { LicenseHolderLabel, LicenseNotice } from "./license/LicenseNotice";
+import { QuarantineBanner } from "./QuarantineBanner";
 import { SyncIndicator } from "./SyncIndicator";
 
 interface NavItem {
@@ -106,6 +107,7 @@ export function AppShell({ children, contentClassName = "" }: AppShellProps) {
         </div>
       </header>
       <LicenseNotice />
+      <QuarantineBanner />
 
       <main
         id="main-content"

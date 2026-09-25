@@ -56,6 +56,10 @@ pub struct DesktopSession {
     pub mode: SessionMode,
     /// Hak lisensi yang berlaku untuk sesi ini (lihat `license.rs`).
     pub license: super::license::LicenseGrant,
+    /// Baris `app_session` cloud milik sesi ini (PRD F-03, sesi tunggal).
+    /// `None` pada login offline sampai siklus sync pertama yang tersambung
+    /// mempromosikannya, dan pada Mode Database Lokal.
+    pub session_id: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Serialize)]
@@ -121,6 +125,13 @@ pub struct DesktopSyncStatus {
     /// lalu ekspor cadangan dan promosi ke cloud — keduanya membaca hub —
     /// kehilangan data tanpa satu pun pesan error.
     pub local_mode: bool,
+    /// Entri outbox yang dikarantina karena sesi pembuatnya tersusul login di
+    /// perangkat lain. Tidak didorong dan tidak dihitung di `pending`.
+    pub quarantined: i64,
+    /// Alasan sesi perangkat ini diakhiri dari luar (`SUPERSEDED`, atau alasan
+    /// yang diisi admin). Diisi sampai login berikutnya.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_superseded: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]

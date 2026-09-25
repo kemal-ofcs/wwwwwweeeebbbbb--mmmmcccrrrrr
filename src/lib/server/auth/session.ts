@@ -4,6 +4,7 @@ import type { OperatorUser } from "@/lib/auth/operator-user";
 import {
   type CreatedWebSession,
   createSessionRecord,
+  readSessionEndReason,
   readSessionRecord,
   revokeSessionRecord,
 } from "@/lib/auth/session-store";
@@ -34,4 +35,10 @@ export async function revokeWebSession(token: string, reason = "logout") {
   if (!token) return;
   await ensureServerDatabaseInitialized();
   await revokeSessionRecord(getServerDatabase(), token, reason);
+}
+
+export async function readWebSessionEndReason(token: string) {
+  if (!token) return null;
+  await ensureServerDatabaseInitialized();
+  return readSessionEndReason(getServerDatabase(), token);
 }

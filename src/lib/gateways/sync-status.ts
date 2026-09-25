@@ -25,8 +25,10 @@ export interface SyncStatus {
    * snapshot baru supaya UI diagnostik ikut menampilkannya.
    */
   tableCounts: {
-    items: number;
-    activities: number;
+    clients: number;
+    leads: number;
+    masterOptions: number;
+    leadInteractions: number;
   };
   /**
    * Terisi bila push gagal tetapi pull tetap berhasil pada siklus yang sama.
@@ -40,6 +42,17 @@ export interface SyncStatus {
    * ulang apa pun, dan `app:sync-completed` tidak dipancarkan.
    */
   changedRows: number;
+  /**
+   * Entri outbox yang dikarantina karena sesi pembuatnya tersusul login di
+   * perangkat lain (PRD FR-03). Tidak didorong dan tidak dihitung di `pending`.
+   */
+  quarantined: number;
+  /**
+   * Terisi bila sesi perangkat ini diakhiri dari luar: `SUPERSEDED` (login di
+   * perangkat lain) atau `ENDED_BY_ADMIN`. `AutoSyncRunner` menampilkan modal
+   * yang tidak bisa ditutup lalu keluar ke layar login.
+   */
+  sessionSuperseded?: string;
 }
 
 /** Siklus sinkronisasi selesai; `detail` berisi {@link SyncStatus}. */
@@ -111,4 +124,37 @@ export async function resolveSyncConflictsLocal(eventId?: string) {
 export async function clearFailedSync(eventId?: string) {
   if (!isDesktopRuntime()) return null;
   return invokeDesktop<SyncStatus>("desktop_clear_failed_sync", { eventId });
+}
+
+/** Satu entri outbox karantina (PRD FR-03 butir 5). */
+export interface QuarantineEntry {
+  eventId: string;
+  domain: string;
+  operation: string;
+  entityKey: string;
+  operatorId: number | null;
+  sessionId: string | null;
+  createdAt: number;
+  quarantinedAt: number;
+}
+
+/** Web tidak punya outbox, jadi tidak pernah punya karantina. */
+export async function listQuarantine(): Promise<QuarantineEntry[]> {
+  if (!isDesktopRuntime()) return [];
+  return invokeDesktop<QuarantineEntry[]>("desktop_list_quarantine");
+}
+
+/**
+ * `send` mengembalikan entrinya ke antrean biasa; `discard` menghapusnya dari
+ * outbox (butuh `sync.retry`, tercatat di log audit). Data lokal tidak disentuh.
+ */
+export async function resolveQuarantine(
+  action: "send" | "discard",
+  eventIds: string[],
+): Promise<{ count: number }> {
+  if (!isDesktopRuntime()) return { count: 0 };
+  return invokeDesktop<{ count: number }>("desktop_resolve_quarantine", {
+    action,
+    eventIds,
+  });
 }

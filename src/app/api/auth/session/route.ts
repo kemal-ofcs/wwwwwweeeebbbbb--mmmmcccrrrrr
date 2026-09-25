@@ -3,7 +3,11 @@ import {
   getWebSessionCookieOptions,
   WEB_SESSION_COOKIE,
 } from "@/lib/auth/web-session";
-import { readWebSession, revokeWebSession } from "@/lib/server/auth/session";
+import {
+  readWebSession,
+  readWebSessionEndReason,
+  revokeWebSession,
+} from "@/lib/server/auth/session";
 import { toApiErrorResponse } from "@/lib/server/http/api-response";
 import { isSameOriginMutation } from "@/lib/server/http/request-security";
 
@@ -25,7 +29,10 @@ export async function POST(request: NextRequest) {
     const token = request.cookies.get(WEB_SESSION_COOKIE)?.value ?? "";
     const operator = await readWebSession(token);
     if (!operator) {
-      return noStoreJson({ sukses: false, operator: null }, 401);
+      // Sesi yang dicabut dari luar (login di perangkat lain, diakhiri admin)
+      // dilaporkan alasannya supaya layar login bisa menjelaskannya.
+      const ended = await readWebSessionEndReason(token);
+      return noStoreJson({ sukses: false, operator: null, ended }, 401);
     }
 
     return noStoreJson({ sukses: true, operator });

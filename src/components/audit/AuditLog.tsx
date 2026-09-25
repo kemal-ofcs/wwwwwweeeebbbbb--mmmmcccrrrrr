@@ -1,8 +1,11 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { ActiveSessions } from "@/components/audit/ActiveSessions";
 import { FeedbackBanner } from "@/components/ui/FeedbackBanner";
 import { PageHeader } from "@/components/ui/PageHeader";
+import { hasPermission } from "@/lib/auth/access";
+import { useAuth } from "@/lib/context/AuthContext";
 import {
   type AuditEntry,
   type AuditFilter,
@@ -22,6 +25,8 @@ const ENTITY_OPTIONS = [
   ["client", "Clients"],
   ["lead", "Leads"],
   ["master_option", "Master data"],
+  ["session", "Sessions"],
+  ["sync", "Sync queue"],
 ] as const;
 
 const KIND_LABEL: Record<string, string> = {
@@ -59,6 +64,12 @@ function describe(entry: AuditEntry, operatorName: (id: number) => string) {
       } on ${code}`;
     case "lead.reassign":
       return `Moved ${code} to ${operatorName(Number(s.pic_cs_id))}`;
+    case "session.end":
+      return `Ended a session of ${operatorName(Number(s.operator_id))}: ${String(s.reason ?? "")}`;
+    case "session.end_all":
+      return `Ended all sessions of ${operatorName(Number(s.operator_id))}: ${String(s.reason ?? "")}`;
+    case "sync.quarantine_discard":
+      return `Discarded ${String(s.count ?? 0)} unsent change(s) held after a sign-in on another device`;
     default:
       return `${entry.action} on ${entry.entity_type} ${entry.entity_id}`;
   }
@@ -71,7 +82,60 @@ const EMPTY_FILTER: AuditFilter = {
   to: "",
 };
 
+/**
+ * Layar Audit & Sesi (SCR-07): tab log audit, dan tab sesi aktif untuk
+ * pemegang `sessions.manage`.
+ */
 export function AuditLog() {
+  const { user } = useAuth();
+  const canManageSessions = hasPermission(user, "sessions.manage");
+  const [tab, setTab] = useState<"log" | "sessions">("log");
+
+  return (
+    <div className="space-y-4">
+      <PageHeader
+        title={canManageSessions ? "Audit & sessions" : "Audit log"}
+        description="Who changed clients, leads, and master data, and when. Entries cannot be edited or deleted."
+      />
+      {canManageSessions ? (
+        <div
+          role="tablist"
+          aria-label="Audit views"
+          className="flex gap-1 border-b border-surface-container"
+        >
+          {(
+            [
+              ["log", "Changes"],
+              ["sessions", "Active sessions"],
+            ] as const
+          ).map(([value, label]) => (
+            <button
+              key={value}
+              type="button"
+              role="tab"
+              aria-selected={tab === value}
+              onClick={() => setTab(value)}
+              className={`-mb-px min-h-11 border-b-2 px-3 text-body-md font-semibold ${
+                tab === value
+                  ? "border-primary text-on-surface"
+                  : "border-transparent text-on-surface-variant"
+              }`}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+      ) : null}
+      {tab === "sessions" && canManageSessions ? (
+        <ActiveSessions />
+      ) : (
+        <AuditEntries />
+      )}
+    </div>
+  );
+}
+
+function AuditEntries() {
   const [filter, setFilter] = useState<AuditFilter>(EMPTY_FILTER);
   const [entries, setEntries] = useState<AuditEntry[]>([]);
   const [source, setSource] = useState<"cloud" | "device">("cloud");
@@ -130,11 +194,6 @@ export function AuditLog() {
 
   return (
     <div className="space-y-4">
-      <PageHeader
-        title="Audit log"
-        description="Who changed clients, leads, and master data, and when. Entries cannot be edited or deleted."
-      />
-
       {error ? (
         <FeedbackBanner tone="error" onDismiss={() => setError("")}>
           {error}

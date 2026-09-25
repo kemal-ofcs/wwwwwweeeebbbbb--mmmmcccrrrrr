@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-desktop-end-operator-sessions"
+description = "Enables the desktop_end_operator_sessions command without any pre-configured scope."
+commands.allow = ["desktop_end_operator_sessions"]
+
+[[permission]]
+identifier = "deny-desktop-end-operator-sessions"
+description = "Denies the desktop_end_operator_sessions command without any pre-configured scope."
+commands.deny = ["desktop_end_operator_sessions"]

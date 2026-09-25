@@ -4,6 +4,11 @@ import { Icon } from "./Icon";
 interface ModalProps {
   children: ReactNode;
   descriptionId?: string;
+  /**
+   * `false` = tidak ada tombol tutup dan Escape diabaikan; pengguna WAJIB
+   * memilih salah satu aksi di dalamnya (mis. sesi yang tersusul).
+   */
+  dismissible?: boolean;
   onClose: () => void;
   title: string;
   titleId: string;
@@ -20,12 +25,13 @@ function focusDialog(node: HTMLDivElement | null) {
 export function Modal({
   children,
   descriptionId,
+  dismissible = true,
   onClose,
   title,
   titleId,
 }: ModalProps) {
   const handleKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
-    if (event.key === "Escape") onClose();
+    if (event.key === "Escape" && dismissible) onClose();
   };
 
   return (
@@ -44,14 +50,16 @@ export function Modal({
           <h2 id={titleId} className="text-headline-md text-on-surface">
             {title}
           </h2>
-          <button
-            type="button"
-            onClick={onClose}
-            aria-label="Close dialog"
-            className="grid size-11 shrink-0 place-items-center rounded-md text-on-surface-variant hover:bg-surface-container-low"
-          >
-            <Icon name="x" className="size-4" />
-          </button>
+          {dismissible ? (
+            <button
+              type="button"
+              onClick={onClose}
+              aria-label="Close dialog"
+              className="grid size-11 shrink-0 place-items-center rounded-md text-on-surface-variant hover:bg-surface-container-low"
+            >
+              <Icon name="x" className="size-4" />
+            </button>
+          ) : null}
         </div>
         {children}
       </div>

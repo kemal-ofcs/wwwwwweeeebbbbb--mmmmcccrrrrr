@@ -119,6 +119,18 @@ const COLUMN_MIGRATIONS: readonly ColumnMigration[] = [
     column: "processed_at",
     sql: "ALTER TABLE sync_operation_receipt ADD COLUMN processed_at TEXT;",
   },
+  // Sesi tunggal lintas platform (PRD F-03): sesi Desktop/Mobile ikut tercatat
+  // di `app_session`, dan layar Sessions perlu tahu jenis dan nama perangkatnya.
+  {
+    table: "app_session",
+    column: "client_kind",
+    sql: "ALTER TABLE app_session ADD COLUMN client_kind TEXT NOT NULL DEFAULT 'web';",
+  },
+  {
+    table: "app_session",
+    column: "device_label",
+    sql: "ALTER TABLE app_session ADD COLUMN device_label TEXT NOT NULL DEFAULT '';",
+  },
 ];
 
 async function tableExists(client: Client, table: string) {
@@ -221,6 +233,15 @@ export async function runDatabaseMigrations(client: Client) {
   await client.execute({
     sql: `INSERT OR IGNORE INTO schema_migration (version, name, applied_at)
           VALUES (5, 'audit-log-and-division-roles', ?);`,
+    args: [new Date().toISOString()],
+  });
+
+  // Versi 6: kolom `app_session.client_kind`/`device_label` (PRD F-03). Kolomnya
+  // ditambahkan `COLUMN_MIGRATIONS` di atas. Nomor dan nama WAJIB sama dengan
+  // `turso.rs`.
+  await client.execute({
+    sql: `INSERT OR IGNORE INTO schema_migration (version, name, applied_at)
+          VALUES (6, 'single-session', ?);`,
     args: [new Date().toISOString()],
   });
 }
