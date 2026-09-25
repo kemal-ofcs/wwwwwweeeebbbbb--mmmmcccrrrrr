@@ -191,6 +191,13 @@ pub fn initialize(path: &Path) -> Result<(), String> {
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL
       );
+      -- Waktu cloud (bentuk `datetime('now')` dari database) saat perangkat
+      -- terakhir memastikan sesi operator ini masih berlaku. Sesi offline yang
+      -- tersambung lagi dibandingkan dengan sesi cloud yang lahir SETELAHNYA.
+      CREATE TABLE IF NOT EXISTS desktop_session_contact (
+        operator_id INTEGER PRIMARY KEY,
+        last_online_at TEXT NOT NULL
+      );
       CREATE TABLE IF NOT EXISTS desktop_sync_cursor (
         domain TEXT PRIMARY KEY,
         last_revision INTEGER NOT NULL DEFAULT 0,
@@ -343,6 +350,16 @@ pub fn initialize(path: &Path) -> Result<(), String> {
         "device_tag",
         "ALTER TABLE desktop_client_identity ADD COLUMN device_tag TEXT;",
     )?;
+    // Sesi tunggal (PRD F-03): setiap entri outbox mencatat sesi dan operator
+    // pembuatnya, dan entri yang tersusul dikarantina (`quarantined_at`),
+    // tidak didorong dan tidak dihapus sampai pemiliknya memutuskan.
+    for (column, sql) in [
+        ("session_id", "ALTER TABLE desktop_sync_outbox ADD COLUMN session_id TEXT;"),
+        ("operator_id", "ALTER TABLE desktop_sync_outbox ADD COLUMN operator_id INTEGER;"),
+        ("quarantined_at", "ALTER TABLE desktop_sync_outbox ADD COLUMN quarantined_at INTEGER;"),
+    ] {
+        ensure_column(&connection, "desktop_sync_outbox", column, sql)?;
+    }
 
     Ok(())
 }

@@ -1232,6 +1232,8 @@ impl TursoClient {
                     revoked_at TEXT,
                     revoked_reason TEXT,
                     user_agent_hash TEXT,
+                    client_kind TEXT NOT NULL DEFAULT 'web',
+                    device_label TEXT NOT NULL DEFAULT '',
                     FOREIGN KEY (operator_id) REFERENCES master_operator(id) ON DELETE CASCADE
                 );"#,
                 vec![],
@@ -1456,7 +1458,8 @@ impl TursoClient {
                 (2, 'password-reset-and-two-factor', datetime('now')),
                 (3, 'clients-leads-master-data', datetime('now')),
                 (4, 'lead-interactions', datetime('now')),
-                (5, 'audit-log-and-division-roles', datetime('now'));"#,
+                (5, 'audit-log-and-division-roles', datetime('now')),
+                (6, 'single-session', datetime('now'));"#,
                 vec![],
             ),
             // ============ DOMAIN MAKLONOS ============
@@ -1664,6 +1667,8 @@ impl TursoClient {
             ("sync_operation_receipt", "actor_operator_id", "ALTER TABLE sync_operation_receipt ADD COLUMN actor_operator_id INTEGER;"),
             ("sync_operation_receipt", "receipt_json", "ALTER TABLE sync_operation_receipt ADD COLUMN receipt_json TEXT NOT NULL DEFAULT '{}';"),
             ("sync_operation_receipt", "processed_at", "ALTER TABLE sync_operation_receipt ADD COLUMN processed_at TEXT;"),
+            ("app_session", "client_kind", "ALTER TABLE app_session ADD COLUMN client_kind TEXT NOT NULL DEFAULT 'web';"),
+            ("app_session", "device_label", "ALTER TABLE app_session ADD COLUMN device_label TEXT NOT NULL DEFAULT '';"),
         ] {
             self.ensure_column(table, column, sql).await?;
         }
@@ -1749,6 +1754,11 @@ impl TursoClient {
             vec![],
         )
         .await?;
+        self.query_one(
+            "INSERT OR IGNORE INTO schema_migration (version, name, applied_at) VALUES (-2014, 'single-session-v1', datetime('now'));",
+            vec![],
+        )
+        .await?;
 
         Ok(())
     }
@@ -1798,6 +1808,8 @@ impl TursoClient {
                     revoked_at TEXT,
                     revoked_reason TEXT,
                     user_agent_hash TEXT,
+                    client_kind TEXT NOT NULL DEFAULT 'web',
+                    device_label TEXT NOT NULL DEFAULT '',
                     FOREIGN KEY (operator_id) REFERENCES master_operator(id) ON DELETE CASCADE
                 );"#,
             ),
@@ -1915,7 +1927,7 @@ impl TursoClient {
             .query_one(
                 // Sentinel WAJIB dinaikkan setiap kali ensure_schema menambah
                 // tabel atau kolom — nilainya di sini dan pada INSERT harus sama.
-                "SELECT COUNT(*) AS total FROM schema_migration WHERE version = -2013;",
+                "SELECT COUNT(*) AS total FROM schema_migration WHERE version = -2014;",
                 vec![],
             )
             .await
@@ -2110,6 +2122,236 @@ impl TursoClient {
         ))
     }
 
+    /// Waktu database, bentuk `datetime('now')`.
+    async fn database_now(&self) -> Result<String, CommandError> {
+        self.query_one("SELECT datetime('now') AS now;", vec![])
+            .await?
+            .to_objects()
+            .into_iter()
+            .next()
+            .and_then(|row| row.get("now").and_then(Value::as_str).map(str::to_owned))
+            .ok_or_else(|| CommandError::new("TURSO_QUERY_EMPTY", "The query result is empty."))
+    }
+
+    /// Buka baris `app_session` untuk perangkat ini (PRD FR-03).
+    ///
+    /// `supersede_others` = login online: sesi lain operator ini dicabut
+    /// (`SUPERSEDED`) dalam transaksi yang sama. Promosi sesi offline memanggil
+    /// dengan `false` — login offline tidak pernah mengusir perangkat lain.
+    /// Mengembalikan id sesi dan waktu cloud saat sesi itu lahir.
+    pub async fn open_device_session(
+        &self,
+        operator: &OperatorUser,
+        client_kind: &str,
+        device_label: &str,
+        supersede_others: bool,
+    ) -> Result<(String, String), CommandError> {
+        self.ensure_schema_current().await?;
+        let session_id = clients::new_uuid();
+        let mut statements = Vec::new();
+        if supersede_others {
+            statements.push(Statement::new(
+                clients::SESSION_SUPERSEDE_SQL,
+                vec![json!(operator.id)],
+            ));
+        }
+        // Perangkat tidak memegang token: kolomnya UNIQUE NOT NULL, dan
+        // awalan `device:` tidak pernah sama dengan hash hex token Web.
+        statements.push(Statement::new(
+            "INSERT INTO app_session (session_id, token_hash, operator_id, permission_revision, created_at, expires_at, last_seen_at, client_kind, device_label) VALUES (?, ?, ?, ?, datetime('now'), '9999-12-31 23:59:59', datetime('now'), ?, ?);",
+            vec![
+                json!(session_id),
+                json!(format!("device:{session_id}")),
+                json!(operator.id),
+                json!(operator.permission_revision),
+                json!(client_kind),
+                json!(device_label),
+            ],
+        ));
+        statements.push(Statement::new(clients::SESSION_PURGE_SQL, vec![]));
+        self.execute_atomic(statements).await?;
+        let created = self
+            .query_one(
+                "SELECT created_at FROM app_session WHERE session_id = ?;",
+                vec![json!(session_id)],
+            )
+            .await?
+            .to_objects()
+            .into_iter()
+            .next()
+            .and_then(|row| row.get("created_at").and_then(Value::as_str).map(str::to_owned))
+            .ok_or_else(|| CommandError::new("TURSO_QUERY_EMPTY", "The query result is empty."))?;
+        Ok((session_id, created))
+    }
+
+    /// Periksa sesi online perangkat ini dan perbarui `last_seen_at` paling
+    /// sering sekali per 5 menit. `Ok(Err(alasan))` = sesinya sudah berakhir.
+    pub async fn check_device_session(
+        &self,
+        session_id: &str,
+    ) -> Result<Result<String, String>, CommandError> {
+        let row = self
+            .query_one(
+                "SELECT datetime('now') AS now, s.session_id AS found, s.revoked_at, s.revoked_reason, CAST((julianday('now') - julianday(s.last_seen_at)) * 86400 AS INTEGER) AS idle FROM (SELECT 1) LEFT JOIN app_session s ON s.session_id = ?;",
+                vec![json!(session_id)],
+            )
+            .await?
+            .to_objects()
+            .into_iter()
+            .next()
+            .ok_or_else(|| CommandError::new("TURSO_QUERY_EMPTY", "The query result is empty."))?;
+        let text = |key: &str| row.get(key).and_then(Value::as_str).map(str::to_owned);
+        if text("found").is_none() {
+            return Ok(Err("SUPERSEDED".into()));
+        }
+        if text("revoked_at").is_some() {
+            return Ok(Err(text("revoked_reason").unwrap_or_else(|| "SUPERSEDED".into())));
+        }
+        let idle = row
+            .get("idle")
+            .and_then(lenient_i64)
+            .unwrap_or(i64::MAX);
+        if idle >= 300 {
+            self.query_one(
+                "UPDATE app_session SET last_seen_at = datetime('now') WHERE session_id = ? AND revoked_at IS NULL;",
+                vec![json!(session_id)],
+            )
+            .await?;
+        }
+        Ok(Ok(text("now").unwrap_or_default()))
+    }
+
+    /// Apakah sesi offline operator ini sudah tersusul (PRD FR-03 butir 3):
+    /// cloud punya sesinya yang lahir SETELAH kontak online terakhir perangkat.
+    /// Tanpa catatan kontak (perangkat dari versi sebelum sesi tunggal), yang
+    /// dihitung hanya sesi yang masih aktif. Mengembalikan juga waktu cloud.
+    pub async fn offline_session_superseded(
+        &self,
+        operator_id: i64,
+        last_contact: Option<&str>,
+    ) -> Result<(bool, String), CommandError> {
+        self.ensure_schema_current().await?;
+        let row = self
+            .query_one(
+                clients::OFFLINE_SESSION_SUPERSEDED_SQL,
+                vec![json!(operator_id), last_contact.map_or(Value::Null, |value| json!(value))],
+            )
+            .await?
+            .to_objects()
+            .into_iter()
+            .next()
+            .ok_or_else(|| CommandError::new("TURSO_QUERY_EMPTY", "The query result is empty."))?;
+        let total = row
+            .get("total")
+            .and_then(lenient_i64)
+            .unwrap_or(0);
+        let now = row.get("now").and_then(Value::as_str).unwrap_or_default().to_owned();
+        Ok((total > 0, now))
+    }
+
+    /// Cabut sesi cloud perangkat ini saat logout. Gagal = dibiarkan: logout
+    /// lokal tidak boleh menunggu jaringan.
+    pub async fn revoke_device_session(&self, session_id: &str) -> Result<(), CommandError> {
+        self.query_one(clients::SESSION_END_SQL, vec![json!(session_id), json!("LOGOUT")])
+            .await
+            .map(|_| ())
+    }
+
+    /// Sesi aktif semua operator (layar Audit & Sesi).
+    pub async fn list_active_sessions(&self) -> Result<Vec<Value>, CommandError> {
+        self.ensure_schema_current().await?;
+        Ok(self
+            .query_one(clients::ACTIVE_SESSION_LIST_SQL, vec![])
+            .await?
+            .to_objects()
+            .into_iter()
+            .map(|row| json!(row))
+            .collect())
+    }
+
+    /// Akhiri satu sesi (`session_id`) atau semua sesi seorang operator
+    /// (`operator_id`), beserta baris log auditnya dalam satu transaksi cloud.
+    /// Mengembalikan jumlah sesi yang benar-benar diakhiri.
+    pub async fn end_sessions(
+        &self,
+        actor: &OperatorUser,
+        session_id: Option<&str>,
+        operator_id: Option<i64>,
+        reason: &str,
+    ) -> Result<i64, CommandError> {
+        self.ensure_schema_current().await?;
+        let (count_sql, target, end_sql, entity_id, target_operator) = match (session_id, operator_id) {
+            (Some(session_id), None) => {
+                let owner = self
+                    .query_one(
+                        "SELECT operator_id FROM app_session WHERE session_id = ? AND revoked_at IS NULL;",
+                        vec![json!(session_id)],
+                    )
+                    .await?
+                    .to_objects()
+                    .into_iter()
+                    .next()
+                    .and_then(|row| row.get("operator_id").and_then(lenient_i64));
+                let Some(owner) = owner else {
+                    return Err(CommandError::new("SESSION_NOT_FOUND", "That session has already ended."));
+                };
+                (
+                    "SELECT COUNT(*) AS total FROM app_session WHERE session_id = ? AND revoked_at IS NULL;",
+                    json!(session_id),
+                    clients::SESSION_END_SQL,
+                    session_id.to_owned(),
+                    owner,
+                )
+            }
+            (None, Some(operator_id)) => (
+                "SELECT COUNT(*) AS total FROM app_session WHERE operator_id = ? AND revoked_at IS NULL;",
+                json!(operator_id),
+                clients::SESSION_END_OPERATOR_SQL,
+                format!("operator:{operator_id}"),
+                operator_id,
+            ),
+            _ => {
+                return Err(CommandError::new(
+                    "VALIDATION_ERROR",
+                    "Choose one session or one operator.",
+                ))
+            }
+        };
+        let ended = self
+            .query_one(count_sql, vec![target.clone()])
+            .await?
+            .to_objects()
+            .into_iter()
+            .next()
+            .and_then(|row| row.get("total").and_then(lenient_i64))
+            .unwrap_or(0);
+        let occurred_at = self.database_now().await?;
+        let summary = json!({
+            "operator_id": target_operator,
+            "reason": reason,
+            "sessions": ended,
+        })
+        .to_string();
+        self.execute_atomic(vec![
+            Statement::new(end_sql, vec![target, json!(clients::SESSION_ENDED_BY_ADMIN)]),
+            Statement::new(
+                clients::DOMAIN_AUDIT_INSERT_SQL,
+                vec![
+                    json!(clients::new_uuid()),
+                    json!(actor.id),
+                    json!(actor.role),
+                    json!(if session_id.is_some() { "session.end" } else { "session.end_all" }),
+                    json!("session"),
+                    json!(entity_id),
+                    json!(summary),
+                    json!(occurred_at),
+                ],
+            ),
+        ])
+        .await?;
+        Ok(ended)
+    }
+
     /// Log audit domain dari cloud (layar Audit). Parameter sama dengan
     /// `clients::DOMAIN_AUDIT_LIST_SQL`.
     pub async fn list_domain_audit(&self, params: Vec<Value>) -> Result<Vec<Value>, CommandError> {
@@ -2123,7 +2365,7 @@ impl TursoClient {
                 let text = |key: &str| row.get(key).and_then(Value::as_str).unwrap_or_default().to_owned();
                 let actor = row
                     .get("actor_operator_id")
-                    .and_then(|value| value.as_i64().or_else(|| value.as_str().and_then(|v| v.parse().ok())));
+                    .and_then(lenient_i64);
                 json!({
                     "id": text("id"),
                     "actor_operator_id": actor,
@@ -4536,6 +4778,13 @@ fn random_request_id() -> String {
     let mut bytes = [0u8; 16];
     OsRng.fill_bytes(&mut bytes);
     hex::encode(bytes)
+}
+
+/// Bilangan bulat dari sel hasil query (angka JSON atau teks berisi angka).
+fn lenient_i64(value: &Value) -> Option<i64> {
+    value
+        .as_i64()
+        .or_else(|| value.as_str().and_then(|text| text.parse().ok()))
 }
 
 fn sha256_hex(value: &str) -> String {

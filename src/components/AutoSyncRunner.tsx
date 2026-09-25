@@ -1,7 +1,11 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { useRouter } from "next/navigation";
+import { useEffect, useRef, useState } from "react";
+import { Modal } from "@/components/ui/Modal";
+import { invalidateDesktopSession } from "@/lib/auth/desktop-session-store";
 import { useAuth } from "@/lib/context/AuthContext";
+import { describeSessionEnd } from "@/lib/gateways/sessions";
 import {
   getSyncStatus,
   isDesktopSyncAvailable,
@@ -35,6 +39,13 @@ function dispatch(name: string, detail: unknown) {
 
 export function AutoSyncRunner() {
   const { isAuthenticated } = useAuth();
+  const router = useRouter();
+  /**
+   * Sesi perangkat ini diakhiri dari luar (PRD FR-03 butir 4). Rust sudah
+   * mengosongkan sesinya dan mengkarantina outbox-nya; yang tersisa hanya
+   * memberi tahu pengguna lalu keluar ke layar login.
+   */
+  const [endedReason, setEndedReason] = useState<string | null>(null);
   const isRunningRef = useRef(false);
   const rerunRequestedRef = useRef(false);
   const lastRunAtRef = useRef(0);
@@ -113,6 +124,11 @@ export function AutoSyncRunner() {
         const result = await syncNow();
         lastRunAtRef.current = Date.now();
         failureStreakRef.current = 0;
+        if (result?.sessionSuperseded) {
+          stoppedRef.current = true;
+          setEndedReason(result.sessionSuperseded);
+          return;
+        }
         if (result) {
           const previous = lastStatusRef.current;
           lastStatusRef.current = result;
@@ -214,5 +230,33 @@ export function AutoSyncRunner() {
     };
   }, [isAuthenticated]);
 
-  return null;
+  if (!endedReason) return null;
+  return (
+    <Modal
+      title="Signed out on this device"
+      titleId="session-ended-title"
+      descriptionId="session-ended-body"
+      dismissible={false}
+      onClose={() => {}}
+    >
+      <p id="session-ended-body" className="text-body-md text-on-surface">
+        {describeSessionEnd(endedReason)} Unsent data is kept and waits for your
+        decision.
+      </p>
+      <p className="mt-2 text-body-sm text-on-surface-variant">
+        Sign in again on this device to send or discard it.
+      </p>
+      <button
+        type="button"
+        className="app-btn app-btn-primary mt-4 w-full"
+        onClick={() => {
+          setEndedReason(null);
+          invalidateDesktopSession();
+          router.replace("/login");
+        }}
+      >
+        Go to sign in
+      </button>
+    </Modal>
+  );
 }

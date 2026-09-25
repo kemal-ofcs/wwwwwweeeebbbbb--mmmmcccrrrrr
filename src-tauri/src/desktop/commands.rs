@@ -476,6 +476,20 @@ pub async fn desktop_login(
         {
             Ok(operator) => {
                 storage::clear_login_failures(&state.data_dir, &identifier)?;
+                // Sesi tunggal (PRD FR-03): login online terakhir menang. Sesi
+                // lain operator ini dicabut di transaksi cloud yang sama dengan
+                // pembuatan sesi baru. Mode Database Lokal tidak punya perangkat
+                // lain, jadi tidak membuka sesi cloud.
+                let session_id = if backend_is_local {
+                    None
+                } else {
+                    let (kind, label) = sync::device_identity(&state);
+                    let (session_id, created_at) = turso
+                        .open_device_session(&operator, kind, &label, true)
+                        .await?;
+                    sync::record_session_contact(&state, operator.id, &created_at);
+                    Some(session_id)
+                };
                 let provisioned = secrets::provision(&state, operator.clone(), &password);
                 let (offline_ready, offline_valid_until, mut message): (
                     bool,
@@ -494,6 +508,25 @@ pub async fn desktop_login(
                     ),
                 };
 
+                storage::audit(
+                    &state.data_dir,
+                    Some(operator.id),
+                    "login-online-turso-success",
+                    None,
+                );
+
+                // Sesi dipasang SEBELUM sinkronisasi pertama: pemeriksaan sesi
+                // tunggal di awal siklus membaca sesi ini.
+                *state.session.lock().map_err(|_| CommandError::internal())? =
+                    Some(DesktopSession {
+                        operator: operator.clone(),
+                        mode: SessionMode::Online,
+                        license: license_grant,
+                        session_id: session_id.clone(),
+                    });
+                sync::set_current_actor(Some(operator.id), session_id);
+                sync::clear_session_ended();
+
                 if operator
                     .permissions
                     .iter()
@@ -508,20 +541,6 @@ pub async fn desktop_login(
                         }
                     }
                 }
-
-                storage::audit(
-                    &state.data_dir,
-                    Some(operator.id),
-                    "login-online-turso-success",
-                    None,
-                );
-
-                *state.session.lock().map_err(|_| CommandError::internal())? =
-                    Some(DesktopSession {
-                        operator: operator.clone(),
-                        mode: SessionMode::Online,
-                        license: license_grant,
-                    });
 
                 return Ok(DesktopLoginResult {
                     sukses: true,
@@ -635,11 +654,17 @@ pub async fn desktop_login(
         "login-offline-success",
         None,
     );
+    // Login offline tidak membuka sesi cloud dan tidak mengusir siapa pun.
+    // Siklus sync pertama yang tersambung memutuskan: tersusul, atau
+    // dipromosikan menjadi sesi cloud (lihat `sync::check_session`).
     *state.session.lock().map_err(|_| CommandError::internal())? = Some(DesktopSession {
         operator: credential.operator.clone(),
         mode: SessionMode::Offline,
         license: license_grant,
+        session_id: None,
     });
+    sync::set_current_actor(Some(credential.operator.id), None);
+    sync::clear_session_ended();
     Ok(DesktopLoginResult {
         sukses: true,
         pesan: "The cloud database is unreachable. Signed in with a validated offline snapshot."
@@ -658,10 +683,14 @@ pub async fn desktop_logout(state: State<'_, DesktopState>) -> Result<(), Comman
         .lock()
         .map_err(|_| CommandError::internal())?
         .take();
+    sync::set_current_actor(None, None);
     if let Some(session) = previous {
         storage::audit(&state.data_dir, Some(session.operator.id), "logout", None);
-        // Sesi 2-tier tidak memegang token server: `token` hanya penanda
-        // internal. Tidak ada endpoint logout yang perlu dihubungi.
+        // Cabut baris `app_session` cloud-nya, sebisanya: logout lokal tidak
+        // boleh gagal atau menunggu hanya karena jaringan terputus.
+        if let (Some(session_id), Ok(turso)) = (session.session_id, state.get_turso_client()) {
+            let _ = turso.revoke_device_session(&session_id).await;
+        }
     }
     Ok(())
 }
@@ -1552,42 +1581,7 @@ fn commit_with_outbox(
         .map_err(|_| CommandError::internal())?;
     apply(&transaction)?;
     if let Some(entry) = audit {
-        let id = clients::new_uuid();
-        let occurred_at = clients::utc_timestamp(storage::now_epoch_seconds());
-        let summary = entry.summary.to_string();
-        transaction
-            .execute(
-                clients::DOMAIN_AUDIT_INSERT_SQL,
-                rusqlite::params![
-                    &id,
-                    entry.actor.id,
-                    &entry.actor.role,
-                    entry.action,
-                    entry.entity_type,
-                    entry.entity_id,
-                    &summary,
-                    &occurred_at
-                ],
-            )
-            .map_err(|_| CommandError::internal())?;
-        sync::enqueue(
-            &transaction,
-            &client_id,
-            "audit",
-            "record",
-            &id,
-            &json!({
-                "id": id,
-                "actor_operator_id": entry.actor.id,
-                "on_behalf_of_division": entry.actor.role,
-                "action": entry.action,
-                "entity_type": entry.entity_type,
-                "entity_id": entry.entity_id,
-                "summary_json": summary,
-                "occurred_at": occurred_at,
-            }),
-            None,
-        )?;
+        write_audit(&transaction, &client_id, entry)?;
     }
     sync::enqueue(
         &transaction,
@@ -1602,6 +1596,52 @@ fn commit_with_outbox(
         None,
     )?;
     transaction.commit().map_err(|_| CommandError::internal())?;
+    Ok(())
+}
+
+/// Tulis satu baris log audit beserta event `audit/record`-nya di transaksi
+/// lokal yang sedang berjalan.
+fn write_audit(
+    transaction: &rusqlite::Transaction<'_>,
+    client_id: &str,
+    entry: AuditEntry<'_>,
+) -> Result<(), CommandError> {
+    let id = clients::new_uuid();
+    let occurred_at = clients::utc_timestamp(storage::now_epoch_seconds());
+    let summary = entry.summary.to_string();
+    transaction
+        .execute(
+            clients::DOMAIN_AUDIT_INSERT_SQL,
+            rusqlite::params![
+                &id,
+                entry.actor.id,
+                &entry.actor.role,
+                entry.action,
+                entry.entity_type,
+                entry.entity_id,
+                &summary,
+                &occurred_at
+            ],
+        )
+        .map_err(|_| CommandError::internal())?;
+    sync::enqueue(
+        transaction,
+        client_id,
+        "audit",
+        "record",
+        &id,
+        &json!({
+            "id": id,
+            "actor_operator_id": entry.actor.id,
+            "on_behalf_of_division": entry.actor.role,
+            "action": entry.action,
+            "entity_type": entry.entity_type,
+            "entity_id": entry.entity_id,
+            "summary_json": summary,
+            "occurred_at": occurred_at,
+        }),
+        None,
+    )?;
     Ok(())
 }
 
@@ -2741,6 +2781,119 @@ pub async fn desktop_list_audit_log(
         .collect::<Result<Vec<_>, _>>()
         .map_err(|_| CommandError::internal())?;
     Ok(json!({ "source": "device", "entries": entries }))
+}
+
+/// Entri outbox yang dikarantina karena sesi pembuatnya tersusul (PRD FR-03
+/// butir 5). Pemegang `sync.retry` melihat semua entri di perangkat ini.
+#[tauri::command]
+pub fn desktop_list_quarantine(state: State<'_, DesktopState>) -> Result<Value, CommandError> {
+    let actor = require_permission(&state, "sync.view")?;
+    sync::quarantine_entries(&state, actor.id, operator_can(&actor, "sync.retry"))
+}
+
+/// Putuskan entri karantina: `send` melepasnya ke antrean biasa (konflik tetap
+/// ditangani `base_revision`), `discard` menghapusnya dari outbox (butuh
+/// `sync.retry`, tercatat di log audit). Data di tabel lokal tidak disentuh.
+#[tauri::command]
+pub async fn desktop_resolve_quarantine(
+    state: State<'_, DesktopState>,
+    action: String,
+    event_ids: Vec<String>,
+) -> Result<Value, CommandError> {
+    let actor = require_permission(&state, "sync.view")?;
+    let see_all = operator_can(&actor, "sync.retry");
+    let event_ids: Vec<String> = event_ids
+        .into_iter()
+        .map(|id| id.trim().to_owned())
+        .filter(|id| !id.is_empty())
+        .take(500)
+        .collect();
+    if event_ids.is_empty() {
+        return Err(CommandError::new("VALIDATION_ERROR", "Choose at least one entry."));
+    }
+    match action.as_str() {
+        "send" => {
+            let released = sync::release_quarantine(&state, &event_ids, actor.id, see_all)?;
+            let _ = sync::synchronize(&state).await;
+            Ok(json!({ "count": released }))
+        }
+        "discard" => {
+            let actor = require_permission(&state, "sync.retry")?;
+            let client_id = sync::ensure_client_id(&state)?;
+            let mut connection = storage::database(&state.data_dir)?;
+            let transaction = connection
+                .transaction()
+                .map_err(|_| CommandError::internal())?;
+            let discarded = sync::discard_quarantine(&transaction, &event_ids, actor.id, true)?;
+            if !discarded.is_empty() {
+                write_audit(
+                    &transaction,
+                    &client_id,
+                    AuditEntry {
+                        actor: &actor,
+                        action: "sync.quarantine_discard",
+                        entity_type: "sync",
+                        entity_id: &client_id,
+                        summary: json!({ "count": discarded.len(), "entries": discarded }),
+                    },
+                )?;
+            }
+            transaction.commit().map_err(|_| CommandError::internal())?;
+            Ok(json!({ "count": discarded.len() }))
+        }
+        _ => Err(CommandError::new("VALIDATION_ERROR", "Choose send or discard.")),
+    }
+}
+
+/// Sesi aktif semua operator (PRD FR-10.3). Hanya online: sesi hidup di cloud.
+#[tauri::command]
+pub async fn desktop_list_active_sessions(
+    state: State<'_, DesktopState>,
+) -> Result<Value, CommandError> {
+    require_permission(&state, "sessions.manage")?;
+    let current = state
+        .session
+        .lock()
+        .map_err(|_| CommandError::internal())?
+        .as_ref()
+        .and_then(|session| session.session_id.clone());
+    let sessions = state.get_turso_client()?.list_active_sessions().await?;
+    Ok(json!({ "current_session_id": current, "sessions": sessions }))
+}
+
+/// Akhiri satu sesi (PRD FR-10.4). Perangkat targetnya keluar dalam satu
+/// siklus sync; alasan wajib dan tercatat di log audit.
+#[tauri::command]
+pub async fn desktop_end_session(
+    state: State<'_, DesktopState>,
+    session_id: String,
+    reason: String,
+) -> Result<Value, CommandError> {
+    let actor = require_permission(&state, "sessions.manage")?;
+    let reason = clients::session_end_reason(&reason)
+        .map_err(|message| CommandError::new("VALIDATION_ERROR", message))?;
+    let ended = state
+        .get_turso_client()?
+        .end_sessions(&actor, Some(session_id.trim()), None, &reason)
+        .await?;
+    Ok(json!({ "count": ended }))
+}
+
+/// Akhiri semua sesi seorang operator, dengan alasan wajib.
+#[tauri::command]
+pub async fn desktop_end_operator_sessions(
+    state: State<'_, DesktopState>,
+    operator_id: i64,
+    reason: String,
+) -> Result<Value, CommandError> {
+    let actor = require_permission(&state, "sessions.manage")?;
+    let reason = clients::session_end_reason(&reason)
+        .map_err(|message| CommandError::new("VALIDATION_ERROR", message))?;
+    let ended = state
+        .get_turso_client()?
+        .end_sessions(&actor, None, Some(operator_id), &reason)
+        .await?;
+    Ok(json!({ "count": ended }))
 }
 
 #[cfg(test)]

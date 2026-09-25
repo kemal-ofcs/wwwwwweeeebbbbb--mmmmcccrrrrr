@@ -12,6 +12,10 @@ import {
   getBootstrapStatus,
 } from "@/lib/gateways/bootstrap";
 import { isLicenseBlocking } from "@/lib/gateways/license";
+import {
+  describeSessionEnd,
+  readEndedSessionReason,
+} from "@/lib/gateways/sessions";
 import { useHydrated } from "@/lib/hooks/useHydrated";
 import { useLicenseStatus } from "@/lib/hooks/useLicenseStatus";
 import { useOnlineStatus } from "@/lib/hooks/useOnlineStatus";
@@ -27,6 +31,17 @@ export default function LoginPage() {
   const [showPassword, setShowPassword] = useState<boolean>(false);
   const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  // Web: sesi cookie ini diakhiri dari luar (login di perangkat lain, atau
+  // diakhiri admin). Desktop/Mobile menjelaskannya lewat modal AutoSyncRunner.
+  const [endedNotice, setEndedNotice] = useState<string | null>(null);
+  useEffect(() => {
+    void readEndedSessionReason().then((reason) => {
+      if (reason)
+        setEndedNotice(
+          `${describeSessionEnd(reason)} Sign in again to continue.`,
+        );
+    });
+  }, []);
   // Kolom kode baru muncul setelah server menyatakan password sudah benar dan
   // tinggal kode 2FA-nya. Menampilkannya lebih awal akan membocorkan akun mana
   // yang memakai verifikasi dua langkah.
@@ -227,6 +242,12 @@ export default function LoginPage() {
               Reconfigure database
             </button>
           </div>
+        ) : null}
+
+        {endedNotice && !errorMsg ? (
+          <output className="block rounded-md border border-tertiary-fixed-dim bg-tertiary-fixed p-3 text-body-md text-on-tertiary-fixed">
+            {endedNotice}
+          </output>
         ) : null}
 
         {errorMsg && (

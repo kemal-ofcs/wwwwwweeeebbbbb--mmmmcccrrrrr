@@ -14,7 +14,7 @@ import { runDatabaseMigrations } from "./db-migrations";
  * Rust DAN migrasi `ALTER TABLE` di `db-migrations.ts`, supaya klien mana pun
  * bisa menyembuhkan database buatan klien lain.
  */
-export const CURRENT_SCHEMA_VERSION = 5;
+export const CURRENT_SCHEMA_VERSION = 6;
 
 /** Tabel yang wajib ada sebelum database dianggap siap dipakai. */
 export const REQUIRED_TABLES = [
@@ -191,6 +191,8 @@ export async function initDatabaseSchema(client: Client) {
       revoked_at TEXT,
       revoked_reason TEXT,
       user_agent_hash TEXT,
+      client_kind TEXT NOT NULL DEFAULT 'web',
+      device_label TEXT NOT NULL DEFAULT '',
       FOREIGN KEY (operator_id) REFERENCES master_operator(id) ON DELETE CASCADE
       );`,
     `CREATE TABLE IF NOT EXISTS auth_login_rate_limit (

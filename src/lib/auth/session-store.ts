@@ -1,6 +1,10 @@
 import type { Client } from "@libsql/client";
 import type { OperatorUser } from "@/lib/auth/operator-user";
 import {
+  SESSION_PURGE_SQL,
+  SESSION_SUPERSEDE_SQL,
+} from "@/lib/auth/session-sql";
+import {
   createOpaqueSessionToken,
   hashSessionToken,
 } from "@/lib/auth/session-token";
@@ -16,6 +20,32 @@ async function hashOptionalValue(value?: string | null) {
   return value ? hashSessionToken(value) : null;
 }
 
+/** Label perangkat untuk layar sesi aktif, dari User-Agent. Tidak disimpan mentah. */
+export function webDeviceLabel(userAgent?: string | null) {
+  const ua = userAgent ?? "";
+  const browser = /Edg\//.test(ua)
+    ? "Edge"
+    : /Firefox\//.test(ua)
+      ? "Firefox"
+      : /Chrome\//.test(ua)
+        ? "Chrome"
+        : /Safari\//.test(ua)
+          ? "Safari"
+          : "Browser";
+  const os = /Android/.test(ua)
+    ? "Android"
+    : /iPhone|iPad/.test(ua)
+      ? "iOS"
+      : /Windows/.test(ua)
+        ? "Windows"
+        : /Mac OS X/.test(ua)
+          ? "macOS"
+          : /Linux/.test(ua)
+            ? "Linux"
+            : "";
+  return os ? `${browser} on ${os}` : browser;
+}
+
 export async function createSessionRecord(
   client: Client,
   operator: OperatorUser,
@@ -24,14 +54,19 @@ export async function createSessionRecord(
 ): Promise<CreatedWebSession> {
   const expiresAt = new Date(now.getTime() + WEB_SESSION_TTL_SECONDS * 1_000);
   const token = createOpaqueSessionToken();
+  // Sesi tunggal (PRD FR-03): login online terakhir menang. Sesi lain milik
+  // operator ini, termasuk sesi perangkat Desktop/Mobile, dicabut di
+  // transaksi yang sama dengan pembuatan sesi baru.
   await client.batch(
     [
+      { sql: SESSION_SUPERSEDE_SQL, args: [operator.id] },
       {
         sql: `
           INSERT INTO app_session (
             session_id, token_hash, operator_id, permission_revision,
-            created_at, expires_at, last_seen_at, user_agent_hash
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?);
+            created_at, expires_at, last_seen_at, user_agent_hash,
+            client_kind, device_label
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'web', ?);
         `,
         args: [
           crypto.randomUUID(),
@@ -42,12 +77,10 @@ export async function createSessionRecord(
           expiresAt.toISOString(),
           now.toISOString(),
           await hashOptionalValue(userAgent),
+          webDeviceLabel(userAgent),
         ],
       },
-      {
-        sql: "DELETE FROM app_session WHERE expires_at <= ? OR revoked_at IS NOT NULL;",
-        args: [now.toISOString()],
-      },
+      SESSION_PURGE_SQL,
     ],
     "write",
   );
@@ -116,6 +149,25 @@ export async function readSessionRecord(
     permissionRevision: Number(revisionResult.rows[0]?.value ?? 1),
     loginAt: String(row.created_at),
   };
+}
+
+/**
+ * Alasan sesi ini diakhiri dari luar (`SUPERSEDED`, `ENDED_BY_ADMIN`), untuk
+ * layar login. Logout sendiri dan sesi yang masih aktif menghasilkan `null`.
+ */
+export async function readSessionEndReason(
+  client: Client,
+  token: string,
+): Promise<string | null> {
+  if (!token) return null;
+  const result = await client.execute({
+    sql: "SELECT revoked_reason FROM app_session WHERE token_hash = ? AND revoked_at IS NOT NULL LIMIT 1;",
+    args: [await hashSessionToken(token)],
+  });
+  const reason = result.rows[0]?.revoked_reason;
+  if (reason == null) return null;
+  const text = String(reason);
+  return text.toLowerCase() === "logout" ? null : text;
 }
 
 export async function revokeSessionRecord(

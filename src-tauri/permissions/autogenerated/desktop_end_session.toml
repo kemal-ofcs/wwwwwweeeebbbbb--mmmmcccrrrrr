@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-desktop-end-session"
+description = "Enables the desktop_end_session command without any pre-configured scope."
+commands.allow = ["desktop_end_session"]
+
+[[permission]]
+identifier = "deny-desktop-end-session"
+description = "Denies the desktop_end_session command without any pre-configured scope."
+commands.deny = ["desktop_end_session"]

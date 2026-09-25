@@ -1,6 +1,9 @@
 use std::{
     collections::{HashMap, HashSet},
-    sync::atomic::{AtomicBool, Ordering},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Mutex,
+    },
     time::SystemTime,
 };
 
@@ -11,7 +14,7 @@ use sha2::{Digest, Sha256};
 use super::{
     clients,
     config::DesktopState,
-    models::{CommandError, DesktopSyncStatus},
+    models::{CommandError, DesktopSyncStatus, SessionMode},
     storage,
     turso::TursoClient,
 };
@@ -20,7 +23,7 @@ use super::{
 /// `CURRENT_SCHEMA_VERSION` di `web-desktop/src/lib/db-schema.ts` setiap kali
 /// migrasi baru ditambahkan, karena keduanya membaca tabel `schema_migration`
 /// yang sama di Turso.
-pub const CLIENT_SCHEMA_VERSION: i64 = 5;
+pub const CLIENT_SCHEMA_VERSION: i64 = 6;
 
 /// Hanya `cloud > client` yang berbahaya; `cloud <= client` adalah kondisi normal.
 fn is_client_schema_outdated(cloud_version: i64) -> bool {
@@ -714,14 +717,16 @@ pub fn enqueue(
     }
     let event_id = new_event_id(client_id, domain, operation);
     let now = storage::now_epoch_seconds();
+    let (operator_id, session_id) = current_actor();
     transaction
         .execute(
             r#"
       INSERT INTO desktop_sync_outbox (
         event_id, client_id, domain, operation, entity_key,
         payload_json, base_revision, status, attempt_count,
-        next_retry_at, last_error, server_revision, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', 0, NULL, NULL, NULL, ?, ?);
+        next_retry_at, last_error, server_revision, created_at, updated_at,
+        operator_id, session_id
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', 0, NULL, NULL, NULL, ?, ?, ?, ?);
       "#,
             params![
                 event_id,
@@ -733,6 +738,8 @@ pub fn enqueue(
                 base_revision,
                 now,
                 now,
+                operator_id,
+                session_id,
             ],
         )
         .map_err(|_| CommandError::internal())?;
@@ -988,7 +995,9 @@ fn pending_events(state: &DesktopState) -> Result<(String, Vec<Value>), CommandE
       SELECT event_id, client_id, domain, operation, entity_key, payload_json,
              base_revision, created_at
       FROM desktop_sync_outbox
-      WHERE status = 'pending'
+      -- Entri karantina (sesi tersusul, PRD FR-03) tidak pernah didorong
+      -- sampai pemiliknya memilih Kirim.
+      WHERE quarantined_at IS NULL AND (status = 'pending'
          OR (status = 'failed' AND next_retry_at IS NOT NULL AND next_retry_at <= ?)
          -- Konflik UNIQUE pada shift/karyawan memang layak dicoba ulang: baris
          -- kembarannya biasanya sudah direkonsiliasi oleh pull berikutnya.
@@ -1001,7 +1010,7 @@ fn pending_events(state: &DesktopState) -> Result<(String, Vec<Value>), CommandE
              AND (
               (domain = 'shift' AND last_error LIKE '%UNIQUE constraint failed: tbl_shift.kode_shift%')
               OR (domain = 'employee' AND last_error LIKE '%UNIQUE constraint failed: master_data.id_unik%')
-            ))
+            )))
       ORDER BY
         CASE WHEN domain = 'shift' AND operation = 'create' THEN 0 ELSE 1 END,
         created_at ASC
@@ -1338,7 +1347,13 @@ pub async fn synchronize(state: &DesktopState) -> Result<DesktopSyncStatus, Comm
     }
     let _in_flight = SyncInFlightGuard;
 
-    let push_error = push_outbox(state).await.err();
+    // Sesi tunggal (PRD FR-03): pastikan sesi ini belum tersusul SEBELUM
+    // mendorong apa pun. Pemeriksaan yang gagal (jaringan) melewatkan push
+    // siklus ini, tetapi tidak pernah membatalkan pull (aturan 9).
+    let push_error = match check_session(state).await {
+        Ok(()) => push_outbox(state).await.err(),
+        Err(error) => Some(error),
+    };
     let pulled = pull_snapshot(state).await;
 
     // Penegakan RBAC dinamis untuk jalur 2-tier. Sesi Desktop/Mobile hidup di
@@ -1349,13 +1364,314 @@ pub async fn synchronize(state: &DesktopState) -> Result<DesktopSyncStatus, Comm
     enforce_rbac_revision(state).await;
     ensure_device_tag(state).await;
 
+    let superseded = push_error
+        .as_ref()
+        .is_some_and(|error| error.code == "SESSION_SUPERSEDED");
     match pulled {
         Ok(mut status) => {
             status.push_error = push_error.map(|error| error.message);
             Ok(status)
         }
+        // Sesi baru saja tersusul: layar WAJIB menerima `session_superseded`
+        // walau pull gagal, karena sesudah ini tidak ada sesi yang bisa
+        // membaca status lagi.
+        Err(_) if superseded => {
+            let mut status = status(state)?;
+            status.push_error = push_error.map(|error| error.message);
+            Ok(status)
+        }
         Err(pull_error) => Err(push_error.unwrap_or(pull_error)),
     }
+}
+
+/// Operator dan sesi cloud yang sedang login, untuk menandai entri outbox.
+/// Proses aplikasi hanya punya satu sesi, jadi cukup satu nilai global —
+/// `enqueue` dipanggil dengan transaksi saja, tanpa `DesktopState`.
+static CURRENT_ACTOR: Mutex<Option<(i64, Option<String>)>> = Mutex::new(None);
+
+/// Alasan sesi terakhir diakhiri dari luar, dilaporkan lewat
+/// `DesktopSyncStatus.session_superseded` sampai login berikutnya.
+static SESSION_ENDED: Mutex<Option<String>> = Mutex::new(None);
+
+pub fn set_current_actor(operator_id: Option<i64>, session_id: Option<String>) {
+    if let Ok(mut guard) = CURRENT_ACTOR.lock() {
+        *guard = operator_id.map(|id| (id, session_id));
+    }
+}
+
+fn current_actor() -> (Option<i64>, Option<String>) {
+    CURRENT_ACTOR
+        .lock()
+        .ok()
+        .and_then(|guard| guard.clone())
+        .map_or((None, None), |(id, session)| (Some(id), session))
+}
+
+fn session_ended_reason() -> Option<String> {
+    SESSION_ENDED.lock().ok().and_then(|guard| guard.clone())
+}
+
+/// Dipanggil saat login: tanda "tersusul" milik sesi sebelumnya dihapus.
+pub fn clear_session_ended() {
+    if let Ok(mut guard) = SESSION_ENDED.lock() {
+        *guard = None;
+    }
+}
+
+/// Jenis klien dan label perangkat untuk baris `app_session`.
+pub fn device_identity(state: &DesktopState) -> (&'static str, String) {
+    let kind = if cfg!(any(target_os = "android", target_os = "ios")) {
+        "mobile"
+    } else {
+        "desktop"
+    };
+    let client = ensure_client_id(state).unwrap_or_default();
+    let short: String = client.chars().filter(char::is_ascii_alphanumeric).take(8).collect();
+    (kind, format!("{} {}", std::env::consts::OS, short).trim().to_owned())
+}
+
+/// Catat waktu cloud saat sesi operator ini terakhir terbukti berlaku.
+pub fn record_session_contact(state: &DesktopState, operator_id: i64, cloud_now: &str) {
+    if cloud_now.is_empty() {
+        return;
+    }
+    if let Ok(connection) = storage::database(&state.data_dir) {
+        let _ = connection.execute(
+            "INSERT INTO desktop_session_contact (operator_id, last_online_at) VALUES (?1, ?2) ON CONFLICT(operator_id) DO UPDATE SET last_online_at = excluded.last_online_at;",
+            params![operator_id, cloud_now],
+        );
+    }
+}
+
+fn session_contact(state: &DesktopState, operator_id: i64) -> Option<String> {
+    storage::database(&state.data_dir)
+        .ok()?
+        .query_row(
+            "SELECT last_online_at FROM desktop_session_contact WHERE operator_id = ?;",
+            [operator_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .ok()
+        .flatten()
+}
+
+/// Pemeriksaan sesi tunggal sebelum push (PRD FR-03 butir 2-4).
+///
+/// - Sesi online: dicabut atau hilang di cloud → tersusul.
+/// - Sesi offline yang tersambung lagi: cloud punya sesi operator ini yang
+///   lahir setelah kontak terakhir perangkat → tersusul; bila tidak, sesi ini
+///   dipromosikan ke baris `app_session` TANPA mencabut sesi lain.
+///
+/// Mode Database Lokal dilewati: hub-nya berkas di perangkat yang sama, tidak
+/// ada perangkat lain yang bisa login bersamaan.
+async fn check_session(state: &DesktopState) -> Result<(), CommandError> {
+    let Some((operator_id, session_id, mode)) = ({
+        let guard = state.session.lock().map_err(|_| CommandError::internal())?;
+        guard
+            .as_ref()
+            .map(|session| (session.operator.id, session.session_id.clone(), session.mode))
+    }) else {
+        return Ok(());
+    };
+    let Ok(turso) = state.get_turso_client() else {
+        return Ok(());
+    };
+    if turso.is_local() {
+        return Ok(());
+    }
+
+    if let Some(session_id) = session_id {
+        return match turso.check_device_session(&session_id).await? {
+            Ok(cloud_now) => {
+                record_session_contact(state, operator_id, &cloud_now);
+                Ok(())
+            }
+            Err(reason) => Err(supersede(state, operator_id, Some(&session_id), &reason)),
+        };
+    }
+
+    // Sesi tanpa baris cloud: login offline (atau login online sebelum
+    // pembaruan ini) yang baru tersambung.
+    let contact = session_contact(state, operator_id);
+    let (superseded, cloud_now) = turso
+        .offline_session_superseded(operator_id, contact.as_deref())
+        .await?;
+    if superseded {
+        return Err(supersede(state, operator_id, None, "SUPERSEDED"));
+    }
+    let operator = {
+        let guard = state.session.lock().map_err(|_| CommandError::internal())?;
+        match guard.as_ref() {
+            Some(session) if session.operator.id == operator_id => session.operator.clone(),
+            _ => return Ok(()),
+        }
+    };
+    let (kind, label) = device_identity(state);
+    let (new_session, created_at) = turso
+        .open_device_session(&operator, kind, &label, false)
+        .await?;
+    {
+        let mut guard = state.session.lock().map_err(|_| CommandError::internal())?;
+        match guard.as_mut() {
+            Some(session) if session.operator.id == operator_id => {
+                session.session_id = Some(new_session.clone());
+            }
+            _ => return Ok(()),
+        }
+    }
+    set_current_actor(Some(operator_id), Some(new_session));
+    record_session_contact(state, operator_id, if created_at.is_empty() { &cloud_now } else { &created_at });
+    if matches!(mode, SessionMode::Offline) {
+        storage::audit(&state.data_dir, Some(operator_id), "session-offline-promoted", None);
+    }
+    Ok(())
+}
+
+/// Sesi ini tersusul: karantina outbox miliknya, lalu akhiri sesi lokal.
+///
+/// Entri yang belum terkirim (`pending`/`failed`/`conflict`) milik operator
+/// ini — atau tanpa pemilik, dibuat sebelum sesi tunggal ada — ditandai
+/// `quarantined_at`. Tidak didorong, tidak dihapus, dan tetap menjaga baris
+/// lokalnya dari `delete_missing` (aturan 7) sampai pemiliknya memutuskan.
+fn supersede(
+    state: &DesktopState,
+    operator_id: i64,
+    session_id: Option<&str>,
+    reason: &str,
+) -> CommandError {
+    if let Ok(connection) = storage::database(&state.data_dir) {
+        let _ = connection.execute(
+            r#"
+      UPDATE desktop_sync_outbox
+      SET quarantined_at = ?1, operator_id = COALESCE(operator_id, ?2),
+          session_id = COALESCE(session_id, ?3), updated_at = ?1
+      WHERE quarantined_at IS NULL
+        AND status IN ('pending', 'failed', 'conflict')
+        AND (operator_id = ?2 OR operator_id IS NULL);
+      "#,
+            params![storage::now_epoch_seconds(), operator_id, session_id],
+        );
+    }
+    if let Ok(mut guard) = state.session.lock() {
+        if guard
+            .as_ref()
+            .is_some_and(|session| session.operator.id == operator_id)
+        {
+            *guard = None;
+        }
+    }
+    set_current_actor(None, None);
+    if let Ok(mut guard) = SESSION_ENDED.lock() {
+        *guard = Some(reason.to_owned());
+    }
+    storage::audit(&state.data_dir, Some(operator_id), "session-superseded", Some(reason));
+    CommandError::new(
+        "SESSION_SUPERSEDED",
+        "Your account signed in on another device. Unsent data is kept and waits for your decision.",
+    )
+}
+
+/// Entri karantina (PRD FR-03 butir 5). Pemegang `sync.retry` melihat semua
+/// entri di perangkat ini; operator lain hanya miliknya sendiri.
+pub fn quarantine_entries(
+    state: &DesktopState,
+    operator_id: i64,
+    see_all: bool,
+) -> Result<Value, CommandError> {
+    let connection = storage::database(&state.data_dir)?;
+    let mut statement = connection
+        .prepare(
+            r#"
+      SELECT event_id, domain, operation, entity_key, operator_id, session_id,
+             created_at, quarantined_at
+      FROM desktop_sync_outbox
+      WHERE quarantined_at IS NOT NULL AND (?1 = 1 OR operator_id = ?2)
+      ORDER BY created_at ASC LIMIT 500;
+      "#,
+        )
+        .map_err(|_| CommandError::internal())?;
+    let rows = statement
+        .query_map(params![i64::from(see_all), operator_id], |row| {
+            Ok(json!({
+                "eventId": row.get::<_, String>(0)?,
+                "domain": row.get::<_, String>(1)?,
+                "operation": row.get::<_, String>(2)?,
+                "entityKey": row.get::<_, String>(3)?,
+                "operatorId": row.get::<_, Option<i64>>(4)?,
+                "sessionId": row.get::<_, Option<String>>(5)?,
+                "createdAt": row.get::<_, i64>(6)?,
+                "quarantinedAt": row.get::<_, i64>(7)?,
+            }))
+        })
+        .map_err(|_| CommandError::internal())?;
+    Ok(Value::Array(
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|_| CommandError::internal())?,
+    ))
+}
+
+/// Kirim: lepas tanda karantina, entrinya didorong seperti biasa di siklus
+/// berikutnya (konflik tetap ditangani `base_revision`). Mengembalikan jumlah
+/// entri yang dilepas.
+pub fn release_quarantine(
+    state: &DesktopState,
+    event_ids: &[String],
+    operator_id: i64,
+    see_all: bool,
+) -> Result<usize, CommandError> {
+    let mut connection = storage::database(&state.data_dir)?;
+    let transaction = connection
+        .transaction()
+        .map_err(|_| CommandError::internal())?;
+    let now = storage::now_epoch_seconds();
+    let mut changed = 0;
+    for event_id in event_ids {
+        changed += transaction
+            .execute(
+                "UPDATE desktop_sync_outbox SET quarantined_at = NULL, status = CASE WHEN status = 'failed' THEN 'pending' ELSE status END, next_retry_at = NULL, updated_at = ?1 WHERE event_id = ?2 AND quarantined_at IS NOT NULL AND (?3 = 1 OR operator_id = ?4);",
+                params![now, event_id, i64::from(see_all), operator_id],
+            )
+            .map_err(|_| CommandError::internal())?;
+    }
+    transaction.commit().map_err(|_| CommandError::internal())?;
+    Ok(changed)
+}
+
+/// Buang: hapus entri karantina dari outbox di transaksi yang sama dengan
+/// catatan auditnya (`apply`). Data di tabel lokal TIDAK disentuh; pull
+/// berikutnya menyamakannya dengan cloud. Mengembalikan entri yang dibuang.
+pub fn discard_quarantine(
+    transaction: &Transaction<'_>,
+    event_ids: &[String],
+    operator_id: i64,
+    see_all: bool,
+) -> Result<Vec<Value>, CommandError> {
+    let mut discarded = Vec::new();
+    for event_id in event_ids {
+        let row = transaction
+            .query_row(
+                "SELECT domain, operation, entity_key FROM desktop_sync_outbox WHERE event_id = ?1 AND quarantined_at IS NOT NULL AND (?2 = 1 OR operator_id = ?3);",
+                params![event_id, i64::from(see_all), operator_id],
+                |row| {
+                    Ok(json!({
+                        "eventId": event_id,
+                        "domain": row.get::<_, String>(0)?,
+                        "operation": row.get::<_, String>(1)?,
+                        "entityKey": row.get::<_, String>(2)?,
+                    }))
+                },
+            )
+            .optional()
+            .map_err(|_| CommandError::internal())?;
+        if let Some(row) = row {
+            transaction
+                .execute("DELETE FROM desktop_sync_outbox WHERE event_id = ?;", [event_id])
+                .map_err(|_| CommandError::internal())?;
+            discarded.push(row);
+        }
+    }
+    Ok(discarded)
 }
 
 /// Cabut atau segarkan sesi aktif bila katalog RBAC cloud sudah berubah.
@@ -1422,6 +1738,7 @@ async fn enforce_rbac_revision(state: &DesktopState) {
                     .is_some_and(|session| session.operator.id == operator_id)
                 {
                     *guard = None;
+                    set_current_actor(None, None);
                 }
             }
             storage::audit(
@@ -1444,7 +1761,7 @@ pub fn status(state: &DesktopState) -> Result<DesktopSyncStatus, CommandError> {
     let count = |status: &str| -> Result<i64, CommandError> {
         connection
             .query_row(
-                "SELECT COUNT(*) FROM desktop_sync_outbox WHERE status = ?;",
+                "SELECT COUNT(*) FROM desktop_sync_outbox WHERE status = ? AND quarantined_at IS NULL;",
                 [status],
                 |row| row.get(0),
             )
@@ -1486,6 +1803,14 @@ pub fn status(state: &DesktopState) -> Result<DesktopSyncStatus, CommandError> {
         local_mode: state
             .turso_config()
             .is_some_and(|config| config.provider.is_local_file()),
+        quarantined: connection
+            .query_row(
+                "SELECT COUNT(*) FROM desktop_sync_outbox WHERE quarantined_at IS NOT NULL;",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|_| CommandError::internal())?,
+        session_superseded: session_ended_reason(),
     })
 }
 
@@ -1653,6 +1978,96 @@ mod tests {
     /// benar-benar terputus berhenti menguras outbox, berkas hub tertinggal,
     /// lalu ekspor cadangan dan promosi ke cloud kehilangan data tanpa satu pun
     /// pesan error.
+    /// Sesi tunggal (PRD FR-03): entri milik sesi yang tersusul dikarantina,
+    /// tidak didorong, dan jumlah outbox tidak berkurang sampai pemiliknya
+    /// memilih Kirim atau Buang. Entri operator lain tidak ikut.
+    #[test]
+    fn sesi_tersusul_mengkarantina_outbox_tanpa_menghapusnya() {
+        let directory = tempdir().expect("direktori sementara");
+        storage::initialize(directory.path()).expect("skema lokal");
+        let state = DesktopState {
+            server_origin: RwLock::new(
+                crate::desktop::app_identity::DEFAULT_SERVER_ORIGIN.to_owned(),
+            ),
+            offline_max_age_hours: 24,
+            data_dir: directory.path().to_path_buf(),
+            http: Client::new(),
+            turso_config: RwLock::new(None),
+            session: Mutex::new(None),
+            vault_lock: Mutex::new(()),
+        };
+        let client_id = super::ensure_client_id(&state).expect("client id");
+        let enqueue_as = |operator: Option<i64>, key: &str| {
+            let mut connection = storage::database(&state.data_dir).expect("db");
+            let transaction = connection.transaction().expect("tx");
+            super::set_current_actor(operator, operator.map(|_| "sesi-lama".to_owned()));
+            let id = super::enqueue(
+                &transaction,
+                &client_id,
+                "audit",
+                "record",
+                key,
+                &serde_json::json!({ "id": key }),
+                None,
+            )
+            .expect("enqueue");
+            transaction.commit().expect("commit");
+            id
+        };
+        let milik_7a = enqueue_as(Some(7), "a");
+        let milik_7b = enqueue_as(Some(7), "b");
+        let tanpa_pemilik = enqueue_as(None, "c");
+        let milik_9 = enqueue_as(Some(9), "d");
+        super::set_current_actor(None, None);
+
+        let _ = super::supersede(&state, 7, Some("sesi-lama"), "SUPERSEDED");
+
+        let (_, siap_kirim) = super::pending_events(&state).expect("pending");
+        let ids: Vec<&str> = siap_kirim
+            .iter()
+            .filter_map(|event| event["eventId"].as_str())
+            .collect();
+        assert_eq!(ids, vec![milik_9.as_str()]);
+        let status = super::status(&state).expect("status");
+        assert_eq!((status.pending, status.quarantined), (1, 3));
+        assert_eq!(status.session_superseded.as_deref(), Some("SUPERSEDED"));
+
+        // Entri tanpa pemilik diwarisi operator yang tersusul.
+        let milik_sendiri = super::quarantine_entries(&state, 7, false).expect("daftar");
+        assert_eq!(milik_sendiri.as_array().map(Vec::len), Some(3));
+        assert_eq!(
+            super::quarantine_entries(&state, 9, false).expect("daftar").as_array().map(Vec::len),
+            Some(0)
+        );
+
+        // Kirim: kembali ke antrean biasa. Operator lain tidak bisa melepasnya.
+        assert_eq!(
+            super::release_quarantine(&state, &[milik_7a.clone()], 9, false).expect("lepas"),
+            0
+        );
+        assert_eq!(
+            super::release_quarantine(&state, &[milik_7a.clone()], 7, false).expect("lepas"),
+            1
+        );
+        assert_eq!(super::pending_events(&state).expect("pending").1.len(), 2);
+
+        // Buang: hanya entri karantina yang dihapus.
+        let mut connection = storage::database(&state.data_dir).expect("db");
+        let transaction = connection.transaction().expect("tx");
+        let dibuang = super::discard_quarantine(
+            &transaction,
+            &[milik_7b, tanpa_pemilik, milik_7a],
+            7,
+            false,
+        )
+        .expect("buang");
+        transaction.commit().expect("commit");
+        assert_eq!(dibuang.len(), 2);
+        let status = super::status(&state).expect("status");
+        assert_eq!((status.pending, status.quarantined), (2, 0));
+        super::clear_session_ended();
+    }
+
     #[test]
     fn status_menandai_mode_lokal_hanya_untuk_provider_local_file() {
         let directory = tempdir().expect("direktori sementara");

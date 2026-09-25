@@ -97,6 +97,11 @@ pub fn run() {
             desktop::commands::desktop_list_operator_directory,
             desktop::commands::desktop_reassign_lead,
             desktop::commands::desktop_list_audit_log,
+            desktop::commands::desktop_list_quarantine,
+            desktop::commands::desktop_resolve_quarantine,
+            desktop::commands::desktop_list_active_sessions,
+            desktop::commands::desktop_end_session,
+            desktop::commands::desktop_end_operator_sessions,
         ])
         .run(tauri::generate_context!())
         .unwrap_or_else(|error| {
