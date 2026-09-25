@@ -1,12 +1,17 @@
 import { describe, expect, test } from "bun:test";
 import {
   companyDateStamp,
+  daysSinceResponse,
   formatClientCode,
+  leadSegment,
   nextClientSequence,
   normalizeCodePrefix,
   normalizeDeviceTag,
   normalizeOptionCode,
   normalizeWhatsapp,
+  parseStoredTimestamp,
+  resolveInteractionTime,
+  utcTimestamp,
 } from "./client";
 
 // Vektor kembar: `mod tests` di `src-tauri/src/desktop/clients.rs` memakai
@@ -113,5 +118,71 @@ describe("normalisasi kode", () => {
     expect(normalizeOptionCode(" ig-ads ")).toBe("IG-ADS");
     expect(normalizeOptionCode("")).toBeNull();
     expect(normalizeOptionCode("A B")).toBeNull();
+  });
+});
+
+describe("parseStoredTimestamp", () => {
+  test("bentuk tersimpan dibaca sebagai UTC", () => {
+    expect(parseStoredTimestamp("2026-09-24 17:00:00")).toBe(1790269200);
+    expect(parseStoredTimestamp("2026-09-24T17:00:00Z")).toBe(1790269200);
+    expect(parseStoredTimestamp(" 2026-12-31 23:30:00 ")).toBe(1798759800);
+    expect(parseStoredTimestamp("")).toBeNull();
+    expect(parseStoredTimestamp("2026-09-24")).toBeNull();
+    expect(parseStoredTimestamp("2026-13-01 00:00:00")).toBeNull();
+    expect(parseStoredTimestamp("2026-09-24 24:00:00")).toBeNull();
+    expect(utcTimestamp(1790269200)).toBe("2026-09-24 17:00:00");
+  });
+});
+
+describe("segmen lead", () => {
+  // Sekarang = 2026-09-25 12:00 WIB.
+  const now = 1790312400;
+  const cases: [string, string, number | null, string | null][] = [
+    ["2026-09-24 17:00:00", "Asia/Jakarta", 0, "HOT"],
+    ["2026-09-24 16:59:59", "Asia/Jakarta", 1, "HOT"],
+    ["2026-09-22 05:00:00", "Asia/Jakarta", 3, "HOT"],
+    ["2026-09-21 05:00:00", "Asia/Jakarta", 4, "WARM"],
+    ["2026-09-18 05:00:00", "Asia/Jakarta", 7, "WARM"],
+    ["2026-09-17 05:00:00", "Asia/Jakarta", 8, "COLD"],
+    ["2026-09-24 16:30:00", "Asia/Makassar", 0, "HOT"],
+    ["2026-09-24 16:30:00", "Asia/Jakarta", 1, "HOT"],
+    ["2026-09-26 05:00:00", "Asia/Jakarta", 0, "HOT"],
+    ["", "Asia/Jakarta", null, null],
+  ];
+  for (const [last, zone, days, segment] of cases) {
+    test(`${last || "(kosong)"} ${zone}`, () => {
+      const computed = daysSinceResponse(last, now, zone);
+      expect(computed).toBe(days);
+      expect(leadSegment("LEAD", computed)).toBe(segment as never);
+    });
+  }
+  test("selain LEAD tidak bersegmen", () => {
+    expect(leadSegment("FIRST_ORDER_ACTIVE", 30)).toBeNull();
+  });
+});
+
+describe("resolveInteractionTime", () => {
+  const now = 1790312400;
+  test("kosong = sekarang, mundur boleh, masa depan dan terlalu lama ditolak", () => {
+    expect(resolveInteractionTime(undefined, now)).toEqual({ epoch: now });
+    expect(resolveInteractionTime(null, now)).toEqual({ epoch: now });
+    expect(resolveInteractionTime(now - 3600, now)).toEqual({
+      epoch: now - 3600,
+    });
+    expect(resolveInteractionTime(now + 300, now)).toEqual({
+      epoch: now + 300,
+    });
+    expect(resolveInteractionTime(now + 301, now)).toEqual({
+      error: "The interaction time cannot be in the future.",
+    });
+    expect(resolveInteractionTime(now - 366 * 86_400 - 1, now)).toEqual({
+      error: "The interaction time cannot be more than a year ago.",
+    });
+    expect(resolveInteractionTime("kemarin", now)).toEqual({
+      error: "The interaction time is not valid.",
+    });
+    expect(resolveInteractionTime(1.5, now)).toEqual({
+      error: "The interaction time is not valid.",
+    });
   });
 });

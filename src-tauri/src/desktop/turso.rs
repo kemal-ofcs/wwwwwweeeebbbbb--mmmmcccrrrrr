@@ -620,6 +620,19 @@ const SNAPSHOT_SOURCES: &[SnapshotSource] = &[
         sql: "SELECT * FROM leads ORDER BY created_at, id;",
     },
     SnapshotSource {
+        payload_key: "leadInteractions",
+        table: "lead_interactions",
+        sql: "SELECT * FROM lead_interactions ORDER BY occurred_at, id;",
+    },
+    // Direktori operator hanya-baca untuk nama PIC dan pilihan pindah PIC saat
+    // offline. SENGAJA hanya empat kolom: hash password, email, nomor HP, dan
+    // rahasia 2FA tidak pernah meninggalkan cloud.
+    SnapshotSource {
+        payload_key: "operatorDirectory",
+        table: "master_operator",
+        sql: "SELECT id, kode_operator, nama_operator, status FROM master_operator ORDER BY id;",
+    },
+    SnapshotSource {
         payload_key: "masterOptions",
         table: "master_option",
         sql: "SELECT * FROM master_option ORDER BY kind, sort_order, label;",
@@ -1351,6 +1364,9 @@ impl TursoClient {
                 ('clients.view', 'View clients', 'Clients', 'View clients and their leads.', 1, 30),
                 ('clients.manage', 'Manage clients', 'Clients', 'Register new leads and edit client details.', 1, 40),
                 ('master_data.manage', 'Manage master data', 'Master data', 'Maintain lead channels and product categories.', 1, 50),
+                ('leads.view', 'View leads', 'Leads', 'View leads, their interactions, and the Cold queue.', 1, 52),
+                ('leads.manage', 'Manage own leads', 'Leads', 'Record follow ups and client responses on your own leads.', 1, 54),
+                ('leads.reassign', 'Reassign leads', 'Leads', 'Move a lead to another CS and record on any lead.', 1, 56),
                 ('password_reset.view', 'View password reset history', 'Operators', 'Review who requested a password recovery, with their verification photo.', 1, 62),
                 ('password_reset.delete', 'Delete password reset history', 'Operators', 'Delete password recovery records and their photos.', 1, 64),
                 ('two_factor.reset', 'Reset another operator''s 2FA', 'Operators', 'Turn off two-step verification for another operator who lost their phone.', 1, 66),
@@ -1391,7 +1407,8 @@ impl TursoClient {
                 r#"INSERT OR IGNORE INTO role_permission (role_id, permission_key, is_allowed, updated_at, updated_by)
                 SELECT 3, permission_key, 1, datetime('now'), 'system' FROM app_permission
                 WHERE permission_key IN (
-                    'home.view', 'dashboard.view', 'clients.view', 'clients.manage', 'sync.view'
+                    'home.view', 'dashboard.view', 'clients.view', 'clients.manage',
+                    'leads.view', 'leads.manage', 'sync.view'
                 );"#,
                 vec![],
             ),
@@ -1420,7 +1437,8 @@ impl TursoClient {
                 r#"INSERT OR IGNORE INTO schema_migration (version, name, applied_at) VALUES
                 (1, 'template-foundation-v1', datetime('now')),
                 (2, 'password-reset-and-two-factor', datetime('now')),
-                (3, 'clients-leads-master-data', datetime('now'));"#,
+                (3, 'clients-leads-master-data', datetime('now')),
+                (4, 'lead-interactions', datetime('now'));"#,
                 vec![],
             ),
             // ============ DOMAIN MAKLONOS ============
@@ -1476,6 +1494,22 @@ impl TursoClient {
                 );"#,
                 vec![],
             ),
+            // Satu baris per follow up CS atau respons klien (PRD FR-05.1).
+            // Ringkasan di `leads` diperbarui handler push dengan aturan yang
+            // aman diulang, bukan dengan menimpa baris lead.
+            Statement::new(
+                r#"CREATE TABLE IF NOT EXISTS lead_interactions (
+                    id TEXT PRIMARY KEY,
+                    lead_id TEXT NOT NULL,
+                    operator_id INTEGER,
+                    direction TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    notes TEXT NOT NULL,
+                    occurred_at TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );"#,
+                vec![],
+            ),
             // Cloud-only: tag dua karakter untuk setiap perangkat, bagian `<KP>`
             // dari kode klien. Tidak ikut sinkronisasi, jadi UNIQUE aman.
             Statement::new(
@@ -1500,6 +1534,10 @@ impl TursoClient {
             ),
             Statement::new(
                 "CREATE INDEX IF NOT EXISTS idx_master_option_kind ON master_option(kind, sort_order);",
+                vec![],
+            ),
+            Statement::new(
+                "CREATE INDEX IF NOT EXISTS idx_lead_interactions_lead ON lead_interactions(lead_id, occurred_at);",
                 vec![],
             ),
             // =========================================
@@ -1657,6 +1695,11 @@ impl TursoClient {
         .await?;
         self.query_one(
             "INSERT OR IGNORE INTO schema_migration (version, name, applied_at) VALUES (-2011, 'clients-leads-master-data-v1', datetime('now'));",
+            vec![],
+        )
+        .await?;
+        self.query_one(
+            "INSERT OR IGNORE INTO schema_migration (version, name, applied_at) VALUES (-2012, 'lead-interactions-v1', datetime('now'));",
             vec![],
         )
         .await?;
@@ -1826,7 +1869,7 @@ impl TursoClient {
             .query_one(
                 // Sentinel WAJIB dinaikkan setiap kali ensure_schema menambah
                 // tabel atau kolom — nilainya di sini dan pada INSERT harus sama.
-                "SELECT COUNT(*) AS total FROM schema_migration WHERE version = -2011;",
+                "SELECT COUNT(*) AS total FROM schema_migration WHERE version = -2012;",
                 vec![],
             )
             .await
@@ -3675,6 +3718,8 @@ fn canonical_sync_route(domain: &str, operation: &str) -> Option<(&'static str, 
         "master-option" | "master_option" => "master-option",
         "setting" | "setting_gex_system" => "setting",
         "company-profile" | "company_profile" => "company-profile",
+        "lead-interaction" | "lead_interactions" => "lead-interaction",
+        "lead" | "leads" => "lead",
         _ => return None,
     };
     let canonical_operation = match (canonical_domain, operation) {
@@ -3684,6 +3729,8 @@ fn canonical_sync_route(domain: &str, operation: &str) -> Option<(&'static str, 
         ("setting", "update") => "update",
         ("setting", "upsert") => "upsert",
         ("company-profile", "update") => "update",
+        ("lead-interaction", "record") => "record",
+        ("lead", "reassign") => "reassign",
         _ => return None,
     };
     Some((canonical_domain, canonical_operation))
@@ -3868,6 +3915,74 @@ async fn apply_event_to_turso(
                         json!(number("sort_order")),
                         json!(text("updated_at")),
                     ],
+                )
+                .await?;
+        }
+        ("lead-interaction", "record") => {
+            // Hanya baris interaksi yang dikirim; ringkasan lead diperbarui di
+            // sini dengan aturan yang aman diulang, sehingga dua perangkat
+            // offline yang mencatat di lead yang sama tidak saling bentrok.
+            let lead_id = text("lead_id");
+            let direction = text("direction");
+            let kind = text("kind");
+            let notes = text("notes");
+            let occurred_at = text("occurred_at");
+            let valid = !entity_key.is_empty()
+                && !lead_id.is_empty()
+                && clients::LEAD_INTERACTION_DIRECTIONS.contains(&direction.as_str())
+                && clients::LEAD_INTERACTION_KINDS.contains(&kind.as_str())
+                && !notes.trim().is_empty()
+                && notes.chars().count() <= clients::INTERACTION_NOTES_MAX
+                // Bentuk kanonik saja: perbandingan `>` di SQL membandingkan teks.
+                && clients::parse_stored_timestamp(&occurred_at)
+                    .map(clients::utc_timestamp)
+                    .as_deref()
+                    == Some(occurred_at.as_str());
+            if !valid {
+                return Err(CommandError::new(
+                    "TURSO_SYNC_PAYLOAD_INVALID",
+                    "The lead interaction is incomplete or invalid.",
+                ));
+            }
+            let operator_id = payload
+                .get("operator_id")
+                .filter(|value| value.is_i64())
+                .cloned()
+                .unwrap_or(Value::Null);
+            turso
+                .query_one(
+                    clients::LEAD_SUMMARY_UPDATE_SQL,
+                    vec![json!(direction), json!(occurred_at), json!(lead_id), json!(entity_key)],
+                )
+                .await?;
+            turso
+                .query_one(
+                    clients::LEAD_INTERACTION_INSERT_SQL,
+                    vec![
+                        json!(entity_key),
+                        json!(lead_id),
+                        operator_id,
+                        json!(direction),
+                        json!(kind),
+                        json!(notes),
+                        json!(occurred_at),
+                        json!(text("created_at")),
+                    ],
+                )
+                .await?;
+        }
+        ("lead", "reassign") => {
+            let pic = payload.get("pic_cs_id").and_then(Value::as_i64).filter(|id| *id > 0);
+            let (Some(pic), false) = (pic, entity_key.is_empty()) else {
+                return Err(CommandError::new(
+                    "TURSO_SYNC_PAYLOAD_INVALID",
+                    "The lead reassignment is incomplete or invalid.",
+                ));
+            };
+            turso
+                .query_one(
+                    "UPDATE leads SET pic_cs_id = ?, updated_at = ? WHERE id = ?;",
+                    vec![json!(pic), json!(text("updated_at")), json!(entity_key)],
                 )
                 .await?;
         }
@@ -6320,6 +6435,13 @@ mod tests {
             Some(("master-option", "upsert"))
         );
         // ...dan pasangan yang tidak terdaftar ditolak, bukan diloloskan.
+        assert_eq!(
+            canonical_sync_route("lead_interactions", "record"),
+            Some(("lead-interaction", "record"))
+        );
+        assert_eq!(canonical_sync_route("leads", "reassign"), Some(("lead", "reassign")));
+        assert_eq!(canonical_sync_route("lead-interaction", "delete"), None);
+        assert_eq!(canonical_sync_route("lead", "update"), None);
         assert_eq!(canonical_sync_route("client", "delete"), None);
         assert_eq!(canonical_sync_route("item", "create"), None);
         assert_eq!(canonical_sync_route("pelanggan", "create"), None);
@@ -6377,6 +6499,7 @@ mod tests {
                 "leads",
                 "master_option",
                 "device_tag_registry",
+                "lead_interactions",
             ] {
                 let ada: i64 = connection
                     .query_row(

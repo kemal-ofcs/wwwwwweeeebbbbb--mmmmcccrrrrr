@@ -92,6 +92,10 @@ pub fn run() {
             desktop::commands::desktop_save_master_option,
             desktop::commands::desktop_get_client_code_settings,
             desktop::commands::desktop_save_client_code_settings,
+            desktop::commands::desktop_list_lead_interactions,
+            desktop::commands::desktop_record_lead_interaction,
+            desktop::commands::desktop_list_operator_directory,
+            desktop::commands::desktop_reassign_lead,
         ])
         .run(tauri::generate_context!())
         .unwrap_or_else(|error| {

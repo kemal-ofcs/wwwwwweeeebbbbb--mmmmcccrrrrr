@@ -1923,23 +1923,32 @@ fn client_code_web_tag(state: &DesktopState) -> String {
 }
 
 /// Daftar klien beserta lead-nya, terbaru dulu. Bentuk barisnya sama dengan
-/// `listClients` di `src/lib/server/clients.ts`.
+/// `listClients` di `src/lib/server/clients.ts`. Segmen dihitung saat dibaca
+/// dari jam perangkat (PRD FR-05.3, FR-05.7), tidak pernah disimpan.
 #[tauri::command]
 pub fn desktop_list_clients(state: State<'_, DesktopState>) -> Result<Value, CommandError> {
     require_permission(&state, "clients.view")?;
     let connection = storage::database(&state.data_dir)?;
+    let timezone = company_timezone(&connection);
+    let now = storage::now_epoch_seconds();
     let mut statement = connection
         .prepare(
             "SELECT c.id, c.client_code, c.name, c.phone_normalized, c.address, c.city,
                     c.province, c.lifecycle_status, c.created_by, c.created_at, c.updated_at,
                     l.id, l.pic_cs_id, l.channel_option_id, l.product_category_option_id,
-                    l.needs_notes, l.last_client_response_at, l.total_followups
-             FROM clients c LEFT JOIN leads l ON l.client_id = c.id
+                    l.needs_notes, l.last_client_response_at, l.total_followups,
+                    l.last_followup_at, o.nama_operator
+             FROM clients c
+             LEFT JOIN leads l ON l.client_id = c.id
+             LEFT JOIN master_operator o ON o.id = l.pic_cs_id
              ORDER BY c.created_at DESC, c.id;",
         )
         .map_err(|_| CommandError::internal())?;
     let rows = statement
         .query_map([], |row| {
+            let lifecycle = row.get::<_, String>(7)?;
+            let last_response = row.get::<_, Option<String>>(16)?.unwrap_or_default();
+            let days = clients::days_since_response(&last_response, now, &timezone);
             Ok(json!({
                 "id": row.get::<_, String>(0)?,
                 "client_code": row.get::<_, String>(1)?,
@@ -1948,17 +1957,21 @@ pub fn desktop_list_clients(state: State<'_, DesktopState>) -> Result<Value, Com
                 "address": row.get::<_, String>(4)?,
                 "city": row.get::<_, String>(5)?,
                 "province": row.get::<_, String>(6)?,
-                "lifecycle_status": row.get::<_, String>(7)?,
+                "segment": clients::lead_segment(&lifecycle, days),
+                "lifecycle_status": lifecycle,
                 "created_by": row.get::<_, Option<i64>>(8)?,
                 "created_at": row.get::<_, String>(9)?,
                 "updated_at": row.get::<_, String>(10)?,
                 "lead_id": row.get::<_, Option<String>>(11)?,
                 "pic_cs_id": row.get::<_, Option<i64>>(12)?,
+                "pic_cs_name": row.get::<_, Option<String>>(19)?,
                 "channel_option_id": row.get::<_, Option<String>>(13)?.unwrap_or_default(),
                 "product_category_option_id": row.get::<_, Option<String>>(14)?.unwrap_or_default(),
                 "needs_notes": row.get::<_, Option<String>>(15)?.unwrap_or_default(),
-                "last_client_response_at": row.get::<_, Option<String>>(16)?.unwrap_or_default(),
+                "last_client_response_at": last_response,
+                "last_followup_at": row.get::<_, Option<String>>(18)?.unwrap_or_default(),
                 "total_followups": row.get::<_, Option<i64>>(17)?.unwrap_or(0),
+                "days_since_response": days,
             }))
         })
         .map_err(|_| CommandError::internal())?;
@@ -2386,6 +2399,200 @@ pub async fn desktop_save_client_code_settings(
         "client_code_web_tag": web_tag,
         "device_tag": sync::local_device_tag(&state)?,
     }))
+}
+
+fn operator_can(operator: &OperatorUser, permission: &str) -> bool {
+    operator.is_superadmin || operator.permissions.iter().any(|key| key == permission)
+}
+
+fn lead_invalid(message: impl Into<String>) -> CommandError {
+    CommandError::new("LEAD_INVALID", message)
+}
+
+/// Riwayat interaksi satu lead, terbaru dulu. Cermin `listLeadInteractions`.
+#[tauri::command]
+pub fn desktop_list_lead_interactions(
+    state: State<'_, DesktopState>,
+    lead_id: String,
+) -> Result<Value, CommandError> {
+    require_permission(&state, "leads.view")?;
+    let connection = storage::database(&state.data_dir)?;
+    let mut statement = connection
+        .prepare(
+            "SELECT i.id, i.lead_id, i.operator_id, o.nama_operator, i.direction, i.kind,
+                    i.notes, i.occurred_at, i.created_at
+             FROM lead_interactions i LEFT JOIN master_operator o ON o.id = i.operator_id
+             WHERE i.lead_id = ? ORDER BY i.occurred_at DESC, i.created_at DESC, i.rowid DESC;",
+        )
+        .map_err(|_| CommandError::internal())?;
+    let rows = statement
+        .query_map([lead_id.trim()], |row| {
+            Ok(json!({
+                "id": row.get::<_, String>(0)?,
+                "lead_id": row.get::<_, String>(1)?,
+                "operator_id": row.get::<_, Option<i64>>(2)?,
+                "operator_name": row.get::<_, Option<String>>(3)?,
+                "direction": row.get::<_, String>(4)?,
+                "kind": row.get::<_, String>(5)?,
+                "notes": row.get::<_, String>(6)?,
+                "occurred_at": row.get::<_, String>(7)?,
+                "created_at": row.get::<_, String>(8)?,
+            }))
+        })
+        .map_err(|_| CommandError::internal())?;
+    Ok(Value::Array(
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|_| CommandError::internal())?,
+    ))
+}
+
+/// Catat satu follow up (`OUTBOUND`) atau respons klien (`INBOUND`). Hanya di
+/// lead milik sendiri, kecuali pemegang `leads.reassign` (PRD OQ-34). Baris
+/// interaksi, ringkasan lead, dan outbox ditulis dalam satu transaksi.
+#[tauri::command]
+pub async fn desktop_record_lead_interaction(
+    state: State<'_, DesktopState>,
+    interaction: Value,
+) -> Result<Value, CommandError> {
+    use rusqlite::OptionalExtension;
+    let operator = require_permission(&state, "leads.manage")?;
+    let lead_id = draft_text(&interaction, "lead_id");
+    let direction = draft_text(&interaction, "direction");
+    if !clients::LEAD_INTERACTION_DIRECTIONS.contains(&direction.as_str()) {
+        return Err(lead_invalid("Choose whether this is a follow up or a client response."));
+    }
+    let kind = draft_text(&interaction, "kind");
+    if !clients::LEAD_INTERACTION_KINDS.contains(&kind.as_str()) {
+        return Err(lead_invalid("Choose how the contact happened."));
+    }
+    let notes = draft_text(&interaction, "notes");
+    if notes.is_empty() || notes.chars().count() > clients::INTERACTION_NOTES_MAX {
+        return Err(lead_invalid("Notes are required, up to 1000 characters."));
+    }
+    let now = storage::now_epoch_seconds();
+    let occurred = clients::resolve_interaction_time(interaction.get("occurred_at"), now)
+        .map_err(lead_invalid)?;
+    {
+        let connection = storage::database(&state.data_dir)?;
+        let pic = connection
+            .query_row("SELECT pic_cs_id FROM leads WHERE id = ?;", [&lead_id], |row| {
+                row.get::<_, Option<i64>>(0)
+            })
+            .optional()
+            .map_err(|_| CommandError::internal())?
+            .ok_or_else(|| CommandError::new("LEAD_NOT_FOUND", "Lead not found."))?;
+        if pic != Some(operator.id) && !operator_can(&operator, "leads.reassign") {
+            return Err(CommandError::new(
+                "LEAD_NOT_OWNED",
+                "Only the lead's CS can record on it. Ask an Admin to reassign the lead.",
+            ));
+        }
+    }
+
+    let id = clients::new_uuid();
+    let occurred_at = clients::utc_timestamp(occurred);
+    let created_at = clients::utc_timestamp(now);
+    let payload = json!({
+        "id": id,
+        "lead_id": lead_id,
+        "operator_id": operator.id,
+        "direction": direction,
+        "kind": kind,
+        "notes": notes,
+        "occurred_at": occurred_at,
+        "created_at": created_at,
+    });
+    commit_with_outbox(&state, "lead-interaction", "record", &id, payload, |transaction| {
+        transaction
+            .execute(
+                clients::LEAD_SUMMARY_UPDATE_SQL,
+                rusqlite::params![&direction, &occurred_at, &lead_id, &id],
+            )
+            .map_err(|_| CommandError::internal())?;
+        transaction
+            .execute(
+                clients::LEAD_INTERACTION_INSERT_SQL,
+                rusqlite::params![
+                    &id, &lead_id, operator.id, &direction, &kind, &notes, &occurred_at, &created_at
+                ],
+            )
+            .map_err(|_| CommandError::internal())?;
+        Ok(())
+    })?;
+
+    let _ = sync::synchronize(&state).await;
+    Ok(json!({ "sukses": true, "id": id }))
+}
+
+/// Operator aktif untuk nama PIC dan pilihan pindah PIC. Dibaca dari direktori
+/// hanya-baca yang ikut snapshot, jadi tetap jalan saat offline.
+#[tauri::command]
+pub fn desktop_list_operator_directory(state: State<'_, DesktopState>) -> Result<Value, CommandError> {
+    require_permission(&state, "leads.view")?;
+    let connection = storage::database(&state.data_dir)?;
+    let mut statement = connection
+        .prepare(
+            "SELECT id, kode_operator, nama_operator FROM master_operator
+             WHERE COALESCE(status, 'Active') = 'Active' ORDER BY nama_operator, id;",
+        )
+        .map_err(|_| CommandError::internal())?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok(json!({
+                "id": row.get::<_, i64>(0)?,
+                "kode_operator": row.get::<_, String>(1)?,
+                "nama_operator": row.get::<_, String>(2)?,
+            }))
+        })
+        .map_err(|_| CommandError::internal())?;
+    Ok(Value::Array(
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|_| CommandError::internal())?,
+    ))
+}
+
+/// Pindahkan lead ke PIC CS lain (PRD OQ-34). Cermin `reassignLead`.
+#[tauri::command]
+pub async fn desktop_reassign_lead(
+    state: State<'_, DesktopState>,
+    lead_id: String,
+    pic_cs_id: i64,
+) -> Result<Value, CommandError> {
+    use rusqlite::OptionalExtension;
+    require_permission(&state, "leads.reassign")?;
+    let lead_id = lead_id.trim().to_owned();
+    {
+        let connection = storage::database(&state.data_dir)?;
+        connection
+            .query_row("SELECT 1 FROM leads WHERE id = ?;", [&lead_id], |_| Ok(()))
+            .optional()
+            .map_err(|_| CommandError::internal())?
+            .ok_or_else(|| CommandError::new("LEAD_NOT_FOUND", "Lead not found."))?;
+        let active = connection
+            .query_row(
+                "SELECT 1 FROM master_operator WHERE id = ? AND COALESCE(status, 'Active') = 'Active';",
+                [pic_cs_id],
+                |_| Ok(()),
+            )
+            .optional()
+            .map_err(|_| CommandError::internal())?;
+        if active.is_none() {
+            return Err(lead_invalid("Choose an active operator."));
+        }
+    }
+    let updated_at = clients::utc_timestamp(storage::now_epoch_seconds());
+    let payload = json!({ "id": lead_id, "pic_cs_id": pic_cs_id, "updated_at": updated_at });
+    commit_with_outbox(&state, "lead", "reassign", &lead_id, payload, |transaction| {
+        transaction
+            .execute(
+                "UPDATE leads SET pic_cs_id = ?, updated_at = ? WHERE id = ?;",
+                rusqlite::params![pic_cs_id, &updated_at, &lead_id],
+            )
+            .map_err(|_| CommandError::internal())?;
+        Ok(())
+    })?;
+    let _ = sync::synchronize(&state).await;
+    Ok(json!({ "sukses": true }))
 }
 
 #[cfg(test)]

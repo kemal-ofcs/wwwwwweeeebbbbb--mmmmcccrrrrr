@@ -3,7 +3,12 @@
 import { requestWebApi } from "@/lib/client/api-client";
 import { isDesktopRuntime } from "@/lib/runtime/app-runtime";
 import { invokeDesktop } from "@/lib/runtime/desktop-commands";
-import type { MasterOptionKind } from "@/lib/validations/client";
+import type {
+  LeadInteractionDirection,
+  LeadInteractionKind,
+  LeadSegment,
+  MasterOptionKind,
+} from "@/lib/validations/client";
 
 /**
  * Gateway domain klien, lead, dan Master Data.
@@ -24,16 +29,22 @@ export interface ClientRecord {
   city: string;
   province: string;
   lifecycle_status: string;
+  /** Dihitung backend saat dibaca; `null` untuk klien selain `LEAD`. */
+  segment: LeadSegment | null;
   created_by: number | null;
   created_at: string;
   updated_at: string;
   lead_id: string | null;
   pic_cs_id: number | null;
+  /** `null` bila direktori operator belum pernah tersinkron di perangkat ini. */
+  pic_cs_name: string | null;
   channel_option_id: string;
   product_category_option_id: string;
   needs_notes: string;
   last_client_response_at: string;
+  last_followup_at: string;
   total_followups: number;
+  days_since_response: number | null;
 }
 
 /** Isi form intake. Nomor dikirim apa adanya; backend yang menormalkan. */
@@ -158,4 +169,88 @@ export async function saveClientCodeSettings(settings: {
     { settings },
   );
   return result.settings;
+}
+
+// ── Interaksi lead & PIC (PRD F-05) ─────────────────────────────────────────
+
+export interface LeadInteractionRecord {
+  id: string;
+  lead_id: string;
+  operator_id: number | null;
+  operator_name: string | null;
+  direction: string;
+  kind: string;
+  notes: string;
+  occurred_at: string;
+  created_at: string;
+}
+
+export interface LeadInteractionDraft {
+  lead_id: string;
+  direction: LeadInteractionDirection;
+  kind: LeadInteractionKind;
+  notes: string;
+  /** Epoch detik; `null` = sekarang. Backend menolak waktu di masa depan. */
+  occurred_at: number | null;
+}
+
+export interface OperatorDirectoryEntry {
+  id: number;
+  kode_operator: string;
+  nama_operator: string;
+}
+
+export async function listLeadInteractions(
+  leadId: string,
+): Promise<LeadInteractionRecord[]> {
+  if (isDesktopRuntime()) {
+    return invokeDesktop<LeadInteractionRecord[]>(
+      "desktop_list_lead_interactions",
+      { leadId },
+    );
+  }
+  const result = await requestWebApi<{
+    interactions: LeadInteractionRecord[];
+  }>("/api/leads/interactions/query", "POST", { lead_id: leadId });
+  return result.interactions ?? [];
+}
+
+export async function recordLeadInteraction(
+  interaction: LeadInteractionDraft,
+): Promise<void> {
+  if (isDesktopRuntime()) {
+    await invokeDesktop("desktop_record_lead_interaction", { interaction });
+    return;
+  }
+  await requestWebApi("/api/leads/interactions", "POST", { interaction });
+}
+
+export async function listOperatorDirectory(): Promise<
+  OperatorDirectoryEntry[]
+> {
+  if (isDesktopRuntime()) {
+    return invokeDesktop<OperatorDirectoryEntry[]>(
+      "desktop_list_operator_directory",
+    );
+  }
+  const result = await requestWebApi<{ operators: OperatorDirectoryEntry[] }>(
+    "/api/leads/operators/query",
+    "POST",
+    {},
+  );
+  return result.operators ?? [];
+}
+
+export async function reassignLead(
+  leadId: string,
+  picCsId: number,
+): Promise<void> {
+  if (isDesktopRuntime()) {
+    await invokeDesktop("desktop_reassign_lead", { leadId, picCsId });
+    return;
+  }
+  await requestWebApi("/api/leads/reassign", "POST", {
+    lead_id: leadId,
+    pic_cs_id: picCsId,
+  });
 }

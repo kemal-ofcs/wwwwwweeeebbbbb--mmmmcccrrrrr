@@ -20,7 +20,7 @@ use super::{
 /// `CURRENT_SCHEMA_VERSION` di `web-desktop/src/lib/db-schema.ts` setiap kali
 /// migrasi baru ditambahkan, karena keduanya membaca tabel `schema_migration`
 /// yang sama di Turso.
-pub const CLIENT_SCHEMA_VERSION: i64 = 3;
+pub const CLIENT_SCHEMA_VERSION: i64 = 4;
 
 /// Hanya `cloud > client` yang berbahaya; `cloud <= client` adalah kondisi normal.
 fn is_client_schema_outdated(cloud_version: i64) -> bool {
@@ -76,6 +76,9 @@ struct SnapshotTable {
     conflict_column: &'static str,
     entity_column: &'static str,
     delete_missing: bool,
+    /// Tabel yang hanya ditarik, tidak pernah didorong (direktori operator).
+    /// Wajib TIDAK punya rute kanonik; tabel lain wajib punya.
+    read_only: bool,
 }
 
 /// Tabel yang ikut ditarik dari cloud ke SQLite lokal.
@@ -89,6 +92,7 @@ struct SnapshotTable {
 /// - `conflict_column` adalah kunci upsert lokal; pilih kolom yang stabil lintas
 ///   perangkat (kode bisnis), bukan rowid yang berbeda di tiap instalasi.
 /// - `entity_column` adalah identitas baris untuk `desktop_entity_revision`.
+/// - `read_only` menandai tabel yang sengaja satu arah (cloud → perangkat).
 /// - `delete_missing` hanya untuk tabel yang cloud-nya benar-benar otoritatif.
 ///   Untuk log transaksional biarkan `false`: baris lokal yang belum pernah
 ///   terkirim tidak boleh dihapus hanya karena cloud belum memilikinya.
@@ -119,6 +123,7 @@ const SNAPSHOT_TABLES: &[SnapshotTable] = &[
         conflict_column: "id",
         entity_column: "id",
         delete_missing: true,
+        read_only: false,
     },
     // Lead ikut rute `client`: satu event `client/register` membawa kedua baris.
     SnapshotTable {
@@ -141,6 +146,41 @@ const SNAPSHOT_TABLES: &[SnapshotTable] = &[
         conflict_column: "id",
         entity_column: "id",
         delete_missing: true,
+        read_only: false,
+    },
+    // Log interaksi: `delete_missing: false` seperti log transaksional lain.
+    // Baris lokal yang belum terkirim tidak boleh hilang hanya karena cloud
+    // belum memilikinya.
+    SnapshotTable {
+        payload_key: "leadInteractions",
+        domain: "lead-interaction",
+        table: "lead_interactions",
+        columns: &[
+            "id",
+            "lead_id",
+            "operator_id",
+            "direction",
+            "kind",
+            "notes",
+            "occurred_at",
+            "created_at",
+        ],
+        conflict_column: "id",
+        entity_column: "id",
+        delete_missing: false,
+        read_only: false,
+    },
+    // Direktori operator hanya-baca: tidak punya rute outbox, cloud
+    // otoritatif penuh. Hanya empat kolom (lihat `SNAPSHOT_SOURCES`).
+    SnapshotTable {
+        payload_key: "operatorDirectory",
+        domain: "operator",
+        table: "master_operator",
+        columns: &["id", "kode_operator", "nama_operator", "status"],
+        conflict_column: "id",
+        entity_column: "id",
+        delete_missing: true,
+        read_only: true,
     },
     SnapshotTable {
         payload_key: "masterOptions",
@@ -158,6 +198,7 @@ const SNAPSHOT_TABLES: &[SnapshotTable] = &[
         conflict_column: "id",
         entity_column: "id",
         delete_missing: true,
+        read_only: false,
     },
     SnapshotTable {
         payload_key: "settings",
@@ -167,6 +208,7 @@ const SNAPSHOT_TABLES: &[SnapshotTable] = &[
         conflict_column: "key",
         entity_column: "key",
         delete_missing: false,
+        read_only: false,
     },
     // `delete_missing: false` seperti seluruh tabel lain di sini, dan untuk
     // tabel baris-tunggal alasannya lebih tajam: cloud yang untuk sesaat tidak
@@ -194,6 +236,7 @@ const SNAPSHOT_TABLES: &[SnapshotTable] = &[
         conflict_column: "id",
         entity_column: "id",
         delete_missing: false,
+        read_only: false,
     },
 ];
 
@@ -206,6 +249,8 @@ const CANONICAL_SYNC_ROUTES: &[(&str, &str)] = &[
     ("client", "register"),
     ("client", "update"),
     ("master-option", "upsert"),
+    ("lead-interaction", "record"),
+    ("lead", "reassign"),
     ("setting", "update"),
     ("setting", "upsert"),
     ("company-profile", "update"),
@@ -523,7 +568,9 @@ fn apply_table(
             // Jejak `desktop_entity_revision` sudah dimuat di awal apply_snapshot,
             // jadi asal-usul baris diperiksa dari memori, bukan query per baris.
             let came_from_server = hashes.contains_key(&cache_key);
-            if !came_from_server {
+            // Tabel hanya-baca tidak pernah punya baris buatan perangkat, jadi
+            // cloud menentukan isinya sepenuhnya.
+            if !came_from_server && !definition.read_only {
                 // Baris lokal murni yang tidak pernah datang dari server: jangan dihapus.
                 continue;
             }
@@ -1429,6 +1476,7 @@ pub fn status(state: &DesktopState) -> Result<DesktopSyncStatus, CommandError> {
             "clients": table_count("clients"),
             "leads": table_count("leads"),
             "masterOptions": table_count("master_option"),
+            "leadInteractions": table_count("lead_interactions"),
         }),
         push_error: None,
         changed_rows: 0,
@@ -1650,13 +1698,20 @@ mod tests {
         // Tabel snapshot tanpa route kanonik berarti perangkat bisa menarik
         // baris dari cloud tetapi tidak akan pernah bisa mendorong perubahannya
         // balik — sinkronisasi menjadi satu arah tanpa ada yang menyadarinya.
+        //
+        // Kebalikannya juga dijaga: tabel yang sengaja hanya-baca (direktori
+        // operator) TIDAK boleh punya route, supaya perangkat tidak pernah bisa
+        // mendorong perubahan ke `master_operator`.
         for table in SNAPSHOT_TABLES {
-            assert!(
-                CANONICAL_SYNC_ROUTES
-                    .iter()
-                    .any(|(domain, _)| *domain == table.domain),
-                "domain '{}' tidak punya route kanonik",
-                table.domain
+            let has_route = CANONICAL_SYNC_ROUTES
+                .iter()
+                .any(|(domain, _)| *domain == table.domain);
+            assert_eq!(
+                has_route, !table.read_only,
+                "domain '{}': read_only = {}, tetapi route kanonik {}",
+                table.domain,
+                table.read_only,
+                if has_route { "ada" } else { "tidak ada" }
             );
         }
     }

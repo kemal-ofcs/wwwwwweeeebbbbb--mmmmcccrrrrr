@@ -144,3 +144,135 @@ export const CLIENT_NAME_MAX = 120;
 export const CLIENT_TEXT_MAX = 300;
 export const CLIENT_NOTES_MAX = 2000;
 export const OPTION_LABEL_MAX = 80;
+
+// ── Interaksi lead & segmentasi (PRD FR-05) ─────────────────────────────────
+// Padanan Rust ada di `clients.rs`, diuji dengan vektor yang sama.
+
+/** `OUTBOUND` = follow up oleh CS, `INBOUND` = respons klien (FR-05.1). */
+export const LEAD_INTERACTION_DIRECTIONS = ["OUTBOUND", "INBOUND"] as const;
+export type LeadInteractionDirection =
+  (typeof LEAD_INTERACTION_DIRECTIONS)[number];
+
+/** Chat WA, Telepon, Kunjungan, Kirim Materi, Lainnya (FR-05.1). */
+export const LEAD_INTERACTION_KINDS = [
+  "WHATSAPP",
+  "CALL",
+  "VISIT",
+  "MATERIAL",
+  "OTHER",
+] as const;
+export type LeadInteractionKind = (typeof LEAD_INTERACTION_KINDS)[number];
+
+export const INTERACTION_NOTES_MAX = 1000;
+/** Batas mundur waktu interaksi: catatan lebih tua dari ini hampir pasti salah ketik. */
+export const INTERACTION_MAX_AGE_SECONDS = 366 * 86_400;
+/** Toleransi jam perangkat yang sedikit lebih cepat daripada jam database. */
+export const INTERACTION_FUTURE_TOLERANCE_SECONDS = 300;
+
+/** Batas segmen dalam hari kalender (FR-05.3): HOT ≤ 3, WARM 4-7, COLD > 7. */
+export const HOT_MAX_DAYS = 3;
+export const WARM_MAX_DAYS = 7;
+export type LeadSegment = "HOT" | "WARM" | "COLD";
+
+export function isLeadInteractionDirection(
+  value: unknown,
+): value is LeadInteractionDirection {
+  return (
+    typeof value === "string" &&
+    (LEAD_INTERACTION_DIRECTIONS as readonly string[]).includes(value)
+  );
+}
+
+export function isLeadInteractionKind(
+  value: unknown,
+): value is LeadInteractionKind {
+  return (
+    typeof value === "string" &&
+    (LEAD_INTERACTION_KINDS as readonly string[]).includes(value)
+  );
+}
+
+/** Bentuk `datetime('now')`: `YYYY-MM-DD HH:MM:SS` UTC. Padanan `utc_timestamp`. */
+export function utcTimestamp(epochSeconds: number) {
+  return new Date(epochSeconds * 1000)
+    .toISOString()
+    .slice(0, 19)
+    .replace("T", " ");
+}
+
+/**
+ * Epoch detik dari stempel waktu tersimpan (`YYYY-MM-DD HH:MM:SS`, boleh
+ * dengan `T` dan akhiran `Z`), selalu dibaca sebagai UTC. `null` bila bentuknya
+ * lain — `new Date(...)` tidak dipakai karena menebak zona lokal (aturan 19).
+ */
+export function parseStoredTimestamp(value: string): number | null {
+  const match = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})Z?$/.exec(
+    value.trim(),
+  );
+  if (!match) return null;
+  const [year, month, day, hour, minute, second] = match
+    .slice(1)
+    .map(Number) as [number, number, number, number, number, number];
+  if (month < 1 || month > 12 || day < 1 || day > 31) return null;
+  if (hour > 23 || minute > 59 || second > 59) return null;
+  return Date.UTC(year, month - 1, day, hour, minute, second) / 1000;
+}
+
+function companyDayNumber(epochSeconds: number, timezone: string) {
+  return Math.floor(
+    (epochSeconds + timezoneOffsetHours(timezone) * 3600) / 86_400,
+  );
+}
+
+/**
+ * Hari kalender perusahaan sejak respons terakhir klien. Respons "di masa
+ * depan" (jam perangkat lain lebih cepat) dihitung 0, bukan negatif.
+ */
+export function daysSinceResponse(
+  lastResponseAt: string,
+  nowEpochSeconds: number,
+  timezone: string,
+): number | null {
+  const last = parseStoredTimestamp(lastResponseAt);
+  if (last === null) return null;
+  return Math.max(
+    0,
+    companyDayNumber(nowEpochSeconds, timezone) -
+      companyDayNumber(last, timezone),
+  );
+}
+
+/** Segmen hanya untuk klien `LEAD` (D-09); selain itu `null`. */
+export function leadSegment(
+  lifecycleStatus: string,
+  days: number | null,
+): LeadSegment | null {
+  if (lifecycleStatus !== "LEAD" || days === null) return null;
+  if (days <= HOT_MAX_DAYS) return "HOT";
+  if (days <= WARM_MAX_DAYS) return "WARM";
+  return "COLD";
+}
+
+/**
+ * Waktu interaksi yang diminta (epoch detik) atau sekarang bila kosong.
+ * Mengembalikan pesan penolakan sebagai string supaya Rust dan TS memakai
+ * teks yang sama persis.
+ */
+export function resolveInteractionTime(
+  requested: unknown,
+  nowEpochSeconds: number,
+): { epoch: number } | { error: string } {
+  if (requested === undefined || requested === null) {
+    return { epoch: nowEpochSeconds };
+  }
+  if (typeof requested !== "number" || !Number.isSafeInteger(requested)) {
+    return { error: "The interaction time is not valid." };
+  }
+  if (requested > nowEpochSeconds + INTERACTION_FUTURE_TOLERANCE_SECONDS) {
+    return { error: "The interaction time cannot be in the future." };
+  }
+  if (requested < nowEpochSeconds - INTERACTION_MAX_AGE_SECONDS) {
+    return { error: "The interaction time cannot be more than a year ago." };
+  }
+  return { epoch: requested };
+}

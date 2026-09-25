@@ -21,6 +21,11 @@ export const PERMISSION_CATALOG = [
     name: "Manage master data",
     group: "Master data",
   },
+  // Lihat semua lead; catat interaksi hanya di lead sendiri. Memindahkan PIC
+  // sekaligus mencatat di lead siapa pun adalah `leads.reassign` (PRD OQ-34).
+  { key: "leads.view", name: "View leads", group: "Leads" },
+  { key: "leads.manage", name: "Manage own leads", group: "Leads" },
+  { key: "leads.reassign", name: "Reassign leads", group: "Leads" },
   // MENGAJUKAN reset password dan MENGAKTIFKAN 2FA untuk akun sendiri tidak
   // butuh izin apa pun: yang pertama memang terbuka tanpa sesi, yang kedua hak
   // setiap operator atas akunnya. Yang di-RBAC adalah membaca/menghapus jejak
@@ -145,6 +150,8 @@ export const DEFAULT_ROLE_PERMISSIONS: Record<
     "dashboard.view",
     "clients.view",
     "clients.manage",
+    "leads.view",
+    "leads.manage",
     "sync.view",
   ],
 };

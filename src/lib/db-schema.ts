@@ -14,7 +14,7 @@ import { runDatabaseMigrations } from "./db-migrations";
  * Rust DAN migrasi `ALTER TABLE` di `db-migrations.ts`, supaya klien mana pun
  * bisa menyembuhkan database buatan klien lain.
  */
-export const CURRENT_SCHEMA_VERSION = 3;
+export const CURRENT_SCHEMA_VERSION = 4;
 
 /** Tabel yang wajib ada sebelum database dianggap siap dipakai. */
 export const REQUIRED_TABLES = [
@@ -48,6 +48,8 @@ export const REQUIRED_TABLES = [
   "leads",
   "master_option",
   "device_tag_registry",
+  // Catatan follow up dan respons klien per lead (PRD FR-05), ikut sinkronisasi.
+  "lead_interactions",
 ] as const;
 
 export const REQUIRED_TABLE_COUNT = REQUIRED_TABLES.length;
@@ -335,6 +337,20 @@ export async function initDatabaseSchema(client: Client) {
       sort_order INTEGER NOT NULL DEFAULT 0,
       updated_at TEXT NOT NULL
       );`,
+    // Satu baris per follow up CS (`OUTBOUND`) atau respons klien (`INBOUND`).
+    // Ringkasan di `leads` diperbarui bersamaan, dengan aturan yang aman
+    // diulang, supaya dua perangkat offline yang mencatat di lead yang sama
+    // tidak saling menimpa (PRD FR-05.1, E-05).
+    `CREATE TABLE IF NOT EXISTS lead_interactions (
+      id TEXT PRIMARY KEY,
+      lead_id TEXT NOT NULL,
+      operator_id INTEGER,
+      direction TEXT NOT NULL,
+      kind TEXT NOT NULL,
+      notes TEXT NOT NULL,
+      occurred_at TEXT NOT NULL,
+      created_at TEXT NOT NULL
+      );`,
     // Cloud-only: tag dua karakter yang diterbitkan untuk setiap perangkat,
     // bagian `<KP>` dari kode klien. Tidak ikut sinkronisasi, jadi UNIQUE
     // di sini aman.
@@ -350,6 +366,7 @@ export async function initDatabaseSchema(client: Client) {
     `CREATE INDEX IF NOT EXISTS idx_clients_code ON clients(client_code);`,
     `CREATE INDEX IF NOT EXISTS idx_leads_client ON leads(client_id);`,
     `CREATE INDEX IF NOT EXISTS idx_master_option_kind ON master_option(kind, sort_order);`,
+    `CREATE INDEX IF NOT EXISTS idx_lead_interactions_lead ON lead_interactions(lead_id, occurred_at);`,
 
     // Seed role bawaan. TIDAK ADA akun bawaan: operator pertama hanya lahir
     // lewat provisioning sekali-pakai, sehingga tidak ada kredensial default
@@ -367,6 +384,9 @@ export async function initDatabaseSchema(client: Client) {
       ('clients.view', 'View clients', 'Clients', 'View clients and their leads.', 1, 30),
       ('clients.manage', 'Manage clients', 'Clients', 'Register new leads and edit client details.', 1, 40),
       ('master_data.manage', 'Manage master data', 'Master data', 'Maintain lead channels and product categories.', 1, 50),
+      ('leads.view', 'View leads', 'Leads', 'View leads, their interactions, and the Cold queue.', 1, 52),
+      ('leads.manage', 'Manage own leads', 'Leads', 'Record follow ups and client responses on your own leads.', 1, 54),
+      ('leads.reassign', 'Reassign leads', 'Leads', 'Move a lead to another CS and record on any lead.', 1, 56),
       ('password_reset.view', 'View password reset history', 'Operators', 'Review who requested a password recovery, with their verification photo.', 1, 62),
       ('password_reset.delete', 'Delete password reset history', 'Operators', 'Delete password recovery records and their photos.', 1, 64),
       ('two_factor.reset', 'Reset another operator''s 2FA', 'Operators', 'Turn off two-step verification for another operator who lost their phone.', 1, 66),
@@ -397,7 +417,8 @@ export async function initDatabaseSchema(client: Client) {
     `INSERT OR IGNORE INTO role_permission (role_id, permission_key, is_allowed, updated_at, updated_by)
       SELECT 3, permission_key, 1, datetime('now'), 'system' FROM app_permission
       WHERE permission_key IN (
-        'home.view', 'dashboard.view', 'clients.view', 'clients.manage', 'sync.view'
+        'home.view', 'dashboard.view', 'clients.view', 'clients.manage',
+        'leads.view', 'leads.manage', 'sync.view'
       );`,
 
     // `rbac_revision` WAJIB ada: nilainya yang dipakai Web dan perangkat untuk
