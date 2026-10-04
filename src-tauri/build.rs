@@ -231,7 +231,17 @@ fn expose_build_date() {
 }
 
 fn main() {
-    println!("cargo:rerun-if-changed=../.env");
+    // Cargo menganggap berkas yang dipantau tapi TIDAK ADA selalu berubah.
+    // Build rilis Mobile sengaja tanpa `.env` (APK tidak boleh membawa token),
+    // jadi pemantauan tanpa syarat menjalankan ulang build script di setiap
+    // build dan mengompilasi ulang crate aplikasi: sekitar 7 menit per putaran
+    // dengan LTO. Nilai dari environment tetap terpantau lewat
+    // `rerun-if-env-changed` di `expose_build_value`.
+    // ponytail: `.env` yang baru dibuat baru terbaca setelah `src` berubah
+    // atau `cargo clean -p <crate>`.
+    if PathBuf::from("../.env").exists() {
+        println!("cargo:rerun-if-changed=../.env");
+    }
     expose_build_date();
     let local = local_build_values();
     expose_build_value("TURSO_DATABASE_URL", &local);
