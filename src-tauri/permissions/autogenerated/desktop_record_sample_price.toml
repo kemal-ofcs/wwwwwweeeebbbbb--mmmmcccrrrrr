@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-desktop-record-sample-price"
+description = "Enables the desktop_record_sample_price command without any pre-configured scope."
+commands.allow = ["desktop_record_sample_price"]
+
+[[permission]]
+identifier = "deny-desktop-record-sample-price"
+description = "Denies the desktop_record_sample_price command without any pre-configured scope."
+commands.deny = ["desktop_record_sample_price"]

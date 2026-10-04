@@ -14,7 +14,7 @@ import { runDatabaseMigrations } from "./db-migrations";
  * Rust DAN migrasi `ALTER TABLE` di `db-migrations.ts`, supaya klien mana pun
  * bisa menyembuhkan database buatan klien lain.
  */
-export const CURRENT_SCHEMA_VERSION = 9;
+export const CURRENT_SCHEMA_VERSION = 10;
 
 /** Tabel yang wajib ada sebelum database dianggap siap dipakai. */
 export const REQUIRED_TABLES = [
@@ -57,6 +57,10 @@ export const REQUIRED_TABLES = [
   "sample_requests",
   "sample_feedbacks",
   "sample_status_log",
+  // Formula per sampel yang selesai dibuat RnD (v2.1, PRD F-14), ikut sinkronisasi.
+  "sample_formulas",
+  // Harga Finance per iterasi tiket (v2.2, PRD F-16), ikut sinkronisasi.
+  "pricing_formulas",
   // Foto (PRD F-07). Isi gambar tidak pernah ikut snapshot perangkat.
   "media_asset",
   // Notifikasi divisi (PRD FR-08). Ketiganya cloud-only.
@@ -135,6 +139,24 @@ export const SAMPLE_PERMISSION_SEED_SQL = [
 export const NOTIFICATION_PERMISSION_SEED_SQL = [
   "INSERT OR IGNORE INTO role_permission (role_id, permission_key, is_allowed, updated_at, updated_by) SELECT r.id, p.permission_key, 1, datetime('now'), 'system' FROM app_role r JOIN app_permission p ON (r.role_key = 'cs' AND p.permission_key = 'notifications_cs.view') OR (r.role_key = 'rnd' AND p.permission_key = 'notifications_rnd.view') OR (r.role_key = 'finance' AND p.permission_key = 'notifications_finance.view') WHERE r.role_key IN ('cs', 'rnd', 'finance') AND NOT EXISTS (SELECT 1 FROM setting_gex_system WHERE key = 'notification_permissions_seeded');",
   "INSERT OR IGNORE INTO setting_gex_system (key, value) VALUES ('notification_permissions_seeded', '1');",
+];
+
+/**
+ * Izin RnD (v2.1, PRD F-14) untuk role divisi RnD, sekali saja. WAJIB identik
+ * dengan seed yang sama di `turso.rs` (dites per karakter).
+ */
+export const RND_PERMISSION_SEED_SQL = [
+  "INSERT OR IGNORE INTO role_permission (role_id, permission_key, is_allowed, updated_at, updated_by) SELECT r.id, p.permission_key, 1, datetime('now'), 'system' FROM app_role r JOIN app_permission p ON p.permission_key IN ('rnd.manage', 'samples.view', 'clients.view') WHERE r.role_key = 'rnd' AND NOT EXISTS (SELECT 1 FROM setting_gex_system WHERE key = 'rnd_permissions_seeded');",
+  "INSERT OR IGNORE INTO setting_gex_system (key, value) VALUES ('rnd_permissions_seeded', '1');",
+];
+
+/**
+ * Izin Finance (v2.2, PRD F-15/F-16) untuk role divisi Finance, sekali saja.
+ * WAJIB identik dengan seed yang sama di `turso.rs` (dites per karakter).
+ */
+export const FINANCE_PERMISSION_SEED_SQL = [
+  "INSERT OR IGNORE INTO role_permission (role_id, permission_key, is_allowed, updated_at, updated_by) SELECT r.id, p.permission_key, 1, datetime('now'), 'system' FROM app_role r JOIN app_permission p ON p.permission_key IN ('finance.manage', 'pricing.view', 'samples.view', 'clients.view') WHERE r.role_key = 'finance' AND NOT EXISTS (SELECT 1 FROM setting_gex_system WHERE key = 'finance_permissions_seeded');",
+  "INSERT OR IGNORE INTO setting_gex_system (key, value) VALUES ('finance_permissions_seeded', '1');",
 ];
 
 export async function initDatabaseSchema(client: Client) {
@@ -444,7 +466,9 @@ export async function initDatabaseSchema(client: Client) {
       status_changed_at TEXT NOT NULL,
       created_by INTEGER,
       created_at TEXT NOT NULL,
-      updated_at TEXT NOT NULL
+      updated_at TEXT NOT NULL,
+      rnd_reject_reason_option_id TEXT NOT NULL DEFAULT '',
+      revision_fee_idr INTEGER
       );`,
     // Satu baris per keputusan klien atas satu iterasi sampel (ACC/REVISE/REJECT).
     `CREATE TABLE IF NOT EXISTS sample_feedbacks (
@@ -466,6 +490,37 @@ export async function initDatabaseSchema(client: Client) {
       action TEXT NOT NULL,
       notes TEXT NOT NULL,
       on_behalf_of_division TEXT NOT NULL DEFAULT '',
+      recorded_by INTEGER,
+      recorded_at TEXT NOT NULL
+      );`,
+    // Formula per sampel yang selesai dibuat RnD (v2.1, PRD F-14), hanya-tambah.
+    // Satu baris per iterasi; `formula_code` sengaja tidak unik (produk
+    // Existing memakai ulang formula). `rnd_notes` = catatan langkahnya.
+    `CREATE TABLE IF NOT EXISTS sample_formulas (
+      id TEXT PRIMARY KEY,
+      sample_request_id TEXT NOT NULL,
+      iteration_number INTEGER NOT NULL,
+      formula_code TEXT NOT NULL,
+      product_knowledge TEXT NOT NULL DEFAULT '',
+      rnd_notes TEXT NOT NULL DEFAULT '',
+      recorded_by INTEGER,
+      recorded_at TEXT NOT NULL
+      );`,
+    // Harga Finance per iterasi tiket (v2.2, PRD F-16), hanya-tambah; baris
+    // terbaru per iterasi yang berlaku. Rincian biaya hanya dibaca pemegang
+    // `pricing.view`; yang lain menerima harga jualnya saja.
+    `CREATE TABLE IF NOT EXISTS pricing_formulas (
+      id TEXT PRIMARY KEY,
+      sample_request_id TEXT NOT NULL,
+      iteration_number INTEGER NOT NULL,
+      raw_material_cost_idr INTEGER NOT NULL,
+      packaging_cost_idr INTEGER NOT NULL,
+      operational_cost_idr INTEGER NOT NULL,
+      regulatory_cost_idr INTEGER NOT NULL DEFAULT 0,
+      hpp_unit_idr INTEGER NOT NULL,
+      margin_bp INTEGER NOT NULL,
+      final_unit_price_idr INTEGER NOT NULL,
+      notes TEXT NOT NULL DEFAULT '',
       recorded_by INTEGER,
       recorded_at TEXT NOT NULL
       );`,
@@ -534,6 +589,8 @@ export async function initDatabaseSchema(client: Client) {
     `CREATE INDEX IF NOT EXISTS idx_sample_requests_client ON sample_requests(client_id);`,
     `CREATE INDEX IF NOT EXISTS idx_sample_feedbacks_request ON sample_feedbacks(sample_request_id, iteration_number);`,
     `CREATE INDEX IF NOT EXISTS idx_sample_status_log_request ON sample_status_log(sample_request_id, recorded_at);`,
+    `CREATE INDEX IF NOT EXISTS idx_sample_formulas_request ON sample_formulas(sample_request_id, iteration_number);`,
+    `CREATE INDEX IF NOT EXISTS idx_pricing_formulas_request ON pricing_formulas(sample_request_id, iteration_number);`,
     `CREATE INDEX IF NOT EXISTS idx_media_asset_owner ON media_asset(owner_type, owner_id);`,
     `CREATE INDEX IF NOT EXISTS idx_notification_outbox_due ON notification_outbox(status, next_attempt_at);`,
     `CREATE INDEX IF NOT EXISTS idx_notification_outbox_created ON notification_outbox(created_at);`,
@@ -558,7 +615,10 @@ export async function initDatabaseSchema(client: Client) {
       ('leads.manage', 'Manage own leads', 'Leads', 'Record follow ups and client responses on your own leads.', 1, 54),
       ('leads.reassign', 'Reassign leads', 'Leads', 'Move a lead to another CS and record on any lead.', 1, 56),
       ('samples.view', 'View sample requests', 'Samples', 'View sample requests and their history.', 1, 58),
-      ('samples.manage', 'Manage sample requests', 'Samples', 'Create sample requests and record each step, including on behalf of RnD and Finance.', 1, 59),
+      ('samples.manage', 'Manage sample requests', 'Samples', 'Create sample requests and record the CS steps of each request.', 1, 59),
+      ('rnd.manage', 'Record RnD decisions', 'Samples', 'Accept or reject sample requests, and record each finished sample with its formula.', 1, 60),
+      ('finance.manage', 'Record Finance decisions', 'Finance', 'Price finished samples, set revision fees, and record payments as received.', 1, 61),
+      ('pricing.view', 'View cost and margin', 'Finance', 'See the cost breakdown and margin behind each sample price.', 1, 61),
       ('password_reset.view', 'View password reset history', 'Operators', 'Review who requested a password recovery, with their verification photo.', 1, 62),
       ('password_reset.delete', 'Delete password reset history', 'Operators', 'Delete password recovery records and their photos.', 1, 64),
       ('two_factor.reset', 'Reset another operator''s 2FA', 'Operators', 'Turn off two-step verification for another operator who lost their phone.', 1, 66),
@@ -613,6 +673,10 @@ export async function initDatabaseSchema(client: Client) {
     ...SAMPLE_PERMISSION_SEED_SQL,
     // Izin lonceng per divisi (PRD FR-08), sekali saja.
     ...NOTIFICATION_PERMISSION_SEED_SQL,
+    // Izin RnD (v2.1), sekali saja.
+    ...RND_PERMISSION_SEED_SQL,
+    // Izin Finance (v2.2), sekali saja.
+    ...FINANCE_PERMISSION_SEED_SQL,
 
     // Angka 1 di sini disengaja dan TIDAK boleh diikatkan ke
     // `CURRENT_SCHEMA_VERSION`: baris ini menandai fondasi versi 1, sedangkan

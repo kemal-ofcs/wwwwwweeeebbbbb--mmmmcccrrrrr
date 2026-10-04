@@ -111,7 +111,7 @@ describe("foto tiket, jalur Web", () => {
       ADMIN,
     );
     expect(saved.byte_size).toBe(16);
-    const detail = await samples.getSampleRequest(client, freeSample);
+    const detail = await samples.getSampleRequest(client, freeSample, true);
     expect(detail.media).toEqual([
       expect.objectContaining({
         id: saved.id,

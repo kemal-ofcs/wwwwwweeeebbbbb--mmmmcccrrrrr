@@ -4,7 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type Client, createClient } from "@libsql/client";
 import {
+  FINANCE_PERMISSION_SEED_SQL,
   initDatabaseSchema,
+  RND_PERMISSION_SEED_SQL,
   SAMPLE_PERMISSION_SEED_SQL,
 } from "@/lib/db-schema";
 import * as rules from "@/lib/validations/sample";
@@ -22,6 +24,7 @@ let client: Client;
 let directory: string;
 let categoryId: string;
 let channelId: string;
+let reasonId: string;
 
 function rustSource(file: string) {
   const path = ["desktop", "mobile"]
@@ -70,11 +73,39 @@ function draft(clientId: string, overrides: Record<string, unknown> = {}) {
   };
 }
 
+// Isian RnD bawaan per langkah (v2.1); `extra.rnd` menggantinya.
+function rndFor(action: string) {
+  if (action === "RND_ACCEPT") return { product_class: "NEW" };
+  if (action === "RND_REJECT") return { reject_reason_option_id: reasonId };
+  if (action === "SAMPLE_READY")
+    return { formula_code: "FRM-001", product_knowledge: "Light gel" };
+  return {};
+}
+
 async function step(id: string, action: string, extra = {}) {
   return samples.recordSampleStep(
     client,
-    { id, action, notes: `Step ${action}`, ...extra },
+    { id, action, notes: `Step ${action}`, rnd: rndFor(action), ...extra },
     CS,
+  );
+}
+
+const FINANCE = { id: 1, role: "Finance" };
+const COSTS = {
+  raw_material_cost_idr: 8420,
+  packaging_cost_idr: 7850,
+  operational_cost_idr: 2450,
+  regulatory_cost_idr: 780,
+  margin_bp: 4000,
+  notes: "10k pcs",
+};
+
+// Harga Finance untuk iterasi yang sedang `SAMPLE_READY` (v2.2, gerbang D-27).
+async function price(id: string, overrides = {}) {
+  return samples.recordSamplePrice(
+    client,
+    { id, price: { ...COSTS, ...overrides } },
+    FINANCE,
   );
 }
 
@@ -105,6 +136,17 @@ beforeAll(async () => {
       ADMIN,
     )
   ).id;
+  reasonId = (
+    await clients.saveMasterOption(
+      client,
+      {
+        kind: "RND_REJECT_REASON",
+        code: "CAP",
+        label: "Factory machine capacity",
+      },
+      ADMIN,
+    )
+  ).id;
 });
 
 afterAll(() => {
@@ -127,12 +169,22 @@ describe("tiket sampel, jalur Web", () => {
       rules.SAMPLE_TRANSITION_SQL,
       rules.SAMPLE_STATUS_LOG_INSERT_SQL,
       rules.SAMPLE_FEEDBACK_INSERT_SQL,
+      rules.SAMPLE_FORMULA_INSERT_SQL,
+      rules.SAMPLE_FORMULAS_SQL,
+      rules.SAMPLE_FORMULA_MATCHES_SQL,
+      rules.SAMPLE_LIST_SQL,
+      rules.PRICE_INSERT_SQL,
+      rules.PRICES_SQL,
     ]) {
       expect(samplesRs).toContain(`"${sql}"`);
     }
     expect(samplesRs).toContain(`"${rules.SAMPLE_CHANGED_ELSEWHERE}"`);
     const tursoRs = rustSource("turso.rs");
-    for (const sql of SAMPLE_PERMISSION_SEED_SQL) {
+    for (const sql of [
+      ...SAMPLE_PERMISSION_SEED_SQL,
+      ...RND_PERMISSION_SEED_SQL,
+      ...FINANCE_PERMISSION_SEED_SQL,
+    ]) {
       expect(tursoRs).toContain(`"${sql}"`);
     }
   });
@@ -198,12 +250,14 @@ describe("tiket sampel, jalur Web", () => {
     });
     await step(id, "PAYMENT_RECEIVED");
     await step(id, "SAMPLE_READY");
+    await price(id);
     await step(id, "SAMPLE_SENT");
     expect(await step(id, "CLIENT_REVISE")).toEqual({
       status: "IN_RND",
       revision_index: 1,
     });
     await step(id, "SAMPLE_READY");
+    await price(id);
     await step(id, "SAMPLE_SENT");
     expect(await step(id, "CLIENT_REVISE")).toEqual({
       status: "PENDING_FEE_ASSESSMENT",
@@ -213,7 +267,7 @@ describe("tiket sampel, jalur Web", () => {
       rules.SAMPLE_STEP_NOT_ALLOWED,
     );
 
-    const detail = await samples.getSampleRequest(client, id);
+    const detail = await samples.getSampleRequest(client, id, true);
     expect(detail.request).toMatchObject({
       status: "PENDING_FEE_ASSESSMENT",
       revision_index: 2,
@@ -268,7 +322,7 @@ describe("tiket sampel, jalur Web", () => {
       },
       CS,
     );
-    const { request } = await samples.getSampleRequest(client, id);
+    const { request } = await samples.getSampleRequest(client, id, true);
     expect(request).toMatchObject({
       brand_name: "Aura Night",
       deadline_at: "2026-11-30",
@@ -337,6 +391,213 @@ describe("tiket sampel, jalur Web", () => {
     await expect(
       samples.createSampleRequest(client, draft("missing"), CS),
     ).rejects.toThrow("Client not found.");
+  });
+
+  test("langkah RnD: klasifikasi, alasan tolak, dan formula per iterasi", async () => {
+    const owner = await newClient("081200000008");
+    const { id } = await samples.createSampleRequest(
+      client,
+      draft(owner.id),
+      CS,
+    );
+    await step(id, "SUBMIT_TO_RND");
+    await expect(
+      step(id, "RND_ACCEPT", { lead_time_days: 7, rnd: {} }),
+    ).rejects.toThrow("Choose whether this is a new or an existing product.");
+    await step(id, "RND_ACCEPT", {
+      lead_time_days: 7,
+      rnd: { product_class: "EXISTING" },
+    });
+    await step(id, "PROCEED");
+    await expect(
+      step(id, "SAMPLE_READY", { rnd: { formula_code: "FRM-001" } }),
+    ).rejects.toThrow("Enter the product knowledge, up to 2000 characters.");
+    await step(id, "SAMPLE_READY", {
+      rnd: { formula_code: "FRM-RND-1", product_knowledge: "Light gel" },
+    });
+    await price(id);
+    await step(id, "SAMPLE_SENT");
+    await step(id, "CLIENT_REVISE");
+    await step(id, "SAMPLE_READY", {
+      rnd: { formula_code: "FRM-002", product_knowledge: "Thicker gel" },
+    });
+
+    const detail = await samples.getSampleRequest(client, id, true);
+    expect(detail.request).toMatchObject({ rnd_product_class: "EXISTING" });
+    expect(
+      detail.formulas.map((row) => [
+        row.iteration_number,
+        row.formula_code,
+        row.rnd_notes,
+      ]),
+    ).toEqual([
+      [1, "FRM-RND-1", "Step SAMPLE_READY"],
+      [2, "FRM-002", "Step SAMPLE_READY"],
+    ]);
+
+    // Kode formula tidak unik: tiket lain dengan kode yang sama ditautkan,
+    // tanpa membedakan huruf besar-kecil.
+    const other = await samples.createSampleRequest(
+      client,
+      draft(owner.id, { brand_name: "Aura Night" }),
+      CS,
+    );
+    await step(other.id, "SUBMIT_TO_RND");
+    await step(other.id, "RND_ACCEPT", { lead_time_days: 3 });
+    await step(other.id, "PROCEED");
+    await step(other.id, "SAMPLE_READY", {
+      rnd: { formula_code: "frm-rnd-1", product_knowledge: "Same base" },
+    });
+    const matches = await samples.getSampleRequest(client, other.id, true);
+    expect(
+      matches.formula_matches.map((row) => [
+        row.formula_code,
+        row.sample_request_id,
+      ]),
+    ).toEqual([["FRM-RND-1", id]]);
+
+    // Menolak wajib alasan aktif dari Master Data.
+    const rejected = await samples.createSampleRequest(
+      client,
+      draft(owner.id),
+      CS,
+    );
+    await step(rejected.id, "SUBMIT_TO_RND");
+    await expect(
+      step(rejected.id, "RND_REJECT", {
+        rnd: { reject_reason_option_id: categoryId },
+      }),
+    ).rejects.toThrow("Choose an active rejection reason.");
+    await step(rejected.id, "RND_REJECT");
+    const closed = await samples.getSampleRequest(client, rejected.id, true);
+    expect(closed.request).toMatchObject({
+      status: "RND_REJECTED",
+      rnd_reject_reason_option_id: reasonId,
+      rnd_product_class: "",
+    });
+  });
+
+  test("Finance: gerbang harga, tarif revisi, dan rincian HPP per izin", async () => {
+    const owner = await newClient("081200000009");
+    await clients.updateClient(
+      client,
+      {
+        id: owner.id,
+        name: "Aura Cosmetics",
+        phone: "081200000009",
+        channel_option_id: channelId,
+        product_category_option_id: categoryId,
+        free_revision_limit: 0,
+      },
+      ADMIN,
+    );
+    const { id } = await samples.createSampleRequest(
+      client,
+      draft(owner.id),
+      CS,
+    );
+    await step(id, "SUBMIT_TO_RND");
+    await expect(price(id)).rejects.toThrow(
+      "Only a sample that is ready can be priced.",
+    );
+    await step(id, "RND_ACCEPT", { lead_time_days: 5 });
+    await step(id, "PROCEED");
+    await step(id, "SAMPLE_READY");
+    await expect(step(id, "SAMPLE_SENT")).rejects.toThrow(
+      rules.SAMPLE_NOT_PRICED,
+    );
+    await expect(price(id, { margin_bp: 9600 })).rejects.toThrow(
+      "The margin must be from 0% to 95%.",
+    );
+    // Koreksi harga: baris terbaru untuk iterasi itu yang berlaku.
+    await price(id, { margin_bp: 3000 });
+    expect(await price(id)).toMatchObject({ final_unit_price_idr: 32_500 });
+    expect(
+      (await samples.getSampleRequest(client, id, true)).request,
+    ).toMatchObject({ unit_price_idr: 32_500 });
+    await step(id, "SAMPLE_SENT");
+
+    // Kuota 0: revisi pertama menunggu tarif Finance.
+    await step(id, "CLIENT_REVISE");
+    await expect(step(id, "SET_REVISION_FEE")).rejects.toThrow(
+      rules.REVISION_FEE_INVALID,
+    );
+    expect(
+      await step(id, "SET_REVISION_FEE", { revision_fee_idr: 750_000 }),
+    ).toEqual({ status: "WAITING_REVISION_PAYMENT", revision_index: 1 });
+    await step(id, "PAYMENT_RECEIVED");
+    await step(id, "SAMPLE_READY");
+    // Iterasi baru belum punya harga; harga iterasi 1 tidak berlaku lagi.
+    await expect(step(id, "SAMPLE_SENT")).rejects.toThrow(
+      rules.SAMPLE_NOT_PRICED,
+    );
+
+    const full = await samples.getSampleRequest(client, id, true);
+    expect(full.request).toMatchObject({
+      revision_fee_idr: 750_000,
+      unit_price_idr: null,
+    });
+    expect(full.prices[full.prices.length - 1]).toMatchObject({
+      iteration_number: 1,
+      hpp_unit_idr: 19_500,
+      margin_bp: 4000,
+      final_unit_price_idr: 32_500,
+      notes: "10k pcs",
+    });
+    // Tanpa `pricing.view`: harga jual tetap ada, rincian HPP dan margin tidak.
+    const limited = await samples.getSampleRequest(client, id, false);
+    const visible = limited.prices[limited.prices.length - 1] ?? {};
+    expect(visible).toMatchObject({ final_unit_price_idr: 32_500 });
+    for (const column of rules.PRICE_COST_COLUMNS) {
+      expect(column in visible).toBe(false);
+    }
+
+    const events = await client.execute({
+      sql: "SELECT event_type, target_division FROM notification_outbox WHERE payload_json LIKE ? ORDER BY created_at, rowid;",
+      args: [`%${id}%`],
+    });
+    const byEvent = events.rows.map((row) => [
+      String(row.event_type),
+      String(row.target_division),
+    ]);
+    expect(byEvent).toContainEqual(["SAMPLE_READY", "FINANCE"]);
+    expect(byEvent).toContainEqual(["SAMPLE_PRICED", "CS"]);
+    expect(byEvent).toContainEqual(["SAMPLE_REVISION_FEE", "CS"]);
+  });
+
+  test("izin Finance untuk role Finance, sekali saja", async () => {
+    const granted = await client.execute(
+      `SELECT rp.permission_key FROM app_role r JOIN role_permission rp ON rp.role_id = r.id AND rp.is_allowed = 1
+       WHERE r.role_key = 'finance' AND rp.permission_key IN ('finance.manage', 'pricing.view', 'samples.view', 'samples.manage', 'clients.view')
+       ORDER BY rp.permission_key;`,
+    );
+    expect(granted.rows.map((row) => String(row.permission_key))).toEqual([
+      "clients.view",
+      "finance.manage",
+      "pricing.view",
+      "samples.view",
+    ]);
+    const cs = await client.execute(
+      "SELECT COUNT(*) AS total FROM app_role r JOIN role_permission rp ON rp.role_id = r.id WHERE r.role_key = 'cs' AND rp.permission_key IN ('finance.manage', 'pricing.view');",
+    );
+    expect(Number(cs.rows[0]?.total)).toBe(0);
+  });
+
+  test("izin RnD untuk role RnD, sekali saja", async () => {
+    const granted = await client.execute(
+      `SELECT rp.permission_key FROM app_role r JOIN role_permission rp ON rp.role_id = r.id AND rp.is_allowed = 1
+       WHERE r.role_key = 'rnd' AND rp.permission_key IN ('rnd.manage', 'samples.view', 'samples.manage', 'clients.view')
+       ORDER BY rp.permission_key;`,
+    );
+    expect(granted.rows.map((row) => String(row.permission_key))).toEqual([
+      "clients.view",
+      "rnd.manage",
+      "samples.view",
+    ]);
+    const cs = await client.execute(
+      "SELECT COUNT(*) AS total FROM app_role r JOIN role_permission rp ON rp.role_id = r.id WHERE r.role_key = 'cs' AND rp.permission_key = 'rnd.manage';",
+    );
+    expect(Number(cs.rows[0]?.total)).toBe(0);
   });
 
   test("izin tiket untuk CS dan CRM, sekali saja", async () => {

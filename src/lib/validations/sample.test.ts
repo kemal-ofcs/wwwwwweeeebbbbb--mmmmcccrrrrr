@@ -1,18 +1,278 @@
 import { describe, expect, test } from "bun:test";
 import {
   applySampleAction,
+  computeUnitPrice,
+  formatRupiah,
   isCalendarDate,
+  REVISION_FEE_INVALID,
+  type RndStep,
   readBusinessSettings,
   SAMPLE_ACTIONS,
+  SAMPLE_NOT_PRICED,
   SAMPLE_STATUSES,
+  SAMPLE_STEP_NOT_ALLOWED,
   type SampleAction,
+  sampleActionPermission,
   TELEGRAM_CHAT_ID_INVALID,
   validateBusinessSettings,
+  validateRndStep,
   validateSampleDraft,
 } from "./sample";
 
 // Vektor kembar: `mod tests` di `src-tauri/src/desktop/samples.rs` memakai
 // masukan dan keluaran yang persis sama. Ubah keduanya bersamaan.
+
+describe("tarif revisi dan gerbang harga (tarif_revisi_dan_gerbang_harga)", () => {
+  const cases: [string, boolean, string, number | null, unknown][] = [
+    ["SAMPLE_READY", false, "SAMPLE_SENT", null, { error: SAMPLE_NOT_PRICED }],
+    ["SAMPLE_READY", true, "SAMPLE_SENT", null, ["SAMPLE_SENT", 2, null]],
+    ["DRAFT", false, "SAMPLE_SENT", null, { error: SAMPLE_STEP_NOT_ALLOWED }],
+    [
+      "PENDING_FEE_ASSESSMENT",
+      false,
+      "SET_REVISION_FEE",
+      750_000,
+      ["WAITING_REVISION_PAYMENT", 2, null],
+    ],
+    [
+      "PENDING_FEE_ASSESSMENT",
+      false,
+      "SET_REVISION_FEE",
+      0,
+      ["IN_RND", 2, false],
+    ],
+    [
+      "PENDING_FEE_ASSESSMENT",
+      false,
+      "SET_REVISION_FEE",
+      -1,
+      { error: REVISION_FEE_INVALID },
+    ],
+    [
+      "PENDING_FEE_ASSESSMENT",
+      false,
+      "SET_REVISION_FEE",
+      null,
+      { error: REVISION_FEE_INVALID },
+    ],
+    [
+      "IN_RND",
+      false,
+      "SET_REVISION_FEE",
+      1000,
+      { error: SAMPLE_STEP_NOT_ALLOWED },
+    ],
+  ];
+  for (const [status, hasPrice, action, fee, expected] of cases) {
+    test(`${status} + ${action} ${fee}`, () => {
+      const result = applySampleAction(
+        {
+          status,
+          is_paid_sample: false,
+          revision_index: 2,
+          free_revision_limit: 1,
+          has_price: hasPrice,
+        },
+        action as SampleAction,
+        null,
+        fee,
+      );
+      expect(
+        "error" in result
+          ? result
+          : [result.status, result.revision_index, result.is_billable],
+      ).toEqual(expected as never);
+    });
+  }
+});
+
+describe("harga satuan dan format rupiah (harga_satuan_dan_format_rupiah)", () => {
+  const price = (
+    raw: unknown,
+    packaging: unknown,
+    operational: unknown,
+    regulatory: unknown,
+    margin: unknown,
+  ) => {
+    const result = computeUnitPrice({
+      raw_material_cost_idr: raw,
+      packaging_cost_idr: packaging,
+      operational_cost_idr: operational,
+      regulatory_cost_idr: regulatory,
+      margin_bp: margin,
+      notes: " 10k pcs ",
+    });
+    return "error" in result
+      ? result
+      : [
+          result.price.hpp_unit_idr,
+          result.price.final_unit_price_idr,
+          result.price.notes,
+        ];
+  };
+  const costError = {
+    error: "Each cost must be a whole rupiah amount per unit.",
+  };
+  const cases: [unknown[], unknown][] = [
+    [
+      [8420, 7850, 2450, 780, 4000],
+      [19_500, 32_500, "10k pcs"],
+    ],
+    [
+      [100, 0, 0, 0, 3333],
+      [100, 150, "10k pcs"],
+    ],
+    [
+      [1, 0, 0, 0, 0],
+      [1, 1, "10k pcs"],
+    ],
+    [
+      [19_500, 0, 0, 0, 9500],
+      [19_500, 390_000, "10k pcs"],
+    ],
+    [[-1, 0, 0, 0, 0], costError],
+    [[1.5, 0, 0, 0, 0], costError],
+    [["100", 0, 0, 0, 0], costError],
+    [[1, 0, 0, null, 0], costError],
+    [[0, 0, 0, 0, 0], { error: "Enter at least one cost." }],
+    [[1, 0, 0, 0, 9501], { error: "The margin must be from 0% to 95%." }],
+    [[1, 0, 0, 0, null], { error: "The margin must be from 0% to 95%." }],
+  ];
+  for (const [args, expected] of cases) {
+    test(JSON.stringify(args), () => {
+      const [raw, packaging, operational, regulatory, margin] = args;
+      expect(price(raw, packaging, operational, regulatory, margin)).toEqual(
+        expected as never,
+      );
+    });
+  }
+  test("catatan paling banyak 1000 karakter", () => {
+    expect(
+      computeUnitPrice({
+        raw_material_cost_idr: 1,
+        packaging_cost_idr: 0,
+        operational_cost_idr: 0,
+        regulatory_cost_idr: 0,
+        margin_bp: 0,
+        notes: "n".repeat(1001),
+      }),
+    ).toEqual({ error: "Notes are up to 1000 characters." });
+  });
+  test("format rupiah", () => {
+    for (const [value, text] of [
+      [0, "Rp 0"],
+      [500, "Rp 500"],
+      [32_500, "Rp 32.500"],
+      [1_234_567, "Rp 1.234.567"],
+      [-5000, "-Rp 5.000"],
+    ] as const) {
+      expect(formatRupiah(value)).toBe(text);
+    }
+  });
+});
+
+describe("izin langkah dan isian RnD (izin_langkah_dan_isian_rnd)", () => {
+  test("izin per langkah", () => {
+    for (const [action, permission] of [
+      ["RND_ACCEPT", "rnd.manage"],
+      ["RND_REJECT", "rnd.manage"],
+      ["SAMPLE_READY", "rnd.manage"],
+      ["PAYMENT_RECEIVED", "finance.manage"],
+      ["SET_REVISION_FEE", "finance.manage"],
+      ["SUBMIT_TO_RND", "samples.manage"],
+      ["UNKNOWN", "samples.manage"],
+    ]) {
+      expect(sampleActionPermission(action)).toBe(permission as never);
+    }
+  });
+
+  const step = (
+    product_class: RndStep["product_class"],
+    reject_reason_option_id: string | null,
+    formula_code: string | null,
+    product_knowledge: string | null,
+  ) => ({
+    rnd: {
+      product_class,
+      reject_reason_option_id,
+      formula_code,
+      product_knowledge,
+    },
+  });
+  const cases: [string, unknown, unknown][] = [
+    ["RND_ACCEPT", { product_class: "NEW" }, step("NEW", null, null, null)],
+    [
+      "RND_ACCEPT",
+      { product_class: " EXISTING " },
+      step("EXISTING", null, null, null),
+    ],
+    [
+      "RND_ACCEPT",
+      { product_class: "new" },
+      { error: "Choose whether this is a new or an existing product." },
+    ],
+    [
+      "RND_ACCEPT",
+      {},
+      { error: "Choose whether this is a new or an existing product." },
+    ],
+    [
+      "RND_REJECT",
+      { reject_reason_option_id: "r1" },
+      step(null, "r1", null, null),
+    ],
+    [
+      "RND_REJECT",
+      { product_class: "NEW", reject_reason_option_id: "r1" },
+      step("NEW", "r1", null, null),
+    ],
+    [
+      "RND_REJECT",
+      { product_class: "OLD", reject_reason_option_id: "r1" },
+      { error: "Choose whether this is a new or an existing product." },
+    ],
+    [
+      "RND_REJECT",
+      { product_class: "NEW" },
+      { error: "Choose the reason RnD rejected the request." },
+    ],
+    [
+      "SAMPLE_READY",
+      { formula_code: " FRM-001 ", product_knowledge: "Gel, pH 5.5" },
+      step(null, null, "FRM-001", "Gel, pH 5.5"),
+    ],
+    [
+      "SAMPLE_READY",
+      { product_knowledge: "Gel" },
+      { error: "Enter the formula code, up to 60 characters." },
+    ],
+    [
+      "SAMPLE_READY",
+      { formula_code: "F".repeat(61), product_knowledge: "Gel" },
+      { error: "Enter the formula code, up to 60 characters." },
+    ],
+    [
+      "SAMPLE_READY",
+      { formula_code: "FRM-001", product_knowledge: "k".repeat(2001) },
+      { error: "Enter the product knowledge, up to 2000 characters." },
+    ],
+    [
+      "SAMPLE_SENT",
+      { product_class: "NEW", formula_code: "X" },
+      step(null, null, null, null),
+    ],
+    [
+      "RND_ACCEPT",
+      null,
+      { error: "Choose whether this is a new or an existing product." },
+    ],
+  ];
+  for (const [action, input, expected] of cases) {
+    test(`${action} ${JSON.stringify(input)}`, () => {
+      expect(validateRndStep(action, input)).toEqual(expected as never);
+    });
+  }
+});
 
 describe("readBusinessSettings", () => {
   const defaults = {
@@ -140,6 +400,7 @@ describe("applySampleAction", () => {
     is_paid_sample: false,
     revision_index: 0,
     free_revision_limit: 1,
+    has_price: true,
   };
   // [status, paid, revision_index, limit, action, lead time] → [status, index, billable, decision] | error
   const cases: [

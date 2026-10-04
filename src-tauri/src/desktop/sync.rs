@@ -23,7 +23,7 @@ use super::{
 /// `CURRENT_SCHEMA_VERSION` di `web-desktop/src/lib/db-schema.ts` setiap kali
 /// migrasi baru ditambahkan, karena keduanya membaca tabel `schema_migration`
 /// yang sama di Turso.
-pub const CLIENT_SCHEMA_VERSION: i64 = 9;
+pub const CLIENT_SCHEMA_VERSION: i64 = 10;
 
 /// Hanya `cloud > client` yang berbahaya; `cloud <= client` adalah kondisi normal.
 fn is_client_schema_outdated(cloud_version: i64) -> bool {
@@ -213,6 +213,8 @@ const SNAPSHOT_TABLES: &[SnapshotTable] = &[
             "created_by",
             "created_at",
             "updated_at",
+            "rnd_reject_reason_option_id",
+            "revision_fee_idr",
         ],
         conflict_column: "id",
         entity_column: "id",
@@ -271,6 +273,53 @@ const SNAPSHOT_TABLES: &[SnapshotTable] = &[
             "action",
             "notes",
             "on_behalf_of_division",
+            "recorded_by",
+            "recorded_at",
+        ],
+        conflict_column: "id",
+        entity_column: "id",
+        delete_missing: false,
+        read_only: false,
+    },
+    // Formula per sampel siap (v2.1), ikut event `sample/transition`.
+    SnapshotTable {
+        payload_key: "sampleFormulas",
+        domain: "sample",
+        table: "sample_formulas",
+        columns: &[
+            "id",
+            "sample_request_id",
+            "iteration_number",
+            "formula_code",
+            "product_knowledge",
+            "rnd_notes",
+            "recorded_by",
+            "recorded_at",
+        ],
+        conflict_column: "id",
+        entity_column: "id",
+        delete_missing: false,
+        read_only: false,
+    },
+    // Harga Finance per iterasi (v2.2), lewat event `sample/price`. Ikut
+    // snapshot supaya Finance bekerja offline; command dan route menyaring
+    // rincian biayanya untuk yang tidak memegang `pricing.view` (keputusan H).
+    SnapshotTable {
+        payload_key: "pricingFormulas",
+        domain: "sample",
+        table: "pricing_formulas",
+        columns: &[
+            "id",
+            "sample_request_id",
+            "iteration_number",
+            "raw_material_cost_idr",
+            "packaging_cost_idr",
+            "operational_cost_idr",
+            "regulatory_cost_idr",
+            "hpp_unit_idr",
+            "margin_bp",
+            "final_unit_price_idr",
+            "notes",
             "recorded_by",
             "recorded_at",
         ],
@@ -363,6 +412,7 @@ const CANONICAL_SYNC_ROUTES: &[(&str, &str)] = &[
     ("sample", "create"),
     ("sample", "update"),
     ("sample", "transition"),
+    ("sample", "price"),
     ("media", "upload"),
     // Log audit hanya-dorong: tidak ada di `SNAPSHOT_TABLES` karena tumbuh
     // tanpa batas dan hanya dibaca dari cloud (layar Audit).

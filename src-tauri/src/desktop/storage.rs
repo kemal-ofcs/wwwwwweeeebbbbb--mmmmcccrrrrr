@@ -312,7 +312,9 @@ pub fn initialize(path: &Path) -> Result<(), String> {
         status_changed_at TEXT NOT NULL,
         created_by INTEGER,
         created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL
+        updated_at TEXT NOT NULL,
+        rnd_reject_reason_option_id TEXT NOT NULL DEFAULT '',
+        revision_fee_idr INTEGER
       );
       CREATE TABLE IF NOT EXISTS sample_feedbacks (
         id TEXT PRIMARY KEY,
@@ -334,6 +336,37 @@ pub fn initialize(path: &Path) -> Result<(), String> {
         recorded_by INTEGER,
         recorded_at TEXT NOT NULL
       );
+      -- Formula per sampel yang selesai dibuat RnD (v2.1), hanya-tambah.
+      CREATE TABLE IF NOT EXISTS sample_formulas (
+        id TEXT PRIMARY KEY,
+        sample_request_id TEXT NOT NULL,
+        iteration_number INTEGER NOT NULL,
+        formula_code TEXT NOT NULL,
+        product_knowledge TEXT NOT NULL DEFAULT '',
+        rnd_notes TEXT NOT NULL DEFAULT '',
+        recorded_by INTEGER,
+        recorded_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_local_sample_formulas_request
+        ON sample_formulas(sample_request_id, iteration_number);
+      -- Harga Finance per iterasi tiket (v2.2), hanya-tambah.
+      CREATE TABLE IF NOT EXISTS pricing_formulas (
+        id TEXT PRIMARY KEY,
+        sample_request_id TEXT NOT NULL,
+        iteration_number INTEGER NOT NULL,
+        raw_material_cost_idr INTEGER NOT NULL,
+        packaging_cost_idr INTEGER NOT NULL,
+        operational_cost_idr INTEGER NOT NULL,
+        regulatory_cost_idr INTEGER NOT NULL DEFAULT 0,
+        hpp_unit_idr INTEGER NOT NULL,
+        margin_bp INTEGER NOT NULL,
+        final_unit_price_idr INTEGER NOT NULL,
+        notes TEXT NOT NULL DEFAULT '',
+        recorded_by INTEGER,
+        recorded_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_local_pricing_formulas_request
+        ON pricing_formulas(sample_request_id, iteration_number);
       -- Foto: data ringkas ditarik dari cloud; `data_base64` terisi untuk foto
       -- buatan perangkat ini dan foto yang pernah dibuka ('' = belum diambil).
       CREATE TABLE IF NOT EXISTS media_asset (
@@ -433,6 +466,21 @@ pub fn initialize(path: &Path) -> Result<(), String> {
     ] {
         ensure_column(&connection, "desktop_sync_outbox", column, sql)?;
     }
+    // Alasan RnD menolak tiket (v2.1, PRD E-23), untuk cache yang dibuat
+    // sebelum kolom ini ada.
+    ensure_column(
+        &connection,
+        "sample_requests",
+        "rnd_reject_reason_option_id",
+        "ALTER TABLE sample_requests ADD COLUMN rnd_reject_reason_option_id TEXT NOT NULL DEFAULT '';",
+    )?;
+    // Tarif revisi dari Finance (v2.2, PRD F-15).
+    ensure_column(
+        &connection,
+        "sample_requests",
+        "revision_fee_idr",
+        "ALTER TABLE sample_requests ADD COLUMN revision_fee_idr INTEGER;",
+    )?;
 
     Ok(())
 }
@@ -453,6 +501,8 @@ const CLOUD_MIRRORED_TABLES: &[&str] = &[
     "sample_requests",
     "sample_feedbacks",
     "sample_status_log",
+    "sample_formulas",
+    "pricing_formulas",
     "media_asset",
 ];
 
@@ -767,6 +817,8 @@ mod tests {
             "sample_requests",
             "sample_feedbacks",
             "sample_status_log",
+            "sample_formulas",
+            "pricing_formulas",
             "media_asset",
             "setting_gex_system",
             "desktop_sync_outbox",

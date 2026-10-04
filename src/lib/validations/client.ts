@@ -29,6 +29,8 @@ export const MASTER_OPTION_KINDS = [
   "SAMPLE_KIND",
   "FORMULATION_TYPE",
   "REGISTRATION_CATEGORY",
+  // Alasan RnD menolak tiket (v2.1, PRD E-23), wajib dipilih saat menolak.
+  "RND_REJECT_REASON",
 ] as const;
 export type MasterOptionKind = (typeof MASTER_OPTION_KINDS)[number];
 

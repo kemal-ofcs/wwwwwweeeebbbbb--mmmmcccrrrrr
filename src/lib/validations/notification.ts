@@ -14,6 +14,7 @@ import {
   timezoneOffsetHours,
   utcTimestamp,
 } from "./client";
+import { formatRupiah } from "./sample";
 
 export const NOTIFICATION_DIVISIONS = ["CS", "RND", "FINANCE"] as const;
 export type NotificationDivision = (typeof NOTIFICATION_DIVISIONS)[number];
@@ -31,6 +32,13 @@ export const NOTIFICATION_EVENT_TYPES = [
   "SAMPLE_RND_REVIEW",
   "SAMPLE_WAITING_PAYMENT",
   "SAMPLE_PENDING_FEE",
+  // Hasil langkah RnD untuk grup CS (v2.1, PRD F-14 dan E-23).
+  "SAMPLE_RND_ACCEPTED",
+  "SAMPLE_RND_REJECTED",
+  "SAMPLE_READY",
+  // Finance (v2.2, PRD F-15/F-16): tarif revisi dan harga untuk grup CS.
+  "SAMPLE_REVISION_FEE",
+  "SAMPLE_PRICED",
 ] as const;
 export type NotificationEventType = (typeof NOTIFICATION_EVENT_TYPES)[number];
 
@@ -130,6 +138,11 @@ function text(payload: Payload, key: string) {
     : "";
 }
 
+function rupiah(payload: Payload, key: string) {
+  const value = payload[key];
+  return typeof value === "number" ? formatRupiah(value) : "-";
+}
+
 function orDash(value: string) {
   return value.trim() === "" ? "-" : value;
 }
@@ -165,6 +178,36 @@ export function renderNotification(
       return [
         `Revision ${text(payload, "revision_index")} is over the free quota and needs a fee decision: ${sample}`,
         `Since ${when}`,
+      ].join("\n");
+    case "SAMPLE_RND_ACCEPTED":
+      return [
+        `RnD accepted the sample request: ${sample}`,
+        `Sample lead time: ${orDash(text(payload, "lead_time_days"))} days`,
+        `Accepted ${when}`,
+      ].join("\n");
+    case "SAMPLE_RND_REJECTED":
+      return [
+        `RnD rejected the sample request: ${sample}`,
+        `Reason: ${orDash(text(payload, "reject_reason"))}`,
+        `Rejected ${when}`,
+      ].join("\n");
+    case "SAMPLE_READY":
+      return [
+        `Sample ready and waiting for a price: ${sample}`,
+        `Deadline: ${orDash(text(payload, "deadline_at"))}`,
+        `Ready ${when}`,
+      ].join("\n");
+    case "SAMPLE_REVISION_FEE":
+      return [
+        `Revision ${text(payload, "revision_index")} fee set at ${rupiah(payload, "revision_fee_idr")}: ${sample}`,
+        "Ask the client to pay it.",
+        `Set ${when}`,
+      ].join("\n");
+    case "SAMPLE_PRICED":
+      return [
+        `Price ready, the sample can be sent: ${sample}`,
+        `Unit price: ${rupiah(payload, "unit_price_idr")}`,
+        `Priced ${when}`,
       ].join("\n");
     case "COLD_DIGEST": {
       const leads = Array.isArray(payload.leads)
@@ -204,10 +247,18 @@ export const NOTIFY_LEAD_NEW_SQL =
 
 /**
  * ?1 = id baris `sample_status_log` langkah ini, ?2 = sample id. Aman dipanggil
- * setelah setiap langkah: status di luar tiga status target tidak menulis apa pun.
+ * setelah setiap langkah: status di luar enam status target tidak menulis apa
+ * pun. Antrean RnD ke grup RnD, tagihan ke Finance, hasil RnD ke CS.
  */
 export const NOTIFY_SAMPLE_STATUS_SQL =
-  "INSERT INTO notification_outbox (id, event_type, target_division, payload_json, occurred_at, status, attempts, next_attempt_at, created_at) SELECT 'sample:' || ?1, CASE s.status WHEN 'RND_REVIEW' THEN 'SAMPLE_RND_REVIEW' WHEN 'WAITING_SAMPLE_PAYMENT' THEN 'SAMPLE_WAITING_PAYMENT' ELSE 'SAMPLE_PENDING_FEE' END, CASE s.status WHEN 'RND_REVIEW' THEN 'RND' ELSE 'FINANCE' END, json_object('sample_id', s.id, 'client_code', COALESCE(c.client_code, ''), 'client_name', COALESCE(c.name, ''), 'brand_name', s.brand_name, 'revision_index', s.revision_index, 'deadline_at', s.deadline_at), s.status_changed_at, CASE WHEN EXISTS (SELECT 1 FROM telegram_config t WHERE t.id = 'default' AND t.is_active = 1 AND TRIM(COALESCE(t.bot_token, '')) <> '') AND TRIM(COALESCE((SELECT g.value FROM setting_gex_system g WHERE g.key = CASE s.status WHEN 'RND_REVIEW' THEN 'telegram_chat_id_rnd' ELSE 'telegram_chat_id_finance' END), '')) <> '' THEN 'PENDING' ELSE 'SKIPPED' END, 0, datetime('now'), datetime('now') FROM sample_requests s LEFT JOIN clients c ON c.id = s.client_id WHERE s.id = ?2 AND s.status IN ('RND_REVIEW', 'WAITING_SAMPLE_PAYMENT', 'PENDING_FEE_ASSESSMENT') LIMIT 1 ON CONFLICT(id) DO NOTHING;";
+  "INSERT INTO notification_outbox (id, event_type, target_division, payload_json, occurred_at, status, attempts, next_attempt_at, created_at) SELECT 'sample:' || ?1, CASE s.status WHEN 'RND_REVIEW' THEN 'SAMPLE_RND_REVIEW' WHEN 'WAITING_SAMPLE_PAYMENT' THEN 'SAMPLE_WAITING_PAYMENT' WHEN 'PENDING_FEE_ASSESSMENT' THEN 'SAMPLE_PENDING_FEE' WHEN 'RND_ACCEPTED' THEN 'SAMPLE_RND_ACCEPTED' WHEN 'RND_REJECTED' THEN 'SAMPLE_RND_REJECTED' WHEN 'WAITING_REVISION_PAYMENT' THEN 'SAMPLE_REVISION_FEE' ELSE 'SAMPLE_READY' END, CASE WHEN s.status = 'RND_REVIEW' THEN 'RND' WHEN s.status IN ('WAITING_SAMPLE_PAYMENT', 'PENDING_FEE_ASSESSMENT', 'SAMPLE_READY') THEN 'FINANCE' ELSE 'CS' END, json_object('sample_id', s.id, 'client_code', COALESCE(c.client_code, ''), 'client_name', COALESCE(c.name, ''), 'brand_name', s.brand_name, 'revision_index', s.revision_index, 'deadline_at', s.deadline_at, 'lead_time_days', s.rnd_lead_time_days, 'reject_reason', COALESCE(r.label, ''), 'revision_fee_idr', s.revision_fee_idr), s.status_changed_at, CASE WHEN EXISTS (SELECT 1 FROM telegram_config t WHERE t.id = 'default' AND t.is_active = 1 AND TRIM(COALESCE(t.bot_token, '')) <> '') AND TRIM(COALESCE((SELECT g.value FROM setting_gex_system g WHERE g.key = CASE WHEN s.status = 'RND_REVIEW' THEN 'telegram_chat_id_rnd' WHEN s.status IN ('WAITING_SAMPLE_PAYMENT', 'PENDING_FEE_ASSESSMENT', 'SAMPLE_READY') THEN 'telegram_chat_id_finance' ELSE 'telegram_chat_id_cs' END), '')) <> '' THEN 'PENDING' ELSE 'SKIPPED' END, 0, datetime('now'), datetime('now') FROM sample_requests s LEFT JOIN clients c ON c.id = s.client_id LEFT JOIN master_option r ON r.id = s.rnd_reject_reason_option_id WHERE s.id = ?2 AND s.status IN ('RND_REVIEW', 'WAITING_SAMPLE_PAYMENT', 'PENDING_FEE_ASSESSMENT', 'RND_ACCEPTED', 'RND_REJECTED', 'SAMPLE_READY', 'WAITING_REVISION_PAYMENT') LIMIT 1 ON CONFLICT(id) DO NOTHING;";
+
+/**
+ * Harga Finance tersimpan (v2.2): grup CS boleh mengirim sampel. ?1 = id baris
+ * `pricing_formulas`; ditulis di transaksi yang sama dengan harganya.
+ */
+export const NOTIFY_SAMPLE_PRICED_SQL =
+  "INSERT INTO notification_outbox (id, event_type, target_division, payload_json, occurred_at, status, attempts, next_attempt_at, created_at) SELECT 'price:' || p.id, 'SAMPLE_PRICED', 'CS', json_object('sample_id', s.id, 'client_code', COALESCE(c.client_code, ''), 'client_name', COALESCE(c.name, ''), 'brand_name', s.brand_name, 'unit_price_idr', p.final_unit_price_idr, 'iteration_number', p.iteration_number), p.recorded_at, CASE WHEN EXISTS (SELECT 1 FROM telegram_config t WHERE t.id = 'default' AND t.is_active = 1 AND TRIM(COALESCE(t.bot_token, '')) <> '') AND TRIM(COALESCE((SELECT g.value FROM setting_gex_system g WHERE g.key = 'telegram_chat_id_cs'), '')) <> '' THEN 'PENDING' ELSE 'SKIPPED' END, 0, datetime('now'), datetime('now') FROM pricing_formulas p JOIN sample_requests s ON s.id = p.sample_request_id LEFT JOIN clients c ON c.id = s.client_id WHERE p.id = ?1 LIMIT 1 ON CONFLICT(id) DO NOTHING;";
 
 /** Ringkasan Cold yang sudah ada untuk satu tanggal, dan tanggal ringkasan terakhir. */
 export const COLD_DIGEST_STATE_SQL =

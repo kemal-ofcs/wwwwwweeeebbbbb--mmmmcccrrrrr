@@ -38,6 +38,7 @@ const KIND_LABEL: Record<string, string> = {
   SAMPLE_KIND: "sample kind",
   FORMULATION_TYPE: "formulation type",
   REGISTRATION_CATEGORY: "registration category",
+  RND_REJECT_REASON: "RnD rejection reason",
 };
 
 type Summary = Record<string, unknown>;

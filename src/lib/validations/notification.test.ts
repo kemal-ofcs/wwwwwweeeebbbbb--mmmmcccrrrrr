@@ -141,6 +141,66 @@ describe("notifikasi divisi", () => {
     ).toBe(
       "Revision 2 is over the free quota and needs a fee decision: Aura Glow for Aura Beauty (KLN-20261003-WB01)\nSince 2026-10-03 14:05 WIB",
     );
+    const rnd = {
+      ...sample,
+      lead_time_days: 14,
+      reject_reason: "Factory machine capacity",
+    };
+    expect(
+      renderNotification(
+        "SAMPLE_RND_ACCEPTED",
+        rnd,
+        "2026-10-03 07:05:00",
+        "Asia/Jakarta",
+      ),
+    ).toBe(
+      "RnD accepted the sample request: Aura Glow for Aura Beauty (KLN-20261003-WB01)\nSample lead time: 14 days\nAccepted 2026-10-03 14:05 WIB",
+    );
+    expect(
+      renderNotification(
+        "SAMPLE_RND_REJECTED",
+        rnd,
+        "2026-10-03 07:05:00",
+        "Asia/Jakarta",
+      ),
+    ).toBe(
+      "RnD rejected the sample request: Aura Glow for Aura Beauty (KLN-20261003-WB01)\nReason: Factory machine capacity\nRejected 2026-10-03 14:05 WIB",
+    );
+    expect(
+      renderNotification(
+        "SAMPLE_READY",
+        sample,
+        "2026-10-03 07:05:00",
+        "Asia/Jakarta",
+      ),
+    ).toBe(
+      "Sample ready and waiting for a price: Aura Glow for Aura Beauty (KLN-20261003-WB01)\nDeadline: 2026-10-31\nReady 2026-10-03 14:05 WIB",
+    );
+    const money = {
+      ...sample,
+      revision_fee_idr: 750_000,
+      unit_price_idr: 32_500,
+    };
+    expect(
+      renderNotification(
+        "SAMPLE_REVISION_FEE",
+        money,
+        "2026-10-03 07:05:00",
+        "Asia/Jakarta",
+      ),
+    ).toBe(
+      "Revision 2 fee set at Rp 750.000: Aura Glow for Aura Beauty (KLN-20261003-WB01)\nAsk the client to pay it.\nSet 2026-10-03 14:05 WIB",
+    );
+    expect(
+      renderNotification(
+        "SAMPLE_PRICED",
+        money,
+        "2026-10-03 07:05:00",
+        "Asia/Jakarta",
+      ),
+    ).toBe(
+      "Price ready, the sample can be sent: Aura Glow for Aura Beauty (KLN-20261003-WB01)\nUnit price: Rp 32.500\nPriced 2026-10-03 14:05 WIB",
+    );
     const digest = {
       date: "2026-10-10",
       leads: [

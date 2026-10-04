@@ -131,6 +131,18 @@ const COLUMN_MIGRATIONS: readonly ColumnMigration[] = [
     column: "device_label",
     sql: "ALTER TABLE app_session ADD COLUMN device_label TEXT NOT NULL DEFAULT '';",
   },
+  // Alasan RnD menolak tiket (v2.1, PRD E-23).
+  {
+    table: "sample_requests",
+    column: "rnd_reject_reason_option_id",
+    sql: "ALTER TABLE sample_requests ADD COLUMN rnd_reject_reason_option_id TEXT NOT NULL DEFAULT '';",
+  },
+  // Tarif revisi dari Finance (v2.2, PRD F-15); NULL = belum ditetapkan.
+  {
+    table: "sample_requests",
+    column: "revision_fee_idr",
+    sql: "ALTER TABLE sample_requests ADD COLUMN revision_fee_idr INTEGER;",
+  },
 ];
 
 async function tableExists(client: Client, table: string) {
@@ -269,6 +281,17 @@ export async function runDatabaseMigrations(client: Client) {
   await client.execute({
     sql: `INSERT OR IGNORE INTO schema_migration (version, name, applied_at)
           VALUES (9, 'telegram-notifications', ?);`,
+    args: [new Date().toISOString()],
+  });
+
+  // Versi 10: layar kerja RnD dan harga Finance (v2.1 + v2.2, PRD F-14 s/d
+  // F-16): tabel `sample_formulas` dan `pricing_formulas` (DDL awal), kolom
+  // `sample_requests.rnd_reject_reason_option_id` dan `revision_fee_idr`
+  // (`COLUMN_MIGRATIONS`), izin `rnd.manage`, `finance.manage`, dan
+  // `pricing.view`. Nomor dan nama WAJIB sama dengan `turso.rs`.
+  await client.execute({
+    sql: `INSERT OR IGNORE INTO schema_migration (version, name, applied_at)
+          VALUES (10, 'rnd-and-pricing', ?);`,
     args: [new Date().toISOString()],
   });
 }

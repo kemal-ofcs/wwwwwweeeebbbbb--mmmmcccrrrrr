@@ -19,6 +19,8 @@ pub const MASTER_OPTION_KINDS: &[&str] = &[
     "SAMPLE_KIND",
     "FORMULATION_TYPE",
     "REGISTRATION_CATEGORY",
+    // Alasan RnD menolak tiket (v2.1, PRD E-23), wajib dipilih saat menolak.
+    "RND_REJECT_REASON",
 ];
 
 pub const CLIENT_NAME_MIN: usize = 2;

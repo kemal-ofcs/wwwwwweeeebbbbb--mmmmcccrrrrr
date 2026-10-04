@@ -273,18 +273,32 @@ pub const SAMPLE_ACTIONS: &[&str] = &[
     "CLIENT_REVISE",
     "CLIENT_REJECT",
     "CANCEL",
+    // Finance menetapkan tarif revisi di luar kuota (v2.2, PRD F-15).
+    "SET_REVISION_FEE",
 ];
 
 pub const SAMPLE_NOTES_MAX: usize = 1000;
 pub const RND_LEAD_TIME_MAX_DAYS: i64 = 365;
 pub const SAMPLE_STEP_NOT_ALLOWED: &str = "This step is not allowed from the current status.";
+pub const SAMPLE_NOT_PRICED: &str = "Finance has not priced this sample yet.";
+pub const REVISION_FEE_INVALID: &str = "Enter the revision fee in whole rupiah (0 waives it).";
 
 /// Padanan `SAMPLE_ACTION_DIVISION`: divisi yang sebenarnya memutuskan.
 pub fn sample_action_division(action: &str) -> Option<&'static str> {
     match action {
         "RND_ACCEPT" | "RND_REJECT" | "SAMPLE_READY" => Some("RnD"),
-        "PAYMENT_RECEIVED" => Some("Finance"),
+        "PAYMENT_RECEIVED" | "SET_REVISION_FEE" => Some("Finance"),
         _ => None,
+    }
+}
+
+/// Padanan `sampleActionPermission`: langkah RnD milik `rnd.manage` (v2.1),
+/// langkah Finance milik `finance.manage` (v2.2), sisanya `samples.manage`.
+pub fn sample_action_permission(action: &str) -> &'static str {
+    match action {
+        "RND_ACCEPT" | "RND_REJECT" | "SAMPLE_READY" => "rnd.manage",
+        "PAYMENT_RECEIVED" | "SET_REVISION_FEE" => "finance.manage",
+        _ => "samples.manage",
     }
 }
 
@@ -294,6 +308,8 @@ pub struct SampleActionState<'a> {
     pub is_paid_sample: bool,
     pub revision_index: i64,
     pub free_revision_limit: i64,
+    /// Iterasi yang sedang berjalan sudah diberi harga Finance (D-27).
+    pub has_price: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -309,6 +325,7 @@ pub fn apply_sample_action(
     state: &SampleActionState<'_>,
     action: &str,
     lead_time_days: Option<i64>,
+    revision_fee_idr: Option<i64>,
 ) -> Result<SampleActionResult, &'static str> {
     let step = |from: &[&str], status: &'static str| -> Result<SampleActionResult, &'static str> {
         if from.contains(&state.status) {
@@ -340,7 +357,26 @@ pub fn apply_sample_action(
         ),
         "PAYMENT_RECEIVED" => step(&["WAITING_SAMPLE_PAYMENT", "WAITING_REVISION_PAYMENT"], "IN_RND"),
         "SAMPLE_READY" => step(&["IN_RND"], "SAMPLE_READY"),
-        "SAMPLE_SENT" => step(&["SAMPLE_READY"], "SAMPLE_SENT"),
+        "SAMPLE_SENT" => {
+            if state.status == "SAMPLE_READY" && !state.has_price {
+                return Err(SAMPLE_NOT_PRICED);
+            }
+            step(&["SAMPLE_READY"], "SAMPLE_SENT")
+        }
+        "SET_REVISION_FEE" => {
+            if state.status != "PENDING_FEE_ASSESSMENT" {
+                return Err(SAMPLE_STEP_NOT_ALLOWED);
+            }
+            let fee = revision_fee_idr
+                .filter(|fee| (0..=SAMPLE_BUDGET_MAX).contains(fee))
+                .ok_or(REVISION_FEE_INVALID)?;
+            Ok(SampleActionResult {
+                status: if fee == 0 { "IN_RND" } else { "WAITING_REVISION_PAYMENT" },
+                revision_index: state.revision_index,
+                is_billable: (fee == 0).then_some(false),
+                client_decision: None,
+            })
+        }
         "CLIENT_ACC" => step(&["SAMPLE_SENT"], "CLIENT_ACC").map(|result| SampleActionResult {
             client_decision: Some("ACC"),
             ..result
@@ -382,6 +418,140 @@ pub fn apply_sample_action(
 pub fn normalize_sample_notes(value: &str) -> Option<String> {
     let notes = value.trim();
     (!notes.is_empty() && notes.chars().count() <= SAMPLE_NOTES_MAX).then(|| notes.to_owned())
+}
+
+// ---------------------------------------------------------------------------
+// Isian langkah RnD (v2.1, PRD F-14). Padanan `validateRndStep`.
+// ---------------------------------------------------------------------------
+
+pub const RND_PRODUCT_CLASSES: &[&str] = &["NEW", "EXISTING"];
+pub const FORMULA_CODE_MAX: usize = 60;
+pub const PRODUCT_KNOWLEDGE_MAX: usize = 2000;
+
+/// `None` = langkah ini tidak mengubah kolom itu.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RndStep {
+    pub product_class: Option<&'static str>,
+    pub reject_reason_option_id: Option<String>,
+    pub formula_code: Option<String>,
+    pub product_knowledge: Option<String>,
+}
+
+/// Padanan `validateRndStep`; pesan identik. `input` = objek `rnd` dari
+/// gateway (`None` atau bukan objek dibaca sebagai objek kosong).
+pub fn validate_rnd_step(action: &str, input: Option<&Value>) -> Result<RndStep, &'static str> {
+    let empty = Value::Object(Map::new());
+    let raw = input.filter(|value| value.is_object()).unwrap_or(&empty);
+    let class_text = draft_text(raw, "product_class");
+    let product_class = RND_PRODUCT_CLASSES.iter().copied().find(|class| *class == class_text);
+    match action {
+        "RND_ACCEPT" => Ok(RndStep {
+            product_class: Some(product_class.ok_or("Choose whether this is a new or an existing product.")?),
+            ..RndStep::default()
+        }),
+        "RND_REJECT" => {
+            if !class_text.is_empty() && product_class.is_none() {
+                return Err("Choose whether this is a new or an existing product.");
+            }
+            let reason = draft_text(raw, "reject_reason_option_id");
+            if reason.is_empty() {
+                return Err("Choose the reason RnD rejected the request.");
+            }
+            Ok(RndStep {
+                product_class,
+                reject_reason_option_id: Some(reason),
+                ..RndStep::default()
+            })
+        }
+        "SAMPLE_READY" => {
+            let code = draft_text(raw, "formula_code");
+            if code.is_empty() || code.chars().count() > FORMULA_CODE_MAX {
+                return Err("Enter the formula code, up to 60 characters.");
+            }
+            let knowledge = draft_text(raw, "product_knowledge");
+            if knowledge.is_empty() || knowledge.chars().count() > PRODUCT_KNOWLEDGE_MAX {
+                return Err("Enter the product knowledge, up to 2000 characters.");
+            }
+            Ok(RndStep {
+                formula_code: Some(code),
+                product_knowledge: Some(knowledge),
+                ..RndStep::default()
+            })
+        }
+        _ => Ok(RndStep::default()),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Harga satuan (v2.2, PRD F-16, D-16, D-27). Padanan `computeUnitPrice`.
+// ---------------------------------------------------------------------------
+
+pub const PRICE_COMPONENT_MAX: i64 = 1_000_000_000;
+pub const MARGIN_BP_MAX: i64 = 9500;
+const PRICE_COMPONENTS: [&str; 4] = [
+    "raw_material_cost_idr",
+    "packaging_cost_idr",
+    "operational_cost_idr",
+    "regulatory_cost_idr",
+];
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UnitPrice {
+    pub raw_material_cost_idr: i64,
+    pub packaging_cost_idr: i64,
+    pub operational_cost_idr: i64,
+    pub regulatory_cost_idr: i64,
+    pub margin_bp: i64,
+    pub hpp_unit_idr: i64,
+    pub final_unit_price_idr: i64,
+    pub notes: String,
+}
+
+/// Padanan `computeUnitPrice`: harga jual = HPP / (1 - margin), margin atas
+/// harga jual, dibulatkan ke atas ke rupiah penuh (D-16). Pesan identik.
+pub fn compute_unit_price(input: &Value) -> Result<UnitPrice, &'static str> {
+    let mut costs = [0_i64; 4];
+    for (slot, key) in costs.iter_mut().zip(PRICE_COMPONENTS) {
+        *slot = strict_int(input.get(key))
+            .filter(|value| (0..=PRICE_COMPONENT_MAX).contains(value))
+            .ok_or("Each cost must be a whole rupiah amount per unit.")?;
+    }
+    let hpp: i64 = costs.iter().sum();
+    if hpp < 1 {
+        return Err("Enter at least one cost.");
+    }
+    let margin = strict_int(input.get("margin_bp"))
+        .filter(|value| (0..=MARGIN_BP_MAX).contains(value))
+        .ok_or("The margin must be from 0% to 95%.")?;
+    let notes = draft_text(input, "notes");
+    if notes.chars().count() > SAMPLE_NOTES_MAX {
+        return Err("Notes are up to 1000 characters.");
+    }
+    let divisor = 10_000 - margin;
+    let scaled = hpp * 10_000;
+    Ok(UnitPrice {
+        raw_material_cost_idr: costs[0],
+        packaging_cost_idr: costs[1],
+        operational_cost_idr: costs[2],
+        regulatory_cost_idr: costs[3],
+        margin_bp: margin,
+        hpp_unit_idr: hpp,
+        final_unit_price_idr: (scaled + divisor - 1) / divisor,
+        notes,
+    })
+}
+
+/// Padanan `formatRupiah`: `Rp 32.500`.
+pub fn format_rupiah(value: i64) -> String {
+    let digits = value.unsigned_abs().to_string();
+    let mut grouped = String::new();
+    for (index, digit) in digits.chars().enumerate() {
+        if index > 0 && (digits.len() - index) % 3 == 0 {
+            grouped.push('.');
+        }
+        grouped.push(digit);
+    }
+    format!("{}Rp {grouped}", if value < 0 { "-" } else { "" })
 }
 
 // ---------------------------------------------------------------------------
@@ -576,12 +746,44 @@ pub const SAMPLE_UPDATE_SQL: &str = "UPDATE sample_requests SET sample_kind_opti
 /// Satu langkah tiket, hanya bila status dan revisinya masih seperti yang
 /// dilihat pencatat. ?1 id, ?2 status baru, ?3 revisi baru, ?4 billable
 /// (NULL = tetap), ?5 lead time RnD (NULL = tetap), ?6 waktu, ?7 status lama,
-/// ?8 revisi lama.
-pub const SAMPLE_TRANSITION_SQL: &str = "UPDATE sample_requests SET status = ?2, revision_index = ?3, is_billable = COALESCE(?4, is_billable), rnd_lead_time_days = COALESCE(?5, rnd_lead_time_days), sent_at = CASE WHEN ?2 = 'SAMPLE_SENT' THEN ?6 ELSE sent_at END, status_changed_at = ?6, updated_at = ?6 WHERE id = ?1 AND status = ?7 AND revision_index = ?8;";
+/// ?8 revisi lama, ?9 klasifikasi New/Existing dan ?10 alasan tolak RnD
+/// (keduanya NULL = tetap), ?11 tarif revisi Finance (NULL = tetap).
+pub const SAMPLE_TRANSITION_SQL: &str = "UPDATE sample_requests SET status = ?2, revision_index = ?3, is_billable = COALESCE(?4, is_billable), rnd_lead_time_days = COALESCE(?5, rnd_lead_time_days), rnd_product_class = COALESCE(?9, rnd_product_class), rnd_reject_reason_option_id = COALESCE(?10, rnd_reject_reason_option_id), revision_fee_idr = COALESCE(?11, revision_fee_idr), sent_at = CASE WHEN ?2 = 'SAMPLE_SENT' THEN ?6 ELSE sent_at END, status_changed_at = ?6, updated_at = ?6 WHERE id = ?1 AND status = ?7 AND revision_index = ?8;";
 
 pub const SAMPLE_STATUS_LOG_INSERT_SQL: &str = "INSERT INTO sample_status_log (id, sample_request_id, from_status, to_status, action, notes, on_behalf_of_division, recorded_by, recorded_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO NOTHING;";
 
 pub const SAMPLE_FEEDBACK_INSERT_SQL: &str = "INSERT INTO sample_feedbacks (id, sample_request_id, iteration_number, client_decision, client_notes, recorded_by, recorded_at) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO NOTHING;";
+
+/// Padanan `SAMPLE_LIST_SQL`: `unit_price_idr` = harga Finance terbaru untuk
+/// iterasi yang sedang berjalan (NULL = belum diberi harga, gerbang D-27).
+pub const SAMPLE_LIST_SQL: &str = "SELECT s.*, c.client_code, c.name AS client_name, c.free_revision_limit, o.nama_operator AS pic_crm_name, (SELECT p.final_unit_price_idr FROM pricing_formulas p WHERE p.sample_request_id = s.id AND p.iteration_number = s.revision_index + 1 ORDER BY p.recorded_at DESC, p.id DESC LIMIT 1) AS unit_price_idr FROM sample_requests s LEFT JOIN clients c ON c.id = s.client_id LEFT JOIN master_operator o ON o.id = s.pic_crm_id";
+
+/// Satu harga per simpan (v2.2), hanya-tambah. ?1 id, ?2 tiket, ?3 iterasi,
+/// ?4-?7 komponen, ?8 HPP, ?9 margin, ?10 harga jual, ?11 catatan,
+/// ?12 pencatat, ?13 waktu.
+pub const PRICE_INSERT_SQL: &str = "INSERT INTO pricing_formulas (id, sample_request_id, iteration_number, raw_material_cost_idr, packaging_cost_idr, operational_cost_idr, regulatory_cost_idr, hpp_unit_idr, margin_bp, final_unit_price_idr, notes, recorded_by, recorded_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO NOTHING;";
+
+pub const PRICES_SQL: &str = "SELECT p.*, o.nama_operator AS recorded_by_name FROM pricing_formulas p LEFT JOIN master_operator o ON o.id = p.recorded_by WHERE p.sample_request_id = ?1 ORDER BY p.iteration_number, p.recorded_at, p.id;";
+
+/// Padanan `PRICE_COST_COLUMNS`: hanya untuk pemegang `pricing.view`.
+pub const PRICE_COST_COLUMNS: &[&str] = &[
+    "raw_material_cost_idr",
+    "packaging_cost_idr",
+    "operational_cost_idr",
+    "regulatory_cost_idr",
+    "hpp_unit_idr",
+    "margin_bp",
+];
+
+/// Satu baris per sampel yang selesai dibuat RnD (v2.1), hanya-tambah.
+/// ?1 id, ?2 tiket, ?3 iterasi, ?4 formula code, ?5 product knowledge,
+/// ?6 catatan langkah, ?7 pencatat, ?8 waktu.
+pub const SAMPLE_FORMULA_INSERT_SQL: &str = "INSERT INTO sample_formulas (id, sample_request_id, iteration_number, formula_code, product_knowledge, rnd_notes, recorded_by, recorded_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO NOTHING;";
+
+pub const SAMPLE_FORMULAS_SQL: &str = "SELECT f.*, o.nama_operator AS recorded_by_name FROM sample_formulas f LEFT JOIN master_operator o ON o.id = f.recorded_by WHERE f.sample_request_id = ?1 ORDER BY f.iteration_number, f.recorded_at;";
+
+/// Tiket lain yang memakai formula code yang sama (kode tidak unik).
+pub const SAMPLE_FORMULA_MATCHES_SQL: &str = "SELECT DISTINCT f.formula_code, s.id AS sample_request_id, s.brand_name, s.status, c.client_code FROM sample_formulas f JOIN sample_requests s ON s.id = f.sample_request_id LEFT JOIN clients c ON c.id = s.client_id WHERE f.sample_request_id <> ?1 AND f.formula_code COLLATE NOCASE IN (SELECT formula_code FROM sample_formulas WHERE sample_request_id = ?1) ORDER BY f.formula_code, s.id LIMIT 20;";
 
 /// Pesan konflik saat perangkat lain sudah mengubah tiket lebih dulu.
 pub const SAMPLE_CHANGED_ELSEWHERE: &str =
@@ -800,11 +1002,146 @@ mod tests {
                 is_paid_sample: *paid,
                 revision_index: *index,
                 free_revision_limit: *limit,
+                has_price: true,
             };
-            let actual = apply_sample_action(&state, action, *lead)
+            let actual = apply_sample_action(&state, action, *lead, None)
                 .map(|result| (result.status, result.revision_index, result.is_billable, result.client_decision));
             assert_eq!(actual, *expected, "{status} + {action}");
         }
+    }
+
+    #[test]
+    fn tarif_revisi_dan_gerbang_harga() {
+        let state = |status: &'static str, has_price: bool| SampleActionState {
+            status,
+            is_paid_sample: false,
+            revision_index: 2,
+            free_revision_limit: 1,
+            has_price,
+        };
+        type Expected = Result<(&'static str, i64, Option<bool>), &'static str>;
+        let cases: &[(&'static str, bool, &str, Option<i64>, Expected)] = &[
+            ("SAMPLE_READY", false, "SAMPLE_SENT", None, Err(SAMPLE_NOT_PRICED)),
+            ("SAMPLE_READY", true, "SAMPLE_SENT", None, Ok(("SAMPLE_SENT", 2, None))),
+            ("DRAFT", false, "SAMPLE_SENT", None, Err(SAMPLE_STEP_NOT_ALLOWED)),
+            ("PENDING_FEE_ASSESSMENT", false, "SET_REVISION_FEE", Some(750_000), Ok(("WAITING_REVISION_PAYMENT", 2, None))),
+            ("PENDING_FEE_ASSESSMENT", false, "SET_REVISION_FEE", Some(0), Ok(("IN_RND", 2, Some(false)))),
+            ("PENDING_FEE_ASSESSMENT", false, "SET_REVISION_FEE", Some(-1), Err(REVISION_FEE_INVALID)),
+            ("PENDING_FEE_ASSESSMENT", false, "SET_REVISION_FEE", None, Err(REVISION_FEE_INVALID)),
+            ("IN_RND", false, "SET_REVISION_FEE", Some(1000), Err(SAMPLE_STEP_NOT_ALLOWED)),
+        ];
+        for (status, has_price, action, fee, expected) in cases {
+            let actual = apply_sample_action(&state(status, *has_price), action, None, *fee)
+                .map(|result| (result.status, result.revision_index, result.is_billable));
+            assert_eq!(actual, *expected, "{status} + {action} {fee:?}");
+        }
+    }
+
+    #[test]
+    fn harga_satuan_dan_format_rupiah() {
+        let price = |raw: Value, packaging: Value, operational: Value, regulatory: Value, margin: Value| {
+            compute_unit_price(&json!({
+                "raw_material_cost_idr": raw,
+                "packaging_cost_idr": packaging,
+                "operational_cost_idr": operational,
+                "regulatory_cost_idr": regulatory,
+                "margin_bp": margin,
+                "notes": " 10k pcs ",
+            }))
+            .map(|price| (price.hpp_unit_idr, price.final_unit_price_idr, price.notes))
+        };
+        let ok = |hpp: i64, final_price: i64| Ok((hpp, final_price, "10k pcs".to_owned()));
+        assert_eq!(price(json!(8420), json!(7850), json!(2450), json!(780), json!(4000)), ok(19_500, 32_500));
+        assert_eq!(price(json!(100), json!(0), json!(0), json!(0), json!(3333)), ok(100, 150));
+        assert_eq!(price(json!(1), json!(0), json!(0), json!(0), json!(0)), ok(1, 1));
+        assert_eq!(price(json!(19_500), json!(0), json!(0), json!(0), json!(9500)), ok(19_500, 390_000));
+        let cost_error = Err("Each cost must be a whole rupiah amount per unit.");
+        assert_eq!(price(json!(-1), json!(0), json!(0), json!(0), json!(0)), cost_error);
+        assert_eq!(price(json!(1.5), json!(0), json!(0), json!(0), json!(0)), cost_error);
+        assert_eq!(price(json!("100"), json!(0), json!(0), json!(0), json!(0)), cost_error);
+        assert_eq!(price(json!(1), json!(0), json!(0), Value::Null, json!(0)), cost_error);
+        assert_eq!(price(json!(0), json!(0), json!(0), json!(0), json!(0)), Err("Enter at least one cost."));
+        assert_eq!(price(json!(1), json!(0), json!(0), json!(0), json!(9501)), Err("The margin must be from 0% to 95%."));
+        assert_eq!(price(json!(1), json!(0), json!(0), json!(0), Value::Null), Err("The margin must be from 0% to 95%."));
+        let long_notes = json!({
+            "raw_material_cost_idr": 1, "packaging_cost_idr": 0, "operational_cost_idr": 0,
+            "regulatory_cost_idr": 0, "margin_bp": 0, "notes": "n".repeat(1001),
+        });
+        assert_eq!(compute_unit_price(&long_notes), Err("Notes are up to 1000 characters."));
+
+        for (value, text) in [(0, "Rp 0"), (500, "Rp 500"), (32_500, "Rp 32.500"), (1_234_567, "Rp 1.234.567"), (-5000, "-Rp 5.000")] {
+            assert_eq!(format_rupiah(value), text);
+        }
+    }
+
+    #[test]
+    fn izin_langkah_dan_isian_rnd() {
+        for (action, permission) in [
+            ("RND_ACCEPT", "rnd.manage"),
+            ("RND_REJECT", "rnd.manage"),
+            ("SAMPLE_READY", "rnd.manage"),
+            ("PAYMENT_RECEIVED", "finance.manage"),
+            ("SET_REVISION_FEE", "finance.manage"),
+            ("SUBMIT_TO_RND", "samples.manage"),
+            ("UNKNOWN", "samples.manage"),
+        ] {
+            assert_eq!(sample_action_permission(action), permission, "{action}");
+        }
+
+        let step = |class: Option<&'static str>, reason: Option<&str>, code: Option<&str>, knowledge: Option<&str>| RndStep {
+            product_class: class,
+            reject_reason_option_id: reason.map(str::to_owned),
+            formula_code: code.map(str::to_owned),
+            product_knowledge: knowledge.map(str::to_owned),
+        };
+        let long_code = "F".repeat(61);
+        let long_knowledge = "k".repeat(2001);
+        let cases: Vec<(&str, Value, Result<RndStep, &str>)> = vec![
+            ("RND_ACCEPT", json!({ "product_class": "NEW" }), Ok(step(Some("NEW"), None, None, None))),
+            ("RND_ACCEPT", json!({ "product_class": " EXISTING " }), Ok(step(Some("EXISTING"), None, None, None))),
+            ("RND_ACCEPT", json!({ "product_class": "new" }), Err("Choose whether this is a new or an existing product.")),
+            ("RND_ACCEPT", json!({}), Err("Choose whether this is a new or an existing product.")),
+            ("RND_REJECT", json!({ "reject_reason_option_id": "r1" }), Ok(step(None, Some("r1"), None, None))),
+            (
+                "RND_REJECT",
+                json!({ "product_class": "NEW", "reject_reason_option_id": "r1" }),
+                Ok(step(Some("NEW"), Some("r1"), None, None)),
+            ),
+            (
+                "RND_REJECT",
+                json!({ "product_class": "OLD", "reject_reason_option_id": "r1" }),
+                Err("Choose whether this is a new or an existing product."),
+            ),
+            ("RND_REJECT", json!({ "product_class": "NEW" }), Err("Choose the reason RnD rejected the request.")),
+            (
+                "SAMPLE_READY",
+                json!({ "formula_code": " FRM-001 ", "product_knowledge": "Gel, pH 5.5" }),
+                Ok(step(None, None, Some("FRM-001"), Some("Gel, pH 5.5"))),
+            ),
+            (
+                "SAMPLE_READY",
+                json!({ "product_knowledge": "Gel" }),
+                Err("Enter the formula code, up to 60 characters."),
+            ),
+            (
+                "SAMPLE_READY",
+                json!({ "formula_code": long_code, "product_knowledge": "Gel" }),
+                Err("Enter the formula code, up to 60 characters."),
+            ),
+            (
+                "SAMPLE_READY",
+                json!({ "formula_code": "FRM-001", "product_knowledge": long_knowledge }),
+                Err("Enter the product knowledge, up to 2000 characters."),
+            ),
+            ("SAMPLE_SENT", json!({ "product_class": "NEW", "formula_code": "X" }), Ok(RndStep::default())),
+        ];
+        for (action, input, expected) in cases {
+            assert_eq!(validate_rnd_step(action, Some(&input)), expected, "{action} {input}");
+        }
+        assert_eq!(
+            validate_rnd_step("RND_ACCEPT", None),
+            Err("Choose whether this is a new or an existing product.")
+        );
     }
 
     #[test]

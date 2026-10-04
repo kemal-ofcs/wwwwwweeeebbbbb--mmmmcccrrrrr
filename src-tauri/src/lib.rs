@@ -116,6 +116,7 @@ pub fn run() {
             desktop::commands::desktop_create_sample_request,
             desktop::commands::desktop_update_sample_request,
             desktop::commands::desktop_record_sample_step,
+            desktop::commands::desktop_record_sample_price,
             desktop::commands::desktop_upload_sample_media,
             desktop::commands::desktop_get_media,
         ])

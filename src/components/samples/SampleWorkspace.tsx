@@ -40,7 +40,25 @@ import { SampleForm } from "./SampleForm";
  * klien itu (tombol dari panel lead).
  */
 
-type View = "active" | "closed" | "all";
+type View = "rnd" | "finance" | "active" | "closed" | "all";
+
+/** Antrean kerja RnD (v2.1): menunggu keputusan atau sedang dibuat. */
+const RND_QUEUE_STATUSES = ["RND_REVIEW", "IN_RND"];
+
+/**
+ * Antrean kerja Finance (v2.2): sampel siap tanpa harga, revisi menunggu
+ * tarif, dan pembayaran yang ditunggu.
+ */
+function inFinanceQueue(row: SampleRequestRecord) {
+  return (
+    (row.status === "SAMPLE_READY" && row.unit_price_idr == null) ||
+    [
+      "PENDING_FEE_ASSESSMENT",
+      "WAITING_SAMPLE_PAYMENT",
+      "WAITING_REVISION_PAYMENT",
+    ].includes(row.status)
+  );
+}
 
 function emptyDraft(clientId: string, client?: ClientRecord): SampleDraftInput {
   return {
@@ -103,6 +121,8 @@ function draftOf(row: SampleRequestRecord): SampleDraftInput {
 export function SampleWorkspace() {
   const { user } = useAuth();
   const canManage = hasPermission(user, "samples.manage");
+  const canRnd = hasPermission(user, "rnd.manage");
+  const canFinance = hasPermission(user, "finance.manage");
   const [requests, setRequests] = useState<SampleRequestRecord[]>([]);
   const [feeMode, setFeeMode] = useState<SampleFeeMode>("PER_REQUEST");
   const [clients, setClients] = useState<ClientRecord[]>([]);
@@ -111,7 +131,10 @@ export function SampleWorkspace() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
-  const [view, setView] = useState<View>("active");
+  // Staf RnD dan Finance membuka antreannya lebih dulu; CS di daftar biasa.
+  const [view, setView] = useState<View>(
+    canManage ? "active" : canRnd ? "rnd" : canFinance ? "finance" : "active",
+  );
   const [search, setSearch] = useState("");
   const [form, setForm] = useState<{
     draft: SampleDraftInput;
@@ -174,12 +197,23 @@ export function SampleWorkspace() {
   const optionLabel = (id: string) =>
     id ? (labels.get(id) ?? "Unknown option") : "";
 
+  const rejectReasons = useMemo(
+    () =>
+      options.filter(
+        (option) => option.kind === "RND_REJECT_REASON" && option.is_active,
+      ),
+    [options],
+  );
+
   const visible = useMemo(() => {
     const term = search.trim().toLowerCase();
-    return requests.filter((row) => {
+    const rows = requests.filter((row) => {
       const closed = SAMPLE_TERMINAL_STATUSES.includes(
         row.status as SampleStatus,
       );
+      if (view === "rnd" && !RND_QUEUE_STATUSES.includes(row.status))
+        return false;
+      if (view === "finance" && !inFinanceQueue(row)) return false;
       if (view === "active" && closed) return false;
       if (view === "closed" && !closed) return false;
       if (!term) return true;
@@ -189,6 +223,10 @@ export function SampleWorkspace() {
         row.client_name ?? "",
       ].some((value) => value.toLowerCase().includes(term));
     });
+    // Antrean diurutkan dari deadline terdekat (`YYYY-MM-DD`).
+    return view === "rnd" || view === "finance"
+      ? [...rows].sort((a, b) => a.deadline_at.localeCompare(b.deadline_at))
+      : rows;
   }, [requests, view, search]);
 
   const detail = requests.find((row) => row.id === detailId) ?? null;
@@ -230,6 +268,8 @@ export function SampleWorkspace() {
         >
           {(
             [
+              ...(canRnd ? ([["rnd", "RnD queue"]] as const) : []),
+              ...(canFinance ? ([["finance", "Finance queue"]] as const) : []),
               ["active", "In progress"],
               ["closed", "Closed"],
               ["all", "All"],
@@ -318,9 +358,14 @@ export function SampleWorkspace() {
 
       {detail ? (
         <SampleDetail
+          key={detail.id}
           id={detail.id}
           optionLabel={optionLabel}
           canManage={canManage}
+          canRnd={canRnd}
+          canFinance={canFinance}
+          rejectReasons={rejectReasons}
+          onOpen={setDetailId}
           onEdit={() => {
             setDetailId(null);
             setForm({

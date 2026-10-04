@@ -10,6 +10,7 @@ import {
 import { FeedbackBanner } from "@/components/ui/FeedbackBanner";
 import { Modal } from "@/components/ui/Modal";
 import { StatusBadge } from "@/components/ui/StatusBadge";
+import type { MasterOptionRecord } from "@/lib/gateways/clients";
 import {
   getSampleRequest,
   recordSampleStep,
@@ -19,10 +20,13 @@ import { requestSyncNow } from "@/lib/gateways/sync-status";
 import { formatDateTime } from "@/lib/utils/format";
 import {
   applySampleAction,
-  SAMPLE_ACTION_DIVISION,
+  FORMULA_CODE_MAX,
+  formatRupiah,
+  PRODUCT_KNOWLEDGE_MAX,
   SAMPLE_ACTIONS,
   SAMPLE_NOTES_MAX,
   type SampleAction,
+  sampleActionPermission,
 } from "@/lib/validations/sample";
 import {
   SAMPLE_ACTION_LABEL,
@@ -31,6 +35,7 @@ import {
   SAMPLE_STATUS_TONE,
 } from "./labels";
 import { SamplePhotos } from "./SamplePhotos";
+import { SamplePricing } from "./SamplePricing";
 
 /**
  * Detail tiket sampel (SCR-03): ringkasan, kuota revisi, linimasa langkah,
@@ -42,10 +47,22 @@ interface SampleDetailProps {
   id: string;
   optionLabel: (id: string) => string;
   canManage: boolean;
+  /** `rnd.manage`: langkah RnD (v2.1). */
+  canRnd: boolean;
+  /** `finance.manage`: harga, tarif revisi, pembayaran diterima (v2.2). */
+  canFinance: boolean;
+  /** Pilihan Master Data `RND_REJECT_REASON` yang aktif. */
+  rejectReasons: MasterOptionRecord[];
   onEdit: () => void;
+  onOpen: (id: string) => void;
   onChanged: () => void;
   onClose: () => void;
 }
+
+const PRODUCT_CLASS_LABEL: Record<string, string> = {
+  NEW: "New product",
+  EXISTING: "Existing product",
+};
 
 function DetailRow({ label, value }: { label: string; value: string }) {
   if (!value) return null;
@@ -61,7 +78,11 @@ export function SampleDetail({
   id,
   optionLabel,
   canManage,
+  canRnd,
+  canFinance,
+  rejectReasons,
   onEdit,
+  onOpen,
   onChanged,
   onClose,
 }: SampleDetailProps) {
@@ -70,6 +91,11 @@ export function SampleDetail({
   const [action, setAction] = useState<SampleAction | null>(null);
   const [notes, setNotes] = useState("");
   const [leadTime, setLeadTime] = useState("");
+  const [revisionFee, setRevisionFee] = useState("");
+  const [productClass, setProductClass] = useState("");
+  const [rejectReason, setRejectReason] = useState("");
+  const [formulaCode, setFormulaCode] = useState("");
+  const [knowledge, setKnowledge] = useState("");
   const [busy, setBusy] = useState(false);
   const isSubmittingRef = useRef(false);
 
@@ -91,9 +117,15 @@ export function SampleDetail({
 
   const request = data?.request;
   const limit = request?.free_revision_limit ?? 0;
+  const allowed = {
+    "rnd.manage": canRnd,
+    "finance.manage": canFinance,
+    "samples.manage": canManage,
+  };
   const available = request
     ? SAMPLE_ACTIONS.filter(
         (candidate) =>
+          allowed[sampleActionPermission(candidate)] &&
           !(
             "error" in
             applySampleAction(
@@ -102,13 +134,26 @@ export function SampleDetail({
                 is_paid_sample: request.is_paid_sample === 1,
                 revision_index: request.revision_index,
                 free_revision_limit: limit,
+                has_price: request.unit_price_idr != null,
               },
               candidate,
               1,
+              0,
             )
           ),
       )
     : [];
+
+  // Sampel revisi biasanya berangkat dari formula iterasi sebelumnya, jadi
+  // isian Sample ready dimulai dari sana dan RnD mengubah seperlunya.
+  const chooseAction = (candidate: SampleAction) => {
+    setAction(candidate);
+    const last = data?.formulas[data.formulas.length - 1];
+    if (candidate === "SAMPLE_READY" && last && formulaCode === "") {
+      setFormulaCode(last.formula_code);
+      setKnowledge(last.product_knowledge);
+    }
+  };
 
   const submitStep = async (event: FormEvent) => {
     event.preventDefault();
@@ -122,10 +167,23 @@ export function SampleDetail({
         action,
         notes,
         lead_time_days: leadTime === "" ? null : Math.trunc(Number(leadTime)),
+        rnd: {
+          product_class: productClass,
+          reject_reason_option_id: rejectReason,
+          formula_code: formulaCode,
+          product_knowledge: knowledge,
+        },
+        revision_fee_idr:
+          revisionFee === "" ? null : Math.trunc(Number(revisionFee)),
       });
       setAction(null);
       setNotes("");
       setLeadTime("");
+      setRevisionFee("");
+      setProductClass("");
+      setRejectReason("");
+      setFormulaCode("");
+      setKnowledge("");
       await load();
       onChanged();
       requestSyncNow();
@@ -253,8 +311,36 @@ export function SampleDetail({
                     : `${request.rnd_lead_time_days} days`
                 }
               />
+              <DetailRow
+                label="Product class"
+                value={PRODUCT_CLASS_LABEL[request.rnd_product_class] ?? ""}
+              />
+              <DetailRow
+                label="Rejection reason"
+                value={optionLabel(request.rnd_reject_reason_option_id)}
+              />
+              <DetailRow
+                label="Revision fee"
+                value={
+                  request.revision_fee_idr == null
+                    ? ""
+                    : formatRupiah(request.revision_fee_idr)
+                }
+              />
               <DetailRow label="PIC CRM" value={request.pic_crm_name ?? ""} />
             </dl>
+
+            <SamplePricing
+              sampleId={request.id}
+              status={request.status}
+              iteration={request.revision_index + 1}
+              prices={data.prices}
+              canPrice={canFinance}
+              onSaved={() => {
+                void load();
+                onChanged();
+              }}
+            />
 
             <SamplePhotos
               sampleId={request.id}
@@ -274,7 +360,7 @@ export function SampleDetail({
               </button>
             ) : null}
 
-            {canManage && available.length > 0 ? (
+            {available.length > 0 ? (
               <section aria-label="Record the next step" className="grid gap-3">
                 <h3 className="text-body-md font-semibold text-on-surface">
                   Record the next step
@@ -285,7 +371,7 @@ export function SampleDetail({
                       key={candidate}
                       type="button"
                       aria-pressed={action === candidate}
-                      onClick={() => setAction(candidate)}
+                      onClick={() => chooseAction(candidate)}
                       className={`app-btn ${
                         action === candidate
                           ? "app-btn-primary"
@@ -300,10 +386,102 @@ export function SampleDetail({
                 </div>
                 {action ? (
                   <form onSubmit={submitStep} className="grid gap-3">
-                    {SAMPLE_ACTION_DIVISION[action] ? (
-                      <p className="text-body-sm text-on-surface-variant">
-                        Recorded on behalf of {SAMPLE_ACTION_DIVISION[action]}.
-                      </p>
+                    {action === "RND_ACCEPT" || action === "RND_REJECT" ? (
+                      <label className="app-label grid gap-1.5 sm:max-w-xs">
+                        {action === "RND_ACCEPT"
+                          ? "Product class"
+                          : "Product class (optional)"}
+                        <select
+                          required={action === "RND_ACCEPT"}
+                          value={productClass}
+                          onChange={(event) =>
+                            setProductClass(event.target.value)
+                          }
+                          className="app-input font-normal"
+                        >
+                          <option value="">Choose…</option>
+                          <option value="NEW">
+                            New product (needs research)
+                          </option>
+                          <option value="EXISTING">
+                            Existing product (confirm with Production)
+                          </option>
+                        </select>
+                      </label>
+                    ) : null}
+                    {action === "RND_REJECT" ? (
+                      rejectReasons.length === 0 ? (
+                        <p className="text-body-sm text-on-surface-variant">
+                          No rejection reasons yet. Add them under Master Data ›
+                          RnD rejection reasons first.
+                        </p>
+                      ) : (
+                        <label className="app-label grid gap-1.5 sm:max-w-sm">
+                          Rejection reason
+                          <select
+                            required
+                            value={rejectReason}
+                            onChange={(event) =>
+                              setRejectReason(event.target.value)
+                            }
+                            className="app-input font-normal"
+                          >
+                            <option value="">Choose…</option>
+                            {rejectReasons.map((option) => (
+                              <option key={option.id} value={option.id}>
+                                {option.label}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                      )
+                    ) : null}
+                    {action === "SAMPLE_READY" ? (
+                      <>
+                        <label className="app-label grid gap-1.5 sm:max-w-xs">
+                          Formula code
+                          <input
+                            required
+                            maxLength={FORMULA_CODE_MAX}
+                            value={formulaCode}
+                            onChange={(event) =>
+                              setFormulaCode(event.target.value)
+                            }
+                            className="app-input font-mono font-normal"
+                          />
+                        </label>
+                        <label className="app-label grid gap-1.5">
+                          Product knowledge
+                          <textarea
+                            required
+                            rows={4}
+                            maxLength={PRODUCT_KNOWLEDGE_MAX}
+                            value={knowledge}
+                            onChange={(event) =>
+                              setKnowledge(event.target.value)
+                            }
+                            placeholder="Texture, key ingredients, usage, and what CS should tell the client"
+                            className="app-input min-h-24 py-2 font-normal"
+                          />
+                        </label>
+                      </>
+                    ) : null}
+                    {action === "SET_REVISION_FEE" ? (
+                      <label className="app-label grid gap-1.5 sm:max-w-xs">
+                        Revision fee (rupiah, 0 waives it)
+                        <input
+                          required
+                          type="number"
+                          inputMode="numeric"
+                          min={0}
+                          step={1}
+                          value={revisionFee}
+                          onChange={(event) =>
+                            setRevisionFee(event.target.value)
+                          }
+                          className="app-input font-normal"
+                        />
+                      </label>
                     ) : null}
                     {action === "RND_ACCEPT" ? (
                       <label className="app-label grid gap-1.5 sm:max-w-xs">
@@ -354,6 +532,63 @@ export function SampleDetail({
               </section>
             ) : null}
 
+            {data.formulas.length > 0 ? (
+              <section aria-label="Formulas" className="grid gap-2">
+                <h3 className="text-body-md font-semibold text-on-surface">
+                  Formulas
+                </h3>
+                <ol className="grid gap-3">
+                  {data.formulas.map((formula) => (
+                    <li
+                      key={formula.id}
+                      className="grid gap-1 rounded-md border border-surface-container p-3"
+                    >
+                      <p className="text-body-md text-on-surface">
+                        Sample {formula.iteration_number} ·{" "}
+                        <span className="font-mono font-semibold">
+                          {formula.formula_code}
+                        </span>
+                      </p>
+                      <p className="whitespace-pre-wrap text-body-md text-on-surface">
+                        {formula.product_knowledge}
+                      </p>
+                      <p className="text-body-sm text-on-surface-variant">
+                        {formula.recorded_by_name ??
+                          `Operator #${formula.recorded_by ?? "?"}`}{" "}
+                        · {formatDateTime(formula.recorded_at)}
+                      </p>
+                    </li>
+                  ))}
+                </ol>
+                {data.formula_matches.length > 0 ? (
+                  <div className="grid gap-1">
+                    <p className="text-body-sm text-on-surface-variant">
+                      Other requests with the same formula code
+                    </p>
+                    <ul className="flex flex-wrap gap-2">
+                      {data.formula_matches.map((match) => (
+                        <li
+                          key={`${match.formula_code}-${match.sample_request_id}`}
+                        >
+                          <button
+                            type="button"
+                            onClick={() => onOpen(match.sample_request_id)}
+                            className="app-btn app-btn-secondary"
+                          >
+                            <span className="font-mono">
+                              {match.formula_code}
+                            </span>{" "}
+                            · {match.brand_name}
+                            {match.client_code ? ` · ${match.client_code}` : ""}
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                ) : null}
+              </section>
+            ) : null}
+
             <section aria-label="Timeline" className="grid gap-2">
               <h3 className="text-body-md font-semibold text-on-surface">
                 Timeline
@@ -376,10 +611,6 @@ export function SampleDetail({
                             `Operator #${entry.recorded_by ?? "?"}`}
                         </span>{" "}
                         {SAMPLE_ACTION_PAST[entry.action] ?? entry.action}
-                        {entry.on_behalf_of_division &&
-                        SAMPLE_ACTION_DIVISION[entry.action as SampleAction]
-                          ? ` on behalf of ${entry.on_behalf_of_division}`
-                          : ""}
                       </p>
                       <p className="flex flex-wrap items-center gap-1 text-body-sm text-on-surface-variant">
                         <span className="line-through">

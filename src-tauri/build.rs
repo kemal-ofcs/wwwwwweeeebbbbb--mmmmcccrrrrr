@@ -27,6 +27,7 @@ const DESKTOP_COMMANDS: &[&str] = &[
     "desktop_create_sample_request",
     "desktop_update_sample_request",
     "desktop_record_sample_step",
+    "desktop_record_sample_price",
     "desktop_upload_sample_media",
     "desktop_get_media",
     "desktop_get_session",

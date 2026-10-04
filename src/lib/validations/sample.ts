@@ -289,6 +289,8 @@ export const SAMPLE_ACTIONS = [
   "CLIENT_REVISE",
   "CLIENT_REJECT",
   "CANCEL",
+  // Finance menetapkan tarif revisi di luar kuota (v2.2, PRD F-15).
+  "SET_REVISION_FEE",
 ] as const;
 export type SampleAction = (typeof SAMPLE_ACTIONS)[number];
 
@@ -308,7 +310,28 @@ export const SAMPLE_ACTION_DIVISION: Record<SampleAction, string | null> = {
   CLIENT_REVISE: null,
   CLIENT_REJECT: null,
   CANCEL: null,
+  SET_REVISION_FEE: "Finance",
 };
+
+/**
+ * Izin yang dituntut tiap langkah. Langkah RnD milik `rnd.manage` (v2.1, PRD
+ * F-14), langkah Finance milik `finance.manage` (v2.2, F-15), sisanya
+ * `samples.manage`. Padanan `sample_action_permission` di Rust.
+ */
+export function sampleActionPermission(
+  action: unknown,
+): "rnd.manage" | "finance.manage" | "samples.manage" {
+  if (
+    action === "RND_ACCEPT" ||
+    action === "RND_REJECT" ||
+    action === "SAMPLE_READY"
+  ) {
+    return "rnd.manage";
+  }
+  return action === "PAYMENT_RECEIVED" || action === "SET_REVISION_FEE"
+    ? "finance.manage"
+    : "samples.manage";
+}
 
 export const SAMPLE_NOTES_MAX = 1000;
 export const RND_LEAD_TIME_MAX_DAYS = 365;
@@ -318,6 +341,8 @@ export interface SampleActionState {
   is_paid_sample: boolean;
   revision_index: number;
   free_revision_limit: number;
+  /** Iterasi yang sedang berjalan sudah diberi harga Finance (D-27). */
+  has_price: boolean;
 }
 
 export interface SampleActionResult {
@@ -331,6 +356,9 @@ export interface SampleActionResult {
 
 export const SAMPLE_STEP_NOT_ALLOWED =
   "This step is not allowed from the current status.";
+export const SAMPLE_NOT_PRICED = "Finance has not priced this sample yet.";
+export const REVISION_FEE_INVALID =
+  "Enter the revision fee in whole rupiah (0 waives it).";
 
 export function isSampleAction(value: unknown): value is SampleAction {
   return (
@@ -342,12 +370,14 @@ export function isSampleAction(value: unknown): value is SampleAction {
 /**
  * Satu langkah tiket. Seluruh diagram FR-06.4 ada di sini; langkah yang tidak
  * ada di diagram ditolak. `CLIENT_REVISE` langsung melewati gerbang kuota
- * (FR-06.5): revisi ke-n gratis selama n ≤ kuota klien.
+ * (FR-06.5): revisi ke-n gratis selama n ≤ kuota klien. `SAMPLE_SENT` menunggu
+ * harga Finance (D-27); `SET_REVISION_FEE` 0 = revisi dibebaskan Finance.
  */
 export function applySampleAction(
   state: SampleActionState,
   action: SampleAction,
   leadTimeDays: number | null,
+  revisionFeeIdr: number | null = null,
 ): SampleActionResult | { error: string } {
   const step = (
     from: readonly string[],
@@ -393,7 +423,35 @@ export function applySampleAction(
     case "SAMPLE_READY":
       return step(["IN_RND"], "SAMPLE_READY");
     case "SAMPLE_SENT":
+      if (state.status === "SAMPLE_READY" && !state.has_price) {
+        return { error: SAMPLE_NOT_PRICED };
+      }
       return step(["SAMPLE_READY"], "SAMPLE_SENT");
+    case "SET_REVISION_FEE": {
+      if (state.status !== "PENDING_FEE_ASSESSMENT")
+        return { error: SAMPLE_STEP_NOT_ALLOWED };
+      if (
+        revisionFeeIdr === null ||
+        !Number.isSafeInteger(revisionFeeIdr) ||
+        revisionFeeIdr < 0 ||
+        revisionFeeIdr > SAMPLE_BUDGET_MAX
+      ) {
+        return { error: REVISION_FEE_INVALID };
+      }
+      return revisionFeeIdr === 0
+        ? {
+            status: "IN_RND",
+            revision_index: state.revision_index,
+            is_billable: false,
+            client_decision: null,
+          }
+        : {
+            status: "WAITING_REVISION_PAYMENT",
+            revision_index: state.revision_index,
+            is_billable: null,
+            client_decision: null,
+          };
+    }
     case "CLIENT_ACC": {
       const result = step(["SAMPLE_SENT"], "CLIENT_ACC");
       return "error" in result ? result : { ...result, client_decision: "ACC" };
@@ -433,6 +491,184 @@ export function applySampleAction(
 export function normalizeSampleNotes(value: unknown): string | null {
   const notes = typeof value === "string" ? value.trim() : "";
   return notes && [...notes].length <= SAMPLE_NOTES_MAX ? notes : null;
+}
+
+// ---------------------------------------------------------------------------
+// Isian langkah RnD (v2.1, PRD F-14). Keputusan diterima/ditolak dan formula.
+// ---------------------------------------------------------------------------
+
+export const RND_PRODUCT_CLASSES = ["NEW", "EXISTING"] as const;
+export type RndProductClass = (typeof RND_PRODUCT_CLASSES)[number];
+export const FORMULA_CODE_MAX = 60;
+export const PRODUCT_KNOWLEDGE_MAX = 2000;
+
+/** `null` = langkah ini tidak mengubah kolom itu. */
+export interface RndStep {
+  product_class: RndProductClass | null;
+  reject_reason_option_id: string | null;
+  formula_code: string | null;
+  product_knowledge: string | null;
+}
+
+const NO_RND_CHANGE: RndStep = {
+  product_class: null,
+  reject_reason_option_id: null,
+  formula_code: null,
+  product_knowledge: null,
+};
+
+/**
+ * Accept wajib klasifikasi New/Existing; Reject wajib alasan (klasifikasi
+ * boleh kosong, RnD bisa menolak sebelum sempat mengklasifikasi); Sample ready
+ * wajib formula code dan product knowledge. Langkah lain mengabaikan isian.
+ * Keberadaan alasan di Master Data diperiksa pemanggil. Pesan identik dengan
+ * `validate_rnd_step` di Rust.
+ */
+export function validateRndStep(
+  action: string,
+  input: unknown,
+): { rnd: RndStep } | { error: string } {
+  const raw =
+    input && typeof input === "object"
+      ? (input as Record<string, unknown>)
+      : {};
+  const classText = text(raw, "product_class");
+  const productClass = (RND_PRODUCT_CLASSES as readonly string[]).includes(
+    classText,
+  )
+    ? (classText as RndProductClass)
+    : null;
+  switch (action) {
+    case "RND_ACCEPT":
+      if (!productClass) {
+        return {
+          error: "Choose whether this is a new or an existing product.",
+        };
+      }
+      return { rnd: { ...NO_RND_CHANGE, product_class: productClass } };
+    case "RND_REJECT": {
+      if (classText && !productClass) {
+        return {
+          error: "Choose whether this is a new or an existing product.",
+        };
+      }
+      const reason = text(raw, "reject_reason_option_id");
+      if (!reason) {
+        return { error: "Choose the reason RnD rejected the request." };
+      }
+      return {
+        rnd: {
+          ...NO_RND_CHANGE,
+          product_class: productClass,
+          reject_reason_option_id: reason,
+        },
+      };
+    }
+    case "SAMPLE_READY": {
+      const code = text(raw, "formula_code");
+      if (!code || length(code) > FORMULA_CODE_MAX) {
+        return { error: "Enter the formula code, up to 60 characters." };
+      }
+      const knowledge = text(raw, "product_knowledge");
+      if (!knowledge || length(knowledge) > PRODUCT_KNOWLEDGE_MAX) {
+        return {
+          error: "Enter the product knowledge, up to 2000 characters.",
+        };
+      }
+      return {
+        rnd: {
+          ...NO_RND_CHANGE,
+          formula_code: code,
+          product_knowledge: knowledge,
+        },
+      };
+    }
+    default:
+      return { rnd: NO_RND_CHANGE };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Harga satuan (v2.2, PRD F-16, D-16, D-27). Padanan `compute_unit_price`.
+// ---------------------------------------------------------------------------
+
+export const PRICE_COMPONENT_MAX = 1_000_000_000;
+/** Margin atas harga jual, basis poin; 9500 = 95%. */
+export const MARGIN_BP_MAX = 9500;
+
+export interface UnitPrice {
+  raw_material_cost_idr: number;
+  packaging_cost_idr: number;
+  operational_cost_idr: number;
+  /** Komponen keempat, opsional (0): regulasi dan uji per unit. */
+  regulatory_cost_idr: number;
+  margin_bp: number;
+  hpp_unit_idr: number;
+  final_unit_price_idr: number;
+  notes: string;
+}
+
+const PRICE_COMPONENTS = [
+  "raw_material_cost_idr",
+  "packaging_cost_idr",
+  "operational_cost_idr",
+  "regulatory_cost_idr",
+] as const;
+
+/**
+ * HPP = jumlah empat komponen per unit; harga jual = HPP ÷ (1 − margin),
+ * margin dihitung atas harga jual (mockup SCR-09: 19.500 dengan 40% =
+ * 32.500), dibulatkan ke atas ke rupiah penuh (D-16). Bilangan bulat saja.
+ */
+export function computeUnitPrice(
+  input: unknown,
+): { price: UnitPrice } | { error: string } {
+  const raw =
+    input && typeof input === "object"
+      ? (input as Record<string, unknown>)
+      : {};
+  const costs: number[] = [];
+  for (const key of PRICE_COMPONENTS) {
+    const value = strictInt(raw[key]);
+    if (value === null || value < 0 || value > PRICE_COMPONENT_MAX) {
+      return { error: "Each cost must be a whole rupiah amount per unit." };
+    }
+    costs.push(value);
+  }
+  const hpp = costs.reduce((sum, value) => sum + value, 0);
+  if (hpp < 1) return { error: "Enter at least one cost." };
+  const margin = strictInt(raw.margin_bp);
+  if (margin === null || margin < 0 || margin > MARGIN_BP_MAX) {
+    return { error: "The margin must be from 0% to 95%." };
+  }
+  // Catatan opsional, mis. jumlah order yang menjadi dasar harga.
+  const notes = text(raw, "notes");
+  if (length(notes) > SAMPLE_NOTES_MAX) {
+    return { error: "Notes are up to 1000 characters." };
+  }
+  // Pembagian bulat dibulatkan ke atas; hasil kali tetap di bawah 2^53.
+  const divisor = 10_000 - margin;
+  const scaled = hpp * 10_000;
+  const floor = Math.floor(scaled / divisor);
+  return {
+    price: {
+      raw_material_cost_idr: costs[0] ?? 0,
+      packaging_cost_idr: costs[1] ?? 0,
+      operational_cost_idr: costs[2] ?? 0,
+      regulatory_cost_idr: costs[3] ?? 0,
+      margin_bp: margin,
+      hpp_unit_idr: hpp,
+      final_unit_price_idr: floor * divisor < scaled ? floor + 1 : floor,
+      notes,
+    },
+  };
+}
+
+/** `Rp 32.500`: dipakai pesan notifikasi, identik dengan `format_rupiah`. */
+export function formatRupiah(value: number): string {
+  const digits = String(Math.trunc(Math.abs(value)));
+  const grouped = digits.replace(/\B(?=(\d{3})+(?!\d))/g, ".");
+  return `${value < 0 ? "-" : ""}Rp ${grouped}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -653,13 +889,52 @@ export const SAMPLE_UPDATE_SQL =
   "UPDATE sample_requests SET sample_kind_option_id = CASE WHEN status = 'DRAFT' THEN ?2 ELSE sample_kind_option_id END, formulation_type_option_id = CASE WHEN status = 'DRAFT' THEN ?3 ELSE formulation_type_option_id END, registration_category_option_id = CASE WHEN status = 'DRAFT' THEN ?4 ELSE registration_category_option_id END, product_category_option_id = CASE WHEN status = 'DRAFT' THEN ?5 ELSE product_category_option_id END, sample_qty = CASE WHEN status = 'DRAFT' THEN ?6 ELSE sample_qty END, brand_name = CASE WHEN status = 'DRAFT' THEN ?7 ELSE brand_name END, bpom_product_name = CASE WHEN status = 'DRAFT' THEN ?8 ELSE bpom_product_name END, claims = CASE WHEN status = 'DRAFT' THEN ?9 ELSE claims END, packaging = CASE WHEN status = 'DRAFT' THEN ?10 ELSE packaging END, reference_notes = CASE WHEN status = 'DRAFT' THEN ?11 ELSE reference_notes END, special_requests_json = CASE WHEN status = 'DRAFT' THEN ?12 ELSE special_requests_json END, is_dummy_required = CASE WHEN status = 'DRAFT' THEN ?13 ELSE is_dummy_required END, is_paid_sample = CASE WHEN status = 'DRAFT' THEN ?14 ELSE is_paid_sample END, pic_crm_id = ?15, client_budget_idr = ?16, deadline_at = ?17, ship_to_address = ?18, updated_at = ?19 WHERE id = ?1 AND status NOT IN ('RND_REJECTED', 'CLIENT_ACC', 'CLIENT_REJECT', 'CANCELLED');";
 
 export const SAMPLE_TRANSITION_SQL =
-  "UPDATE sample_requests SET status = ?2, revision_index = ?3, is_billable = COALESCE(?4, is_billable), rnd_lead_time_days = COALESCE(?5, rnd_lead_time_days), sent_at = CASE WHEN ?2 = 'SAMPLE_SENT' THEN ?6 ELSE sent_at END, status_changed_at = ?6, updated_at = ?6 WHERE id = ?1 AND status = ?7 AND revision_index = ?8;";
+  "UPDATE sample_requests SET status = ?2, revision_index = ?3, is_billable = COALESCE(?4, is_billable), rnd_lead_time_days = COALESCE(?5, rnd_lead_time_days), rnd_product_class = COALESCE(?9, rnd_product_class), rnd_reject_reason_option_id = COALESCE(?10, rnd_reject_reason_option_id), revision_fee_idr = COALESCE(?11, revision_fee_idr), sent_at = CASE WHEN ?2 = 'SAMPLE_SENT' THEN ?6 ELSE sent_at END, status_changed_at = ?6, updated_at = ?6 WHERE id = ?1 AND status = ?7 AND revision_index = ?8;";
 
 export const SAMPLE_STATUS_LOG_INSERT_SQL =
   "INSERT INTO sample_status_log (id, sample_request_id, from_status, to_status, action, notes, on_behalf_of_division, recorded_by, recorded_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO NOTHING;";
 
 export const SAMPLE_FEEDBACK_INSERT_SQL =
   "INSERT INTO sample_feedbacks (id, sample_request_id, iteration_number, client_decision, client_notes, recorded_by, recorded_at) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO NOTHING;";
+
+/**
+ * Daftar/detail tiket. `unit_price_idr` = harga Finance terbaru untuk iterasi
+ * yang sedang berjalan (NULL = belum diberi harga, gerbang D-27). Dipakai Web
+ * dan perangkat; WAJIB identik dengan `SAMPLE_LIST_SQL` di Rust.
+ */
+export const SAMPLE_LIST_SQL =
+  "SELECT s.*, c.client_code, c.name AS client_name, c.free_revision_limit, o.nama_operator AS pic_crm_name, (SELECT p.final_unit_price_idr FROM pricing_formulas p WHERE p.sample_request_id = s.id AND p.iteration_number = s.revision_index + 1 ORDER BY p.recorded_at DESC, p.id DESC LIMIT 1) AS unit_price_idr FROM sample_requests s LEFT JOIN clients c ON c.id = s.client_id LEFT JOIN master_operator o ON o.id = s.pic_crm_id";
+
+/** Satu harga per simpan (v2.2), hanya-tambah; terbaru per iterasi berlaku. */
+export const PRICE_INSERT_SQL =
+  "INSERT INTO pricing_formulas (id, sample_request_id, iteration_number, raw_material_cost_idr, packaging_cost_idr, operational_cost_idr, regulatory_cost_idr, hpp_unit_idr, margin_bp, final_unit_price_idr, notes, recorded_by, recorded_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO NOTHING;";
+
+export const PRICES_SQL =
+  "SELECT p.*, o.nama_operator AS recorded_by_name FROM pricing_formulas p LEFT JOIN master_operator o ON o.id = p.recorded_by WHERE p.sample_request_id = ?1 ORDER BY p.iteration_number, p.recorded_at, p.id;";
+
+/** Kolom rincian HPP yang hanya untuk pemegang `pricing.view` (keputusan H). */
+export const PRICE_COST_COLUMNS = [
+  "raw_material_cost_idr",
+  "packaging_cost_idr",
+  "operational_cost_idr",
+  "regulatory_cost_idr",
+  "hpp_unit_idr",
+  "margin_bp",
+] as const;
+
+/** Satu baris per sampel yang selesai dibuat RnD (v2.1), hanya-tambah. */
+export const SAMPLE_FORMULA_INSERT_SQL =
+  "INSERT INTO sample_formulas (id, sample_request_id, iteration_number, formula_code, product_knowledge, rnd_notes, recorded_by, recorded_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO NOTHING;";
+
+export const SAMPLE_FORMULAS_SQL =
+  "SELECT f.*, o.nama_operator AS recorded_by_name FROM sample_formulas f LEFT JOIN master_operator o ON o.id = f.recorded_by WHERE f.sample_request_id = ?1 ORDER BY f.iteration_number, f.recorded_at;";
+
+/**
+ * Tiket lain yang memakai formula code yang sama (keputusan E: kode tidak
+ * unik, produk Existing memakai ulang formula). ?1 = sample id.
+ */
+export const SAMPLE_FORMULA_MATCHES_SQL =
+  "SELECT DISTINCT f.formula_code, s.id AS sample_request_id, s.brand_name, s.status, c.client_code FROM sample_formulas f JOIN sample_requests s ON s.id = f.sample_request_id LEFT JOIN clients c ON c.id = s.client_id WHERE f.sample_request_id <> ?1 AND f.formula_code COLLATE NOCASE IN (SELECT formula_code FROM sample_formulas WHERE sample_request_id = ?1) ORDER BY f.formula_code, s.id LIMIT 20;";
 
 export const SAMPLE_CHANGED_ELSEWHERE =
   "This sample request was changed on another device first. Sync, check its current status, then record the step again.";

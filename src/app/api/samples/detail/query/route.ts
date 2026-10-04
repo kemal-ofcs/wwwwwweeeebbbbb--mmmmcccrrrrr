@@ -1,4 +1,5 @@
 import type { NextRequest } from "next/server";
+import { hasPermission } from "@/lib/auth/access";
 import { requireWebPermission } from "@/lib/server/auth/authorize";
 import {
   ensureServerDatabaseInitialized,
@@ -19,11 +20,16 @@ export async function POST(request: NextRequest) {
   try {
     assertSameOriginMutation(request);
     await ensureServerDatabaseInitialized();
-    await requireWebPermission(request, "samples.view");
+    const operator = await requireWebPermission(request, "samples.view");
     const body = await readJsonBody<{ id?: unknown }>(request);
     return noStoreJson({
       sukses: true,
-      ...(await getSampleRequest(getServerDatabase(), body.id)),
+      // Rincian HPP dan margin hanya untuk `pricing.view` (v2.2).
+      ...(await getSampleRequest(
+        getServerDatabase(),
+        body.id,
+        hasPermission(operator, "pricing.view"),
+      )),
     });
   } catch (error) {
     return toApiErrorResponse(error);

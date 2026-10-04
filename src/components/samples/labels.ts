@@ -47,6 +47,7 @@ export const SAMPLE_ACTION_LABEL: Record<SampleAction, string> = {
   CLIENT_REVISE: "Client wants a revision",
   CLIENT_REJECT: "Client rejected",
   CANCEL: "Cancel request",
+  SET_REVISION_FEE: "Set revision fee",
 };
 
 /** Kalimat linimasa: apa yang dicatat pada satu langkah. */
@@ -62,6 +63,7 @@ export const SAMPLE_ACTION_PAST: Record<string, string> = {
   CLIENT_REVISE: "recorded a revision request from the client",
   CLIENT_REJECT: "recorded the client's rejection",
   CANCEL: "cancelled the request",
+  SET_REVISION_FEE: "set the revision fee",
 };
 
 /** Lama tiket di status sekarang, untuk lencana waktu. Hanya tampilan. */

@@ -648,6 +648,16 @@ const SNAPSHOT_SOURCES: &[SnapshotSource] = &[
         table: "sample_status_log",
         sql: "SELECT * FROM sample_status_log ORDER BY recorded_at, id;",
     },
+    SnapshotSource {
+        payload_key: "sampleFormulas",
+        table: "sample_formulas",
+        sql: "SELECT * FROM sample_formulas ORDER BY recorded_at, id;",
+    },
+    SnapshotSource {
+        payload_key: "pricingFormulas",
+        table: "pricing_formulas",
+        sql: "SELECT * FROM pricing_formulas ORDER BY recorded_at, id;",
+    },
     // Direktori operator hanya-baca untuk nama PIC dan pilihan pindah PIC saat
     // offline. SENGAJA hanya empat kolom: hash password, email, nomor HP, dan
     // rahasia 2FA tidak pernah meninggalkan cloud.
@@ -1396,7 +1406,10 @@ impl TursoClient {
                 ('leads.manage', 'Manage own leads', 'Leads', 'Record follow ups and client responses on your own leads.', 1, 54),
                 ('leads.reassign', 'Reassign leads', 'Leads', 'Move a lead to another CS and record on any lead.', 1, 56),
                 ('samples.view', 'View sample requests', 'Samples', 'View sample requests and their history.', 1, 58),
-                ('samples.manage', 'Manage sample requests', 'Samples', 'Create sample requests and record each step, including on behalf of RnD and Finance.', 1, 59),
+                ('samples.manage', 'Manage sample requests', 'Samples', 'Create sample requests and record the CS steps of each request.', 1, 59),
+                ('rnd.manage', 'Record RnD decisions', 'Samples', 'Accept or reject sample requests, and record each finished sample with its formula.', 1, 60),
+                ('finance.manage', 'Record Finance decisions', 'Finance', 'Price finished samples, set revision fees, and record payments as received.', 1, 61),
+                ('pricing.view', 'View cost and margin', 'Finance', 'See the cost breakdown and margin behind each sample price.', 1, 61),
                 ('password_reset.view', 'View password reset history', 'Operators', 'Review who requested a password recovery, with their verification photo.', 1, 62),
                 ('password_reset.delete', 'Delete password reset history', 'Operators', 'Delete password recovery records and their photos.', 1, 64),
                 ('two_factor.reset', 'Reset another operator''s 2FA', 'Operators', 'Turn off two-step verification for another operator who lost their phone.', 1, 66),
@@ -1492,6 +1505,26 @@ impl TursoClient {
                 "INSERT OR IGNORE INTO setting_gex_system (key, value) VALUES ('notification_permissions_seeded', '1');",
                 vec![],
             ),
+            // Izin RnD (v2.1, PRD F-14), sekali saja. WAJIB identik dengan
+            // `RND_PERMISSION_SEED_SQL` di `db-schema.ts`.
+            Statement::new(
+                "INSERT OR IGNORE INTO role_permission (role_id, permission_key, is_allowed, updated_at, updated_by) SELECT r.id, p.permission_key, 1, datetime('now'), 'system' FROM app_role r JOIN app_permission p ON p.permission_key IN ('rnd.manage', 'samples.view', 'clients.view') WHERE r.role_key = 'rnd' AND NOT EXISTS (SELECT 1 FROM setting_gex_system WHERE key = 'rnd_permissions_seeded');",
+                vec![],
+            ),
+            Statement::new(
+                "INSERT OR IGNORE INTO setting_gex_system (key, value) VALUES ('rnd_permissions_seeded', '1');",
+                vec![],
+            ),
+            // Izin Finance (v2.2, PRD F-15/F-16), sekali saja. WAJIB identik
+            // dengan `FINANCE_PERMISSION_SEED_SQL` di `db-schema.ts`.
+            Statement::new(
+                "INSERT OR IGNORE INTO role_permission (role_id, permission_key, is_allowed, updated_at, updated_by) SELECT r.id, p.permission_key, 1, datetime('now'), 'system' FROM app_role r JOIN app_permission p ON p.permission_key IN ('finance.manage', 'pricing.view', 'samples.view', 'clients.view') WHERE r.role_key = 'finance' AND NOT EXISTS (SELECT 1 FROM setting_gex_system WHERE key = 'finance_permissions_seeded');",
+                vec![],
+            ),
+            Statement::new(
+                "INSERT OR IGNORE INTO setting_gex_system (key, value) VALUES ('finance_permissions_seeded', '1');",
+                vec![],
+            ),
             // Riwayat versi WAJIB lengkap, bukan hanya fondasinya.
             //
             // `isDatabaseSchemaReady` di `db-schema.ts` menuntut
@@ -1514,7 +1547,8 @@ impl TursoClient {
                 (6, 'single-session', datetime('now')),
                 (7, 'sample-requests', datetime('now')),
                 (8, 'media-assets', datetime('now')),
-                (9, 'telegram-notifications', datetime('now'));"#,
+                (9, 'telegram-notifications', datetime('now')),
+                (10, 'rnd-and-pricing', datetime('now'));"#,
                 vec![],
             ),
             // ============ DOMAIN MAKLONOS ============
@@ -1634,7 +1668,9 @@ impl TursoClient {
                     status_changed_at TEXT NOT NULL,
                     created_by INTEGER,
                     created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
+                    updated_at TEXT NOT NULL,
+                    rnd_reject_reason_option_id TEXT NOT NULL DEFAULT '',
+                    revision_fee_idr INTEGER
                 );"#,
                 vec![],
             ),
@@ -1659,6 +1695,42 @@ impl TursoClient {
                     action TEXT NOT NULL,
                     notes TEXT NOT NULL,
                     on_behalf_of_division TEXT NOT NULL DEFAULT '',
+                    recorded_by INTEGER,
+                    recorded_at TEXT NOT NULL
+                );"#,
+                vec![],
+            ),
+            // Formula per sampel yang selesai dibuat RnD (v2.1, PRD F-14),
+            // hanya-tambah. `formula_code` sengaja tidak unik. WAJIB identik
+            // dengan `db-schema.ts`.
+            Statement::new(
+                r#"CREATE TABLE IF NOT EXISTS sample_formulas (
+                    id TEXT PRIMARY KEY,
+                    sample_request_id TEXT NOT NULL,
+                    iteration_number INTEGER NOT NULL,
+                    formula_code TEXT NOT NULL,
+                    product_knowledge TEXT NOT NULL DEFAULT '',
+                    rnd_notes TEXT NOT NULL DEFAULT '',
+                    recorded_by INTEGER,
+                    recorded_at TEXT NOT NULL
+                );"#,
+                vec![],
+            ),
+            // Harga Finance per iterasi tiket (v2.2, PRD F-16), hanya-tambah.
+            // WAJIB identik dengan `db-schema.ts`.
+            Statement::new(
+                r#"CREATE TABLE IF NOT EXISTS pricing_formulas (
+                    id TEXT PRIMARY KEY,
+                    sample_request_id TEXT NOT NULL,
+                    iteration_number INTEGER NOT NULL,
+                    raw_material_cost_idr INTEGER NOT NULL,
+                    packaging_cost_idr INTEGER NOT NULL,
+                    operational_cost_idr INTEGER NOT NULL,
+                    regulatory_cost_idr INTEGER NOT NULL DEFAULT 0,
+                    hpp_unit_idr INTEGER NOT NULL,
+                    margin_bp INTEGER NOT NULL,
+                    final_unit_price_idr INTEGER NOT NULL,
+                    notes TEXT NOT NULL DEFAULT '',
                     recorded_by INTEGER,
                     recorded_at TEXT NOT NULL
                 );"#,
@@ -1767,6 +1839,14 @@ impl TursoClient {
                 vec![],
             ),
             Statement::new(
+                "CREATE INDEX IF NOT EXISTS idx_sample_formulas_request ON sample_formulas(sample_request_id, iteration_number);",
+                vec![],
+            ),
+            Statement::new(
+                "CREATE INDEX IF NOT EXISTS idx_pricing_formulas_request ON pricing_formulas(sample_request_id, iteration_number);",
+                vec![],
+            ),
+            Statement::new(
                 "CREATE INDEX IF NOT EXISTS idx_media_asset_owner ON media_asset(owner_type, owner_id);",
                 vec![],
             ),
@@ -1863,6 +1943,10 @@ impl TursoClient {
             ("sync_operation_receipt", "processed_at", "ALTER TABLE sync_operation_receipt ADD COLUMN processed_at TEXT;"),
             ("app_session", "client_kind", "ALTER TABLE app_session ADD COLUMN client_kind TEXT NOT NULL DEFAULT 'web';"),
             ("app_session", "device_label", "ALTER TABLE app_session ADD COLUMN device_label TEXT NOT NULL DEFAULT '';"),
+            // Alasan RnD menolak tiket (v2.1, PRD E-23).
+            ("sample_requests", "rnd_reject_reason_option_id", "ALTER TABLE sample_requests ADD COLUMN rnd_reject_reason_option_id TEXT NOT NULL DEFAULT '';"),
+            // Tarif revisi dari Finance (v2.2, PRD F-15).
+            ("sample_requests", "revision_fee_idr", "ALTER TABLE sample_requests ADD COLUMN revision_fee_idr INTEGER;"),
         ] {
             self.ensure_column(table, column, sql).await?;
         }
@@ -1965,6 +2049,11 @@ impl TursoClient {
         .await?;
         self.query_one(
             "INSERT OR IGNORE INTO schema_migration (version, name, applied_at) VALUES (-2017, 'telegram-notifications-v1', datetime('now'));",
+            vec![],
+        )
+        .await?;
+        self.query_one(
+            "INSERT OR IGNORE INTO schema_migration (version, name, applied_at) VALUES (-2018, 'rnd-pricing-v1', datetime('now'));",
             vec![],
         )
         .await?;
@@ -2136,7 +2225,7 @@ impl TursoClient {
             .query_one(
                 // Sentinel WAJIB dinaikkan setiap kali ensure_schema menambah
                 // tabel atau kolom — nilainya di sini dan pada INSERT harus sama.
-                "SELECT COUNT(*) AS total FROM schema_migration WHERE version = -2017;",
+                "SELECT COUNT(*) AS total FROM schema_migration WHERE version = -2018;",
                 vec![],
             )
             .await
@@ -2571,7 +2660,7 @@ impl TursoClient {
     ) -> Result<Option<String>, CommandError> {
         let row = self
             .query_one(
-                "SELECT s.status, s.is_paid_sample, s.revision_index, s.updated_at, COALESCE(c.free_revision_limit, 0) AS free_revision_limit FROM sample_requests s LEFT JOIN clients c ON c.id = s.client_id WHERE s.id = ?;",
+                "SELECT s.status, s.is_paid_sample, s.revision_index, s.updated_at, COALESCE(c.free_revision_limit, 0) AS free_revision_limit, EXISTS (SELECT 1 FROM pricing_formulas p WHERE p.sample_request_id = s.id AND p.iteration_number = s.revision_index + 1) AS has_price FROM sample_requests s LEFT JOIN clients c ON c.id = s.client_id WHERE s.id = ?;",
                 vec![json!(entity_key)],
             )
             .await?
@@ -2589,6 +2678,11 @@ impl TursoClient {
             return Ok((cloud_text("updated_at") != payload_text("base_updated_at")).then_some(changed));
         }
         let base_index = payload.get("base_revision_index").and_then(Value::as_i64).unwrap_or(-1);
+        // Harga (v2.2) hanya untuk iterasi yang masih `SAMPLE_READY` di cloud.
+        if operation == "price" {
+            let current = cloud_text("status") == "SAMPLE_READY" && cloud_int("revision_index") == base_index;
+            return Ok((!current).then_some(changed));
+        }
         if cloud_text("status") != payload_text("base_status") || cloud_int("revision_index") != base_index {
             return Ok(Some(changed));
         }
@@ -2597,11 +2691,13 @@ impl TursoClient {
             is_paid_sample: cloud_int("is_paid_sample") != 0,
             revision_index: cloud_int("revision_index"),
             free_revision_limit: cloud_int("free_revision_limit"),
+            has_price: cloud_int("has_price") != 0,
         };
         let expected = samples::apply_sample_action(
             &state,
             &payload_text("action"),
             payload.get("rnd_lead_time_days").and_then(Value::as_i64),
+            payload.get("revision_fee_idr").and_then(Value::as_i64),
         );
         let matches = expected.as_ref().is_ok_and(|result| {
             result.status == payload_text("status")
@@ -4381,6 +4477,7 @@ fn canonical_sync_route(domain: &str, operation: &str) -> Option<(&'static str, 
         ("sample", "create") => "create",
         ("sample", "update") => "update",
         ("sample", "transition") => "transition",
+        ("sample", "price") => "price",
         ("media", "upload") => "upload",
         ("audit", "record") => "record",
         _ => return None,
@@ -4757,6 +4854,22 @@ async fn apply_event_to_turso(
             let optional_int = |value: Option<&Value>| -> Value {
                 value.filter(|value| value.is_i64()).cloned().unwrap_or(Value::Null)
             };
+            // Isian RnD (v2.1) diperiksa ulang dengan aturan yang sama dengan
+            // perangkat dan Web. `rnd` absen = event build lama yang masih
+            // mengantre saat aplikasi diperbarui: diterima tanpa isian RnD,
+            // karena menolaknya membuat entri itu macet selamanya di outbox.
+            let rnd_step = match payload.get("rnd") {
+                None | Some(Value::Null) => samples::RndStep::default(),
+                Some(rnd) => samples::validate_rnd_step(&action, Some(rnd))
+                    .map_err(|message| CommandError::new("TURSO_SYNC_PAYLOAD_INVALID", message))?,
+            };
+            let formula_id = text("formula_id");
+            if rnd_step.formula_code.is_some() && formula_id.is_empty() {
+                return Err(CommandError::new(
+                    "TURSO_SYNC_PAYLOAD_INVALID",
+                    "The sample step is incomplete or invalid.",
+                ));
+            }
             let billable = payload
                 .get("is_billable")
                 .and_then(Value::as_bool)
@@ -4773,9 +4886,29 @@ async fn apply_event_to_turso(
                         json!(changed_at),
                         json!(base_status),
                         json!(number("base_revision_index")),
+                        json!(rnd_step.product_class),
+                        json!(rnd_step.reject_reason_option_id),
+                        optional_int(payload.get("revision_fee_idr")),
                     ],
                 )
                 .await?;
+            if let Some(code) = &rnd_step.formula_code {
+                turso
+                    .query_one(
+                        samples::SAMPLE_FORMULA_INSERT_SQL,
+                        vec![
+                            json!(formula_id),
+                            json!(entity_key),
+                            json!(number("base_revision_index") + 1),
+                            json!(code),
+                            json!(rnd_step.product_knowledge),
+                            json!(notes),
+                            optional_int(log.get("recorded_by")),
+                            json!(changed_at),
+                        ],
+                    )
+                    .await?;
+            }
             turso
                 .query_one(
                     samples::SAMPLE_STATUS_LOG_INSERT_SQL,
@@ -4831,6 +4964,44 @@ async fn apply_event_to_turso(
                     samples::CLIENT_LIFECYCLE_FROM_SAMPLES_SQL,
                     vec![json!(client_id), json!(changed_at)],
                 )
+                .await?;
+        }
+        ("sample", "price") => {
+            // Kecocokan iterasi diperiksa `sample_guard`. Harga jual dihitung
+            // ulang dengan aturan yang sama, tidak dipercaya dari payload.
+            let price = samples::compute_unit_price(payload)
+                .map_err(|message| CommandError::new("TURSO_SYNC_PAYLOAD_INVALID", message))?;
+            let price_id = text("price_id");
+            let recorded_at = text("recorded_at");
+            if entity_key.is_empty() || price_id.is_empty() || clients::parse_stored_timestamp(&recorded_at).is_none() {
+                return Err(CommandError::new(
+                    "TURSO_SYNC_PAYLOAD_INVALID",
+                    "The sample price is incomplete or invalid.",
+                ));
+            }
+            turso
+                .query_one(
+                    samples::PRICE_INSERT_SQL,
+                    vec![
+                        json!(price_id),
+                        json!(entity_key),
+                        json!(number("base_revision_index") + 1),
+                        json!(price.raw_material_cost_idr),
+                        json!(price.packaging_cost_idr),
+                        json!(price.operational_cost_idr),
+                        json!(price.regulatory_cost_idr),
+                        json!(price.hpp_unit_idr),
+                        json!(price.margin_bp),
+                        json!(price.final_unit_price_idr),
+                        json!(price.notes),
+                        payload.get("recorded_by").filter(|value| value.is_i64()).cloned().unwrap_or(Value::Null),
+                        json!(recorded_at),
+                    ],
+                )
+                .await?;
+            // Grup CS: sampel boleh dikirim (PRD FR-08, v2.2).
+            turso
+                .query_one(notifications::NOTIFY_SAMPLE_PRICED_SQL, vec![json!(price_id)])
                 .await?;
         }
         ("media", "upload") => {
@@ -7439,6 +7610,8 @@ mod tests {
                 "sample_requests",
                 "sample_feedbacks",
                 "sample_status_log",
+                "sample_formulas",
+                "pricing_formulas",
                 "media_asset",
                 "notification_outbox",
                 "telegram_config",

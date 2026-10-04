@@ -32,6 +32,7 @@
     "allow-desktop-create-sample-request",
     "allow-desktop-update-sample-request",
     "allow-desktop-record-sample-step",
+    "allow-desktop-record-sample-price",
     "allow-desktop-upload-sample-media",
     "allow-desktop-get-media",
     "allow-desktop-get-session",

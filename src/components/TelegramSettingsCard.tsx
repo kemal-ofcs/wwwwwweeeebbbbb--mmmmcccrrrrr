@@ -36,6 +36,11 @@ const EVENT_LABEL: Record<string, string> = {
   SAMPLE_RND_REVIEW: "Waiting for RnD review",
   SAMPLE_WAITING_PAYMENT: "Sample fee awaited",
   SAMPLE_PENDING_FEE: "Revision fee decision",
+  SAMPLE_RND_ACCEPTED: "Accepted by RnD",
+  SAMPLE_RND_REJECTED: "Rejected by RnD",
+  SAMPLE_READY: "Sample waiting for a price",
+  SAMPLE_REVISION_FEE: "Revision fee set",
+  SAMPLE_PRICED: "Sample priced",
 };
 
 const DIVISION_LABEL: Record<NotificationDivision, string> = {

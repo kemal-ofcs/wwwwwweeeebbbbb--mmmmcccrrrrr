@@ -5,17 +5,28 @@ import { type AuditActor, writeAudit } from "@/lib/server/audit";
 import { loadBusinessSettings } from "@/lib/server/business-settings";
 import { ApiRequestError } from "@/lib/server/http/api-response";
 import { listSampleMedia } from "@/lib/server/media";
-import { NOTIFY_SAMPLE_STATUS_SQL } from "@/lib/validations/notification";
+import {
+  NOTIFY_SAMPLE_PRICED_SQL,
+  NOTIFY_SAMPLE_STATUS_SQL,
+} from "@/lib/validations/notification";
 import {
   applySampleAction,
   CLIENT_LIFECYCLE_FROM_SAMPLES_SQL,
+  computeUnitPrice,
   isSampleAction,
   normalizeSampleNotes,
+  PRICE_COST_COLUMNS,
+  PRICE_INSERT_SQL,
+  PRICES_SQL,
   SAMPLE_ACTION_DIVISION,
   SAMPLE_CHANGED_ELSEWHERE,
   SAMPLE_FEEDBACK_INSERT_SQL,
   SAMPLE_FIELDS_EDITABLE_AFTER_SUBMIT,
+  SAMPLE_FORMULA_INSERT_SQL,
+  SAMPLE_FORMULA_MATCHES_SQL,
+  SAMPLE_FORMULAS_SQL,
   SAMPLE_INSERT_SQL,
+  SAMPLE_LIST_SQL,
   SAMPLE_STATUS_LOG_INSERT_SQL,
   SAMPLE_STEP_NOT_ALLOWED,
   SAMPLE_TERMINAL_STATUSES,
@@ -24,6 +35,7 @@ import {
   type SampleDraft,
   type SampleFeeMode,
   type SampleStatus,
+  validateRndStep,
   validateSampleDraft,
 } from "@/lib/validations/sample";
 
@@ -36,9 +48,6 @@ import {
 
 type Executor = Client | Transaction;
 type Draft = Record<string, unknown>;
-
-const SAMPLE_LIST_SQL =
-  "SELECT s.*, c.client_code, c.name AS client_name, c.free_revision_limit, o.nama_operator AS pic_crm_name FROM sample_requests s LEFT JOIN clients c ON c.id = s.client_id LEFT JOIN master_operator o ON o.id = s.pic_crm_id";
 
 function invalid(message: string): never {
   throw new ApiRequestError(message, 400);
@@ -74,7 +83,30 @@ export async function listSampleRequests(client: Client) {
   };
 }
 
-export async function getSampleRequest(client: Client, id: unknown) {
+/**
+ * Harga per iterasi tiket. Tanpa `pricing.view` rincian biaya dan margin
+ * dibuang; harga jual tetap terbaca (keputusan H v2.2). Cermin `sample_prices`.
+ */
+async function listSamplePrices(
+  client: Client,
+  id: string,
+  withCosts: boolean,
+) {
+  const result = await client.execute({ sql: PRICES_SQL, args: [id] });
+  return result.rows.map((row) => {
+    const price = plain(row);
+    if (!withCosts) {
+      for (const column of PRICE_COST_COLUMNS) delete price[column];
+    }
+    return price;
+  });
+}
+
+export async function getSampleRequest(
+  client: Client,
+  id: unknown,
+  withCosts: boolean,
+) {
   const key = typeof id === "string" ? id.trim() : "";
   const request = await findSample(client, key);
   const statusLog = await client.execute({
@@ -85,11 +117,22 @@ export async function getSampleRequest(client: Client, id: unknown) {
     sql: "SELECT * FROM sample_feedbacks WHERE sample_request_id = ? ORDER BY iteration_number, recorded_at;",
     args: [key],
   });
+  const formulas = await client.execute({
+    sql: SAMPLE_FORMULAS_SQL,
+    args: [key],
+  });
+  const formulaMatches = await client.execute({
+    sql: SAMPLE_FORMULA_MATCHES_SQL,
+    args: [key],
+  });
   return {
     request,
     status_log: statusLog.rows.map(plain),
     feedbacks: feedbacks.rows.map(plain),
     media: await listSampleMedia(client, key),
+    formulas: formulas.rows.map(plain),
+    formula_matches: formulaMatches.rows.map(plain),
+    prices: await listSamplePrices(client, key, withCosts),
   };
 }
 
@@ -328,8 +371,9 @@ export async function updateSampleRequest(
 
 /**
  * Catat satu langkah (FR-06.4). Langkah RnD/Finance dicatat atas nama divisi
- * itu (D-23). Status dan revisi dicocokkan di SQL: bila perangkat lain sudah
- * memindahkan tiket lebih dulu, langkah ini ditolak, bukan menimpa.
+ * itu (D-23). Izin per langkah (`sampleActionPermission`) diperiksa route.
+ * Status dan revisi dicocokkan di SQL: bila perangkat lain sudah memindahkan
+ * tiket lebih dulu, langkah ini ditolak, bukan menimpa.
  */
 export async function recordSampleStep(
   client: Client,
@@ -341,11 +385,29 @@ export async function recordSampleStep(
   if (!isSampleAction(action)) invalid(SAMPLE_STEP_NOT_ALLOWED);
   const notes = normalizeSampleNotes(input.notes);
   if (!notes) invalid("Notes are required, up to 1000 characters.");
+  const checkedRnd = validateRndStep(action, input.rnd);
+  if ("error" in checkedRnd) invalid(checkedRnd.error);
+  const rnd = checkedRnd.rnd;
+  if (
+    rnd.reject_reason_option_id !== null &&
+    !(await optionUsable(
+      client,
+      rnd.reject_reason_option_id,
+      "RND_REJECT_REASON",
+      null,
+    ))
+  ) {
+    invalid("Choose an active rejection reason.");
+  }
   const leadTime =
     action === "RND_ACCEPT" &&
     typeof input.lead_time_days === "number" &&
     Number.isSafeInteger(input.lead_time_days)
       ? input.lead_time_days
+      : null;
+  const fee =
+    action === "SET_REVISION_FEE" && typeof input.revision_fee_idr === "number"
+      ? input.revision_fee_idr
       : null;
 
   const transaction = await client.transaction("write");
@@ -359,9 +421,11 @@ export async function recordSampleStep(
         is_paid_sample: Number(current.is_paid_sample) === 1,
         revision_index: baseIndex,
         free_revision_limit: Number(current.free_revision_limit ?? 0),
+        has_price: current.unit_price_idr != null,
       },
       action,
       leadTime,
+      fee,
     );
     if ("error" in result) invalid(result.error);
     const division = SAMPLE_ACTION_DIVISION[action];
@@ -377,10 +441,29 @@ export async function recordSampleStep(
         now,
         baseStatus,
         baseIndex,
+        rnd.product_class,
+        rnd.reject_reason_option_id,
+        fee,
       ],
     });
     if (changed.rowsAffected === 0) {
       throw new ApiRequestError(SAMPLE_CHANGED_ELSEWHERE, 409);
+    }
+    if (rnd.formula_code !== null) {
+      // Iterasi ke-n = revisi ke-(n-1), sama dengan `sample_feedbacks`.
+      await transaction.execute({
+        sql: SAMPLE_FORMULA_INSERT_SQL,
+        args: [
+          crypto.randomUUID(),
+          id,
+          baseIndex + 1,
+          rnd.formula_code,
+          rnd.product_knowledge,
+          notes,
+          actor.id,
+          now,
+        ],
+      });
     }
     const logId = crypto.randomUUID();
     await transaction.execute({
@@ -434,11 +517,82 @@ export async function recordSampleStep(
         to: result.status,
         revision_index: result.revision_index,
         notes,
+        product_class: rnd.product_class,
+        formula_code: rnd.formula_code,
+        revision_fee_idr: fee,
       },
       division,
     );
     await transaction.commit();
     return { status: result.status, revision_index: result.revision_index };
+  } finally {
+    transaction.close();
+  }
+}
+
+/**
+ * Simpan harga Finance untuk iterasi yang sedang berjalan (v2.2, PRD F-16,
+ * D-27). Hanya saat `SAMPLE_READY`; harga jual dihitung `computeUnitPrice`,
+ * tidak dipercaya dari form. Cermin `desktop_record_sample_price`.
+ */
+export async function recordSamplePrice(
+  client: Client,
+  input: Draft,
+  actor: AuditActor,
+) {
+  const id = typeof input.id === "string" ? input.id.trim() : "";
+  const checked = computeUnitPrice(input.price);
+  if ("error" in checked) invalid(checked.error);
+  const price = checked.price;
+
+  const transaction = await client.transaction("write");
+  try {
+    const current = await findSample(transaction, id);
+    if (current.status !== "SAMPLE_READY") {
+      invalid("Only a sample that is ready can be priced.");
+    }
+    const iteration = Number(current.revision_index ?? 0) + 1;
+    const now = await databaseNow(transaction);
+    const priceId = crypto.randomUUID();
+    await transaction.execute({
+      sql: PRICE_INSERT_SQL,
+      args: [
+        priceId,
+        id,
+        iteration,
+        price.raw_material_cost_idr,
+        price.packaging_cost_idr,
+        price.operational_cost_idr,
+        price.regulatory_cost_idr,
+        price.hpp_unit_idr,
+        price.margin_bp,
+        price.final_unit_price_idr,
+        price.notes,
+        actor.id,
+        now,
+      ],
+    });
+    // Grup CS: sampel boleh dikirim (PRD FR-08).
+    await transaction.execute({
+      sql: NOTIFY_SAMPLE_PRICED_SQL,
+      args: [priceId],
+    });
+    await writeAudit(
+      transaction,
+      actor,
+      "sample.price",
+      "sample",
+      id,
+      {
+        client_code: String(current.client_code),
+        brand_name: String(current.brand_name),
+        iteration_number: iteration,
+        final_unit_price_idr: price.final_unit_price_idr,
+      },
+      "Finance",
+    );
+    await transaction.commit();
+    return { id: priceId, final_unit_price_idr: price.final_unit_price_idr };
   } finally {
     transaction.close();
   }

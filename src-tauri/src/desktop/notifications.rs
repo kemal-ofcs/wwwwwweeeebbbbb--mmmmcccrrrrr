@@ -139,6 +139,13 @@ fn field(payload: &Value, key: &str) -> String {
     }
 }
 
+fn rupiah(payload: &Value, key: &str) -> String {
+    payload
+        .get(key)
+        .and_then(Value::as_i64)
+        .map_or_else(|| "-".to_owned(), samples::format_rupiah)
+}
+
 fn or_dash(value: String) -> String {
     if value.trim().is_empty() {
         "-".to_owned()
@@ -192,6 +199,40 @@ pub fn render_notification(
             format!("Since {when}"),
         ]
         .join("\n"),
+        "SAMPLE_RND_ACCEPTED" => [
+            format!("RnD accepted the sample request: {sample}"),
+            format!("Sample lead time: {} days", or_dash(field(payload, "lead_time_days"))),
+            format!("Accepted {when}"),
+        ]
+        .join("\n"),
+        "SAMPLE_RND_REJECTED" => [
+            format!("RnD rejected the sample request: {sample}"),
+            format!("Reason: {}", or_dash(field(payload, "reject_reason"))),
+            format!("Rejected {when}"),
+        ]
+        .join("\n"),
+        "SAMPLE_REVISION_FEE" => [
+            format!(
+                "Revision {} fee set at {}: {sample}",
+                field(payload, "revision_index"),
+                rupiah(payload, "revision_fee_idr")
+            ),
+            "Ask the client to pay it.".to_owned(),
+            format!("Set {when}"),
+        ]
+        .join("\n"),
+        "SAMPLE_PRICED" => [
+            format!("Price ready, the sample can be sent: {sample}"),
+            format!("Unit price: {}", rupiah(payload, "unit_price_idr")),
+            format!("Priced {when}"),
+        ]
+        .join("\n"),
+        "SAMPLE_READY" => [
+            format!("Sample ready and waiting for a price: {sample}"),
+            format!("Deadline: {}", or_dash(field(payload, "deadline_at"))),
+            format!("Ready {when}"),
+        ]
+        .join("\n"),
         "COLD_DIGEST" => {
             let leads = payload
                 .get("leads")
@@ -228,7 +269,10 @@ pub fn test_message(division: &str) -> String {
 
 pub const NOTIFY_LEAD_NEW_SQL: &str = "INSERT INTO notification_outbox (id, event_type, target_division, payload_json, occurred_at, status, attempts, next_attempt_at, created_at) SELECT 'lead-new:' || c.id, 'LEAD_NEW', 'CS', json_object('client_id', c.id, 'client_code', c.client_code, 'client_name', c.name, 'channel', COALESCE(ch.label, ''), 'category', COALESCE(cat.label, ''), 'pic', COALESCE(o.nama_operator, '')), c.created_at, CASE WHEN EXISTS (SELECT 1 FROM telegram_config t WHERE t.id = 'default' AND t.is_active = 1 AND TRIM(COALESCE(t.bot_token, '')) <> '') AND TRIM(COALESCE((SELECT g.value FROM setting_gex_system g WHERE g.key = 'telegram_chat_id_cs'), '')) <> '' THEN 'PENDING' ELSE 'SKIPPED' END, 0, datetime('now'), datetime('now') FROM clients c JOIN leads l ON l.client_id = c.id LEFT JOIN master_option ch ON ch.id = l.channel_option_id LEFT JOIN master_option cat ON cat.id = l.product_category_option_id LEFT JOIN master_operator o ON o.id = l.pic_cs_id WHERE c.id = ?1 LIMIT 1 ON CONFLICT(id) DO NOTHING;";
 
-pub const NOTIFY_SAMPLE_STATUS_SQL: &str = "INSERT INTO notification_outbox (id, event_type, target_division, payload_json, occurred_at, status, attempts, next_attempt_at, created_at) SELECT 'sample:' || ?1, CASE s.status WHEN 'RND_REVIEW' THEN 'SAMPLE_RND_REVIEW' WHEN 'WAITING_SAMPLE_PAYMENT' THEN 'SAMPLE_WAITING_PAYMENT' ELSE 'SAMPLE_PENDING_FEE' END, CASE s.status WHEN 'RND_REVIEW' THEN 'RND' ELSE 'FINANCE' END, json_object('sample_id', s.id, 'client_code', COALESCE(c.client_code, ''), 'client_name', COALESCE(c.name, ''), 'brand_name', s.brand_name, 'revision_index', s.revision_index, 'deadline_at', s.deadline_at), s.status_changed_at, CASE WHEN EXISTS (SELECT 1 FROM telegram_config t WHERE t.id = 'default' AND t.is_active = 1 AND TRIM(COALESCE(t.bot_token, '')) <> '') AND TRIM(COALESCE((SELECT g.value FROM setting_gex_system g WHERE g.key = CASE s.status WHEN 'RND_REVIEW' THEN 'telegram_chat_id_rnd' ELSE 'telegram_chat_id_finance' END), '')) <> '' THEN 'PENDING' ELSE 'SKIPPED' END, 0, datetime('now'), datetime('now') FROM sample_requests s LEFT JOIN clients c ON c.id = s.client_id WHERE s.id = ?2 AND s.status IN ('RND_REVIEW', 'WAITING_SAMPLE_PAYMENT', 'PENDING_FEE_ASSESSMENT') LIMIT 1 ON CONFLICT(id) DO NOTHING;";
+pub const NOTIFY_SAMPLE_STATUS_SQL: &str = "INSERT INTO notification_outbox (id, event_type, target_division, payload_json, occurred_at, status, attempts, next_attempt_at, created_at) SELECT 'sample:' || ?1, CASE s.status WHEN 'RND_REVIEW' THEN 'SAMPLE_RND_REVIEW' WHEN 'WAITING_SAMPLE_PAYMENT' THEN 'SAMPLE_WAITING_PAYMENT' WHEN 'PENDING_FEE_ASSESSMENT' THEN 'SAMPLE_PENDING_FEE' WHEN 'RND_ACCEPTED' THEN 'SAMPLE_RND_ACCEPTED' WHEN 'RND_REJECTED' THEN 'SAMPLE_RND_REJECTED' WHEN 'WAITING_REVISION_PAYMENT' THEN 'SAMPLE_REVISION_FEE' ELSE 'SAMPLE_READY' END, CASE WHEN s.status = 'RND_REVIEW' THEN 'RND' WHEN s.status IN ('WAITING_SAMPLE_PAYMENT', 'PENDING_FEE_ASSESSMENT', 'SAMPLE_READY') THEN 'FINANCE' ELSE 'CS' END, json_object('sample_id', s.id, 'client_code', COALESCE(c.client_code, ''), 'client_name', COALESCE(c.name, ''), 'brand_name', s.brand_name, 'revision_index', s.revision_index, 'deadline_at', s.deadline_at, 'lead_time_days', s.rnd_lead_time_days, 'reject_reason', COALESCE(r.label, ''), 'revision_fee_idr', s.revision_fee_idr), s.status_changed_at, CASE WHEN EXISTS (SELECT 1 FROM telegram_config t WHERE t.id = 'default' AND t.is_active = 1 AND TRIM(COALESCE(t.bot_token, '')) <> '') AND TRIM(COALESCE((SELECT g.value FROM setting_gex_system g WHERE g.key = CASE WHEN s.status = 'RND_REVIEW' THEN 'telegram_chat_id_rnd' WHEN s.status IN ('WAITING_SAMPLE_PAYMENT', 'PENDING_FEE_ASSESSMENT', 'SAMPLE_READY') THEN 'telegram_chat_id_finance' ELSE 'telegram_chat_id_cs' END), '')) <> '' THEN 'PENDING' ELSE 'SKIPPED' END, 0, datetime('now'), datetime('now') FROM sample_requests s LEFT JOIN clients c ON c.id = s.client_id LEFT JOIN master_option r ON r.id = s.rnd_reject_reason_option_id WHERE s.id = ?2 AND s.status IN ('RND_REVIEW', 'WAITING_SAMPLE_PAYMENT', 'PENDING_FEE_ASSESSMENT', 'RND_ACCEPTED', 'RND_REJECTED', 'SAMPLE_READY', 'WAITING_REVISION_PAYMENT') LIMIT 1 ON CONFLICT(id) DO NOTHING;";
+
+/// Harga Finance tersimpan (v2.2): grup CS boleh mengirim sampel.
+pub const NOTIFY_SAMPLE_PRICED_SQL: &str = "INSERT INTO notification_outbox (id, event_type, target_division, payload_json, occurred_at, status, attempts, next_attempt_at, created_at) SELECT 'price:' || p.id, 'SAMPLE_PRICED', 'CS', json_object('sample_id', s.id, 'client_code', COALESCE(c.client_code, ''), 'client_name', COALESCE(c.name, ''), 'brand_name', s.brand_name, 'unit_price_idr', p.final_unit_price_idr, 'iteration_number', p.iteration_number), p.recorded_at, CASE WHEN EXISTS (SELECT 1 FROM telegram_config t WHERE t.id = 'default' AND t.is_active = 1 AND TRIM(COALESCE(t.bot_token, '')) <> '') AND TRIM(COALESCE((SELECT g.value FROM setting_gex_system g WHERE g.key = 'telegram_chat_id_cs'), '')) <> '' THEN 'PENDING' ELSE 'SKIPPED' END, 0, datetime('now'), datetime('now') FROM pricing_formulas p JOIN sample_requests s ON s.id = p.sample_request_id LEFT JOIN clients c ON c.id = s.client_id WHERE p.id = ?1 LIMIT 1 ON CONFLICT(id) DO NOTHING;";
 
 pub const COLD_DIGEST_STATE_SQL: &str = "SELECT (SELECT COUNT(*) FROM notification_outbox WHERE id = ?1) AS done, COALESCE((SELECT MAX(id) FROM notification_outbox WHERE id LIKE 'cold-digest:%'), '') AS last_id;";
 
@@ -749,6 +793,28 @@ mod tests {
         assert_eq!(
             render_notification("SAMPLE_PENDING_FEE", &sample, "2026-10-03 07:05:00", "Asia/Jakarta"),
             "Revision 2 is over the free quota and needs a fee decision: Aura Glow for Aura Beauty (KLN-20261003-WB01)\nSince 2026-10-03 14:05 WIB"
+        );
+        let rnd = json!({ "client_name": "Aura Beauty", "client_code": "KLN-20261003-WB01", "brand_name": "Aura Glow", "deadline_at": "2026-10-31", "lead_time_days": 14, "reject_reason": "Factory machine capacity" });
+        assert_eq!(
+            render_notification("SAMPLE_RND_ACCEPTED", &rnd, "2026-10-03 07:05:00", "Asia/Jakarta"),
+            "RnD accepted the sample request: Aura Glow for Aura Beauty (KLN-20261003-WB01)\nSample lead time: 14 days\nAccepted 2026-10-03 14:05 WIB"
+        );
+        assert_eq!(
+            render_notification("SAMPLE_RND_REJECTED", &rnd, "2026-10-03 07:05:00", "Asia/Jakarta"),
+            "RnD rejected the sample request: Aura Glow for Aura Beauty (KLN-20261003-WB01)\nReason: Factory machine capacity\nRejected 2026-10-03 14:05 WIB"
+        );
+        assert_eq!(
+            render_notification("SAMPLE_READY", &sample, "2026-10-03 07:05:00", "Asia/Jakarta"),
+            "Sample ready and waiting for a price: Aura Glow for Aura Beauty (KLN-20261003-WB01)\nDeadline: 2026-10-31\nReady 2026-10-03 14:05 WIB"
+        );
+        let money = json!({ "client_name": "Aura Beauty", "client_code": "KLN-20261003-WB01", "brand_name": "Aura Glow", "revision_index": 2, "revision_fee_idr": 750000, "unit_price_idr": 32500 });
+        assert_eq!(
+            render_notification("SAMPLE_REVISION_FEE", &money, "2026-10-03 07:05:00", "Asia/Jakarta"),
+            "Revision 2 fee set at Rp 750.000: Aura Glow for Aura Beauty (KLN-20261003-WB01)\nAsk the client to pay it.\nSet 2026-10-03 14:05 WIB"
+        );
+        assert_eq!(
+            render_notification("SAMPLE_PRICED", &money, "2026-10-03 07:05:00", "Asia/Jakarta"),
+            "Price ready, the sample can be sent: Aura Glow for Aura Beauty (KLN-20261003-WB01)\nUnit price: Rp 32.500\nPriced 2026-10-03 14:05 WIB"
         );
         let digest = json!({ "date": "2026-10-10", "leads": [
             { "client_name": "Aura", "client_code": "KLN-1", "pic": "Rina" },

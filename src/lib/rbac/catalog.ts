@@ -30,6 +30,14 @@ export const PERMISSION_CATALOG = [
   // langkah RnD dan Finance atas nama divisi itu (D-23).
   { key: "samples.view", name: "View sample requests", group: "Samples" },
   { key: "samples.manage", name: "Manage sample requests", group: "Samples" },
+  // Langkah RnD (v2.1, PRD F-14): terima/tolak dan sampel siap beserta
+  // formulanya. Sejak ini CS tidak lagi mencatatnya atas nama RnD.
+  { key: "rnd.manage", name: "Record RnD decisions", group: "Samples" },
+  // Langkah Finance (v2.2, PRD F-15/F-16): harga sampel, tarif revisi, dan
+  // pembayaran diterima. Rincian HPP dan margin terpisah (`pricing.view`):
+  // role tanpa izin itu hanya melihat harga jual (keputusan H).
+  { key: "finance.manage", name: "Record Finance decisions", group: "Finance" },
+  { key: "pricing.view", name: "View cost and margin", group: "Finance" },
   // MENGAJUKAN reset password dan MENGAKTIFKAN 2FA untuk akun sendiri tidak
   // butuh izin apa pun: yang pertama memang terbuka tanpa sesi, yang kedua hak
   // setiap operator atas akunnya. Yang di-RBAC adalah membaca/menghapus jejak

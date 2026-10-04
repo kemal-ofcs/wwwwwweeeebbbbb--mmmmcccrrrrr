@@ -3471,7 +3471,37 @@ pub async fn desktop_save_business_settings(
 /// di perangkat ini (buatan sendiri atau pernah dibuka). Cermin `listSampleMedia`.
 const SAMPLE_MEDIA_LIST_SQL: &str = "SELECT m.id, m.purpose, m.byte_size, m.created_by, o.nama_operator AS created_by_name, m.created_at, CASE WHEN m.data_base64 <> '' THEN 1 ELSE 0 END AS has_data FROM media_asset m LEFT JOIN master_operator o ON o.id = m.created_by WHERE m.owner_type = 'sample' AND m.owner_id = ? ORDER BY m.created_at, m.rowid;";
 
-const SAMPLE_LIST_SQL: &str = "SELECT s.*, c.client_code, c.name AS client_name, c.free_revision_limit, o.nama_operator AS pic_crm_name FROM sample_requests s LEFT JOIN clients c ON c.id = s.client_id LEFT JOIN master_operator o ON o.id = s.pic_crm_id";
+const SAMPLE_LIST_SQL: &str = samples::SAMPLE_LIST_SQL;
+
+/// Pemeriksaan izin tanpa menolak, untuk data yang disaring per role
+/// (rincian HPP, keputusan H v2.2). Superadmin memegang seluruh katalog.
+fn session_has_permission(state: &DesktopState, permission: &str) -> bool {
+    state.session.lock().ok().is_some_and(|session| {
+        session.as_ref().is_some_and(|session| {
+            session.operator.is_superadmin || session.operator.permissions.iter().any(|key| key == permission)
+        })
+    })
+}
+
+/// Harga per iterasi tiket. Tanpa `pricing.view` rincian biaya dan margin
+/// dibuang; harga jual tetap terbaca. Cermin `listSamplePrices`.
+fn sample_prices(
+    connection: &rusqlite::Connection,
+    id: &str,
+    with_costs: bool,
+) -> Result<Vec<Value>, CommandError> {
+    let mut prices = query_json(connection, samples::PRICES_SQL, &[&id])?;
+    if !with_costs {
+        for price in &mut prices {
+            if let Some(row) = price.as_object_mut() {
+                for column in samples::PRICE_COST_COLUMNS {
+                    row.remove(*column);
+                }
+            }
+        }
+    }
+    Ok(prices)
+}
 
 fn sample_invalid(message: impl Into<String>) -> CommandError {
     CommandError::new("SAMPLE_INVALID", message)
@@ -3514,11 +3544,17 @@ pub fn desktop_get_sample_request(state: State<'_, DesktopState>, id: String) ->
         &[&id],
     )?;
     let media = query_json(&connection, SAMPLE_MEDIA_LIST_SQL, &[&id])?;
+    let formulas = query_json(&connection, samples::SAMPLE_FORMULAS_SQL, &[&id])?;
+    let formula_matches = query_json(&connection, samples::SAMPLE_FORMULA_MATCHES_SQL, &[&id])?;
+    let prices = sample_prices(&connection, &id, session_has_permission(&state, "pricing.view"))?;
     Ok(json!({
         "request": request,
         "status_log": status_log,
         "feedbacks": feedbacks,
         "media": media,
+        "formulas": formulas,
+        "formula_matches": formula_matches,
+        "prices": prices,
     }))
 }
 
@@ -3791,8 +3827,9 @@ pub async fn desktop_update_sample_request(
     Ok(json!({ "id": id }))
 }
 
-/// Catat satu langkah tiket (FR-06.4). Langkah RnD/Finance dicatat CS atas
-/// nama divisi itu (D-23); catatan wajib. Cermin `recordSampleStep`.
+/// Catat satu langkah tiket (FR-06.4). Izin per langkah dari
+/// `sample_action_permission`: RnD (v2.1) dan Finance (v2.2) mencatat
+/// langkahnya sendiri. Catatan wajib. Cermin `recordSampleStep`.
 #[tauri::command]
 pub async fn desktop_record_sample_step(
     state: State<'_, DesktopState>,
@@ -3800,13 +3837,21 @@ pub async fn desktop_record_sample_step(
     action: String,
     notes: String,
     lead_time_days: Option<i64>,
+    rnd: Option<Value>,
+    revision_fee_idr: Option<i64>,
 ) -> Result<Value, CommandError> {
-    let operator = require_permission(&state, "samples.manage")?;
+    let operator = require_permission(&state, samples::sample_action_permission(&action))?;
     let notes = samples::normalize_sample_notes(&notes)
         .ok_or_else(|| sample_invalid("Notes are required, up to 1000 characters."))?;
+    let rnd_step = samples::validate_rnd_step(&action, rnd.as_ref()).map_err(sample_invalid)?;
     let now = clients::utc_timestamp(storage::now_epoch_seconds());
     let current = {
         let connection = storage::database(&state.data_dir)?;
+        if let Some(reason) = &rnd_step.reject_reason_option_id {
+            if !option_usable(&connection, reason, "RND_REJECT_REASON", None)? {
+                return Err(sample_invalid("Choose an active rejection reason."));
+            }
+        }
         query_json(&connection, &format!("{SAMPLE_LIST_SQL} WHERE s.id = ?;"), &[&id])?
             .into_iter()
             .next()
@@ -3819,9 +3864,11 @@ pub async fn desktop_record_sample_step(
         is_paid_sample: current["is_paid_sample"].as_i64() == Some(1),
         revision_index: base_index,
         free_revision_limit: current["free_revision_limit"].as_i64().unwrap_or(0),
+        has_price: !current["unit_price_idr"].is_null(),
     };
     let lead_time = if action == "RND_ACCEPT" { lead_time_days } else { None };
-    let result = samples::apply_sample_action(&state_before, &action, lead_time).map_err(sample_invalid)?;
+    let fee = if action == "SET_REVISION_FEE" { revision_fee_idr } else { None };
+    let result = samples::apply_sample_action(&state_before, &action, lead_time, fee).map_err(sample_invalid)?;
     let division = samples::sample_action_division(&action);
     let client_id = current["client_id"].as_str().unwrap_or_default().to_owned();
     let log_id = clients::new_uuid();
@@ -3832,6 +3879,8 @@ pub async fn desktop_record_sample_step(
             "client_decision": decision,
         })
     });
+    // Iterasi ke-n = revisi ke-(n-1), sama dengan `sample_feedbacks`.
+    let formula_id = rnd_step.formula_code.as_ref().map(|_| clients::new_uuid());
     let payload = json!({
         "id": id,
         "client_id": client_id,
@@ -3842,6 +3891,7 @@ pub async fn desktop_record_sample_step(
         "revision_index": result.revision_index,
         "is_billable": result.is_billable,
         "rnd_lead_time_days": lead_time,
+        "revision_fee_idr": fee,
         "changed_at": now,
         "log": {
             "id": log_id,
@@ -3850,6 +3900,15 @@ pub async fn desktop_record_sample_step(
             "recorded_by": operator.id,
         },
         "feedback": feedback,
+        // Isian RnD apa adanya supaya cloud memvalidasinya ulang dengan
+        // `validate_rnd_step` yang sama.
+        "rnd": {
+            "product_class": rnd_step.product_class,
+            "reject_reason_option_id": rnd_step.reject_reason_option_id,
+            "formula_code": rnd_step.formula_code,
+            "product_knowledge": rnd_step.product_knowledge,
+        },
+        "formula_id": formula_id,
     });
     let audit = AuditEntry {
         actor: &operator,
@@ -3864,6 +3923,9 @@ pub async fn desktop_record_sample_step(
             "to": result.status,
             "revision_index": result.revision_index,
             "notes": notes,
+            "product_class": rnd_step.product_class,
+            "formula_code": rnd_step.formula_code,
+            "revision_fee_idr": fee,
         }),
         on_behalf_of: division,
     };
@@ -3880,11 +3942,31 @@ pub async fn desktop_record_sample_step(
                     &now,
                     &base_status,
                     base_index,
+                    rnd_step.product_class,
+                    rnd_step.reject_reason_option_id.as_deref(),
+                    fee,
                 ],
             )
             .map_err(|_| CommandError::internal())?;
         if changed == 0 {
             return Err(sample_invalid(samples::SAMPLE_CHANGED_ELSEWHERE));
+        }
+        if let (Some(formula_id), Some(code)) = (&formula_id, &rnd_step.formula_code) {
+            transaction
+                .execute(
+                    samples::SAMPLE_FORMULA_INSERT_SQL,
+                    rusqlite::params![
+                        formula_id,
+                        &id,
+                        base_index + 1,
+                        code,
+                        rnd_step.product_knowledge.as_deref(),
+                        &notes,
+                        operator.id,
+                        &now,
+                    ],
+                )
+                .map_err(|_| CommandError::internal())?;
         }
         transaction
             .execute(
@@ -3926,6 +4008,84 @@ pub async fn desktop_record_sample_step(
 
     let _ = sync::synchronize(&state).await;
     Ok(json!({ "status": result.status, "revision_index": result.revision_index }))
+}
+
+/// Simpan harga Finance untuk iterasi tiket yang sedang berjalan (v2.2, PRD
+/// F-16, D-27). Hanya saat `SAMPLE_READY`; harga jual dihitung ulang di sini
+/// dan di cloud, tidak dipercaya dari form. Cermin `recordSamplePrice`.
+#[tauri::command]
+pub async fn desktop_record_sample_price(
+    state: State<'_, DesktopState>,
+    id: String,
+    price: Value,
+) -> Result<Value, CommandError> {
+    let operator = require_permission(&state, "finance.manage")?;
+    let checked = samples::compute_unit_price(&price).map_err(sample_invalid)?;
+    let now = clients::utc_timestamp(storage::now_epoch_seconds());
+    let current = {
+        let connection = storage::database(&state.data_dir)?;
+        query_json(&connection, &format!("{SAMPLE_LIST_SQL} WHERE s.id = ?;"), &[&id])?
+            .into_iter()
+            .next()
+            .ok_or_else(|| CommandError::new("SAMPLE_NOT_FOUND", "Sample request not found."))?
+    };
+    if current["status"].as_str() != Some("SAMPLE_READY") {
+        return Err(sample_invalid("Only a sample that is ready can be priced."));
+    }
+    let base_index = current["revision_index"].as_i64().unwrap_or(0);
+    let price_id = clients::new_uuid();
+    let payload = json!({
+        "id": id,
+        "price_id": price_id,
+        "base_revision_index": base_index,
+        "raw_material_cost_idr": checked.raw_material_cost_idr,
+        "packaging_cost_idr": checked.packaging_cost_idr,
+        "operational_cost_idr": checked.operational_cost_idr,
+        "regulatory_cost_idr": checked.regulatory_cost_idr,
+        "margin_bp": checked.margin_bp,
+        "notes": checked.notes,
+        "recorded_by": operator.id,
+        "recorded_at": now,
+    });
+    let audit = AuditEntry {
+        actor: &operator,
+        action: "sample.price",
+        entity_type: "sample",
+        entity_id: &id,
+        summary: json!({
+            "client_code": current["client_code"],
+            "brand_name": current["brand_name"],
+            "iteration_number": base_index + 1,
+            "final_unit_price_idr": checked.final_unit_price_idr,
+        }),
+        on_behalf_of: Some("Finance"),
+    };
+    commit_with_outbox(&state, "sample", "price", &id, payload, Some(audit), |transaction| {
+        transaction
+            .execute(
+                samples::PRICE_INSERT_SQL,
+                rusqlite::params![
+                    &price_id,
+                    &id,
+                    base_index + 1,
+                    checked.raw_material_cost_idr,
+                    checked.packaging_cost_idr,
+                    checked.operational_cost_idr,
+                    checked.regulatory_cost_idr,
+                    checked.hpp_unit_idr,
+                    checked.margin_bp,
+                    checked.final_unit_price_idr,
+                    &checked.notes,
+                    operator.id,
+                    &now,
+                ],
+            )
+            .map_err(|_| CommandError::internal())?;
+        Ok(())
+    })?;
+
+    let _ = sync::synchronize(&state).await;
+    Ok(json!({ "id": price_id, "final_unit_price_idr": checked.final_unit_price_idr }))
 }
 
 /// Unggah satu foto terkompresi ke tiket (PRD FR-07). Kompresi sudah terjadi

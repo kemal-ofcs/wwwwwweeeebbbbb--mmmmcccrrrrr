@@ -236,7 +236,7 @@ describe("notifikasi divisi, jalur Web", () => {
     await client.execute("DELETE FROM notification_outbox WHERE id = 'race';");
   });
 
-  test("langkah tiket: hanya RND_REVIEW dan status Finance yang memberi tahu", async () => {
+  test("langkah tiket: antrean RnD, tagihan Finance, dan hasil RnD untuk CS", async () => {
     const owner = await newLead();
     const { id } = await samples.createSampleRequest(
       client,
@@ -261,7 +261,10 @@ describe("notifikasi divisi, jalur Web", () => {
         CS,
       );
     await step("SUBMIT_TO_RND");
-    await step("RND_ACCEPT", { lead_time_days: 7 });
+    await step("RND_ACCEPT", {
+      lead_time_days: 7,
+      rnd: { product_class: "NEW" },
+    });
     await step("PROCEED");
     const events = await rows(
       `SELECT n.event_type, n.target_division, n.status FROM notification_outbox n
@@ -274,6 +277,11 @@ describe("notifikasi divisi, jalur Web", () => {
       {
         event_type: "SAMPLE_RND_REVIEW",
         target_division: "RND",
+        status: "PENDING",
+      },
+      {
+        event_type: "SAMPLE_RND_ACCEPTED",
+        target_division: "CS",
         status: "PENDING",
       },
       {

@@ -53,6 +53,62 @@ export interface SampleRequestRecord {
   created_by: number | null;
   created_at: string;
   updated_at: string;
+  rnd_reject_reason_option_id: string;
+  /** Tarif revisi dari Finance (v2.2); null = belum ditetapkan. */
+  revision_fee_idr: number | null;
+  /** Harga jual iterasi yang sedang berjalan; null = belum diberi harga. */
+  unit_price_idr: number | null;
+}
+
+/**
+ * Harga Finance satu iterasi (v2.2). Rincian biaya dan margin hanya terisi
+ * untuk pemegang `pricing.view`; yang lain menerima harga jualnya saja.
+ */
+export interface SamplePriceEntry {
+  id: string;
+  iteration_number: number;
+  final_unit_price_idr: number;
+  notes: string;
+  recorded_by: number | null;
+  recorded_by_name: string | null;
+  recorded_at: string;
+  raw_material_cost_idr?: number;
+  packaging_cost_idr?: number;
+  operational_cost_idr?: number;
+  regulatory_cost_idr?: number;
+  hpp_unit_idr?: number;
+  margin_bp?: number;
+}
+
+/** Isian form harga; harga jual dihitung backend. */
+export interface SamplePriceInput {
+  raw_material_cost_idr: number;
+  packaging_cost_idr: number;
+  operational_cost_idr: number;
+  regulatory_cost_idr: number;
+  margin_bp: number;
+  notes: string;
+}
+
+/** Formula satu sampel yang selesai dibuat RnD (v2.1), satu per iterasi. */
+export interface SampleFormulaEntry {
+  id: string;
+  iteration_number: number;
+  formula_code: string;
+  product_knowledge: string;
+  rnd_notes: string;
+  recorded_by: number | null;
+  recorded_by_name: string | null;
+  recorded_at: string;
+}
+
+/** Tiket lain yang memakai formula code yang sama. */
+export interface SampleFormulaMatch {
+  formula_code: string;
+  sample_request_id: string;
+  brand_name: string;
+  status: string;
+  client_code: string | null;
 }
 
 export interface SampleStatusLogEntry {
@@ -92,6 +148,9 @@ export interface SampleDetail {
   status_log: SampleStatusLogEntry[];
   feedbacks: SampleFeedbackEntry[];
   media: SampleMediaEntry[];
+  formulas: SampleFormulaEntry[];
+  formula_matches: SampleFormulaMatch[];
+  prices: SamplePriceEntry[];
 }
 
 export interface SampleList {
@@ -178,6 +237,15 @@ export interface SampleStepInput {
   notes: string;
   /** Wajib untuk `RND_ACCEPT`; diabaikan aksi lain. */
   lead_time_days: number | null;
+  /** Isian langkah RnD (`validateRndStep`); diabaikan langkah lain. */
+  rnd: {
+    product_class: string;
+    reject_reason_option_id: string;
+    formula_code: string;
+    product_knowledge: string;
+  };
+  /** Wajib untuk `SET_REVISION_FEE` (0 = dibebaskan); diabaikan aksi lain. */
+  revision_fee_idr: number | null;
 }
 
 export async function recordSampleStep(
@@ -189,9 +257,35 @@ export async function recordSampleStep(
       action: step.action,
       notes: step.notes,
       leadTimeDays: step.lead_time_days,
+      rnd: {
+        product_class: step.rnd.product_class,
+        reject_reason_option_id: step.rnd.reject_reason_option_id,
+        formula_code: step.rnd.formula_code,
+        product_knowledge: step.rnd.product_knowledge,
+      },
+      revisionFeeIdr: step.revision_fee_idr,
     });
   }
   return requestWebApi("/api/samples/step", "POST", step);
+}
+
+/** Harga Finance untuk iterasi tiket yang sedang `SAMPLE_READY` (v2.2). */
+export async function recordSamplePrice(
+  id: string,
+  price: SamplePriceInput,
+): Promise<{ id: string; final_unit_price_idr: number }> {
+  const body = {
+    raw_material_cost_idr: price.raw_material_cost_idr,
+    packaging_cost_idr: price.packaging_cost_idr,
+    operational_cost_idr: price.operational_cost_idr,
+    regulatory_cost_idr: price.regulatory_cost_idr,
+    margin_bp: price.margin_bp,
+    notes: price.notes,
+  };
+  if (isDesktopRuntime()) {
+    return invokeDesktop("desktop_record_sample_price", { id, price: body });
+  }
+  return requestWebApi("/api/samples/price", "POST", { id, price: body });
 }
 
 export async function getBusinessSettings(): Promise<BusinessSettings> {
