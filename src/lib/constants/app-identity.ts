@@ -18,10 +18,10 @@
  * Dipakai membentuk pengenal yang harus unik antar produk, bukan untuk
  * ditampilkan kepada pengguna.
  */
-export const APP_SLUG = "app-template";
+export const APP_SLUG = "companyos";
 
 /** Nama yang dilihat pengguna. */
-export const APP_DISPLAY_NAME = "App Template";
+export const APP_DISPLAY_NAME = "Company OS";
 
 /**
  * Alamat server aplikasi bawaan, dipakai sebelum pengguna mengonfigurasinya.

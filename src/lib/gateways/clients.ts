@@ -9,6 +9,10 @@ import type {
   LeadSegment,
   MasterOptionKind,
 } from "@/lib/validations/client";
+import type {
+  DateOrder,
+  ImportRowInput,
+} from "@/lib/validations/client-import";
 
 /**
  * Gateway domain klien, lead, dan Master Data.
@@ -262,4 +266,38 @@ export async function reassignLead(
     lead_id: leadId,
     pic_cs_id: picCsId,
   });
+}
+
+export interface ClientImportRequest {
+  file_name: string;
+  date_order: DateOrder;
+  /** `true` = pratinjau tanpa menulis apa pun. */
+  dry_run: boolean;
+  rows: ImportRowInput[];
+}
+
+export interface ClientImportReport {
+  dry_run: boolean;
+  total: number;
+  added: number;
+  skipped: number;
+  invalid: number;
+  results: { line: number; status: "skipped" | "invalid"; message: string }[];
+  warnings: { line: number; message: string }[];
+}
+
+/** Impor CSV (PRD FR-09): pratinjau dan simpan memakai pemeriksaan yang sama. */
+export async function importClients(
+  request: ClientImportRequest,
+): Promise<ClientImportReport> {
+  if (isDesktopRuntime()) {
+    return invokeDesktop<ClientImportReport>("desktop_import_clients", {
+      import: request,
+    });
+  }
+  return requestWebApi<ClientImportReport>(
+    "/api/clients/import",
+    "POST",
+    request,
+  );
 }

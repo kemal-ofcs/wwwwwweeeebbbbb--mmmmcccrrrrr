@@ -1,4 +1,4 @@
-import type { NextRequest } from "next/server";
+import { after, type NextRequest } from "next/server";
 import { requireWebPermission } from "@/lib/server/auth/authorize";
 import {
   ensureServerDatabaseInitialized,
@@ -10,6 +10,7 @@ import {
   toApiErrorResponse,
 } from "@/lib/server/http/api-response";
 import { assertSameOriginMutation } from "@/lib/server/http/request-security";
+import { dispatchNotificationsQuietly } from "@/lib/server/notifications";
 import { recordSampleStep } from "@/lib/server/samples";
 
 export const runtime = "nodejs";
@@ -21,10 +22,10 @@ export async function POST(request: NextRequest) {
     await ensureServerDatabaseInitialized();
     const operator = await requireWebPermission(request, "samples.manage");
     const body = await readJsonBody<Record<string, unknown>>(request);
-    return noStoreJson({
-      sukses: true,
-      ...(await recordSampleStep(getServerDatabase(), body, operator)),
-    });
+    const step = await recordSampleStep(getServerDatabase(), body, operator);
+    // Antrean RnD/Finance diberi tahu sesudah respons (PRD FR-08).
+    after(() => dispatchNotificationsQuietly(getServerDatabase()));
+    return noStoreJson({ sukses: true, ...step });
   } catch (error) {
     return toApiErrorResponse(error);
   }

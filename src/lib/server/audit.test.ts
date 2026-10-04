@@ -50,7 +50,12 @@ beforeAll(async () => {
 
 afterAll(() => {
   client.close();
-  rmSync(directory, { recursive: true, force: true });
+  try {
+    rmSync(directory, { recursive: true, force: true });
+  } catch {
+    // Windows: libsql baru melepas berkas database saat proses selesai, jadi
+    // penghapusan di sini gagal EBUSY. Folder temp boleh tertinggal.
+  }
 });
 
 describe("log audit, jalur Web", () => {
@@ -185,6 +190,7 @@ describe("role divisi", () => {
       "home.view",
       "leads.manage",
       "leads.view",
+      "notifications_cs.view",
       "samples.manage",
       "samples.view",
       "sync.view",

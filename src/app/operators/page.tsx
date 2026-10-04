@@ -89,6 +89,8 @@ export default function MasterOperatorPage() {
     tone: "success" | "error";
     message: string;
   } | null>(null);
+  // Galat simpan ditampilkan DI DALAM formulir: banner halaman tertutup modal.
+  const [formError, setFormError] = useState<string | null>(null);
   const [operatorModal, setOperatorModal] = useState(false);
   const [editingOperator, setEditingOperator] = useState<OperatorRecord | null>(
     null,
@@ -177,6 +179,7 @@ export default function MasterOperatorPage() {
     isSubmittingRef.current = true;
     setSaving(true);
     setFeedback(null);
+    setFormError(null);
     try {
       if (editingOperator) {
         await updateMasterOperator(user.id, editingOperator.id, operatorDraft);
@@ -190,7 +193,7 @@ export default function MasterOperatorPage() {
         message: editingOperator ? "Operator updated." : "Operator added.",
       });
     } catch (error) {
-      setFeedback({ tone: "error", message: errorMessage(error) });
+      setFormError(errorMessage(error));
     } finally {
       isSubmittingRef.current = false;
       setSaving(false);
@@ -249,6 +252,7 @@ export default function MasterOperatorPage() {
     isSubmittingRef.current = true;
     setSaving(true);
     setFeedback(null);
+    setFormError(null);
     try {
       if (editingRole) {
         await updateRole(user.id, editingRole.id, roleDraft);
@@ -267,7 +271,7 @@ export default function MasterOperatorPage() {
           : "Role created.",
       });
     } catch (error) {
-      setFeedback({ tone: "error", message: errorMessage(error) });
+      setFormError(errorMessage(error));
     } finally {
       isSubmittingRef.current = false;
       setSaving(false);
@@ -388,8 +392,12 @@ export default function MasterOperatorPage() {
           draft={operatorDraft}
           roles={roles}
           saving={saving}
+          error={formError}
           onChange={setOperatorDraft}
-          onClose={() => setOperatorModal(false)}
+          onClose={() => {
+            setOperatorModal(false);
+            setFormError(null);
+          }}
           onSubmit={submitOperator}
         />
       ) : null}
@@ -401,8 +409,12 @@ export default function MasterOperatorPage() {
           permissions={selectedPermissions}
           saving={saving}
           onDraftChange={setRoleDraft}
+          error={formError}
           onPermissionsChange={setSelectedPermissions}
-          onClose={() => setRoleModal(false)}
+          onClose={() => {
+            setRoleModal(false);
+            setFormError(null);
+          }}
           onSubmit={submitRole}
         />
       ) : null}
@@ -446,6 +458,7 @@ function OperatorFormModal({
   draft,
   roles,
   saving,
+  error,
   onChange,
   onClose,
   onSubmit,
@@ -454,6 +467,7 @@ function OperatorFormModal({
   draft: OperatorDraft;
   roles: RoleRecord[];
   saving: boolean;
+  error: string | null;
   onChange: (draft: OperatorDraft) => void;
   onClose: () => void;
   onSubmit: (event: FormEvent) => void;
@@ -465,6 +479,7 @@ function OperatorFormModal({
       onClose={onClose}
     >
       <form className="space-y-4" onSubmit={onSubmit}>
+        {error ? <FeedbackBanner tone="error">{error}</FeedbackBanner> : null}
         <div className="grid gap-4 sm:grid-cols-2">
           <FormField label="Operator code" htmlFor="operator-code">
             <input
@@ -608,6 +623,7 @@ function RoleFormModal({
   draft,
   permissions,
   saving,
+  error,
   onDraftChange,
   onPermissionsChange,
   onClose,
@@ -617,6 +633,7 @@ function RoleFormModal({
   draft: RoleFormState;
   permissions: Set<PermissionKey>;
   saving: boolean;
+  error: string | null;
   onDraftChange: (draft: RoleFormState) => void;
   onPermissionsChange: (permissions: Set<PermissionKey>) => void;
   onClose: () => void;
@@ -629,6 +646,7 @@ function RoleFormModal({
       onClose={onClose}
     >
       <form className="space-y-4" onSubmit={onSubmit}>
+        {error ? <FeedbackBanner tone="error">{error}</FeedbackBanner> : null}
         <FormField label="Role name" htmlFor="role-name">
           <input
             id="role-name"

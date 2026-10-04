@@ -16,7 +16,7 @@ use super::{
     app_identity,
     config::DesktopState,
     models::{CommandError, OfflineCredential, OperatorUser},
-    storage,
+    samples, storage,
     turso::TursoConfig,
 };
 
@@ -151,7 +151,11 @@ pub fn provision(
         device_id: Some(device_id),
         operator,
         provisioned_at: now,
-        offline_valid_until: now.saturating_add(max_age_seconds),
+        offline_valid_until: samples::offline_login_deadline(
+            now,
+            now.saturating_add(max_age_seconds),
+            offline_login_max_days(state),
+        ),
     };
     let (snapshot_path, salt_path) = credential_paths(state, &identity_key)?;
     let _guard = state
@@ -161,6 +165,16 @@ pub fn provision(
     write_snapshot(&snapshot_path, &salt_path, password, &credential)?;
     storage::save_credential_index(&state.data_dir, &credential)?;
     Ok(credential)
+}
+
+/// Masa login offline menurut setelan perusahaan yang sudah tersinkron ke
+/// perangkat ini (`offline_login_max_days`); bawaan dan batasnya 7 hari.
+fn offline_login_max_days(state: &DesktopState) -> i64 {
+    let mut values = std::collections::HashMap::new();
+    if let Ok(Some(value)) = storage::get_system_setting(&state.data_dir, samples::SETTING_OFFLINE_LOGIN_MAX_DAYS) {
+        values.insert(samples::SETTING_OFFLINE_LOGIN_MAX_DAYS.to_owned(), value);
+    }
+    samples::read_business_settings(&values).offline_login_max_days
 }
 
 pub fn load_offline(
@@ -242,7 +256,12 @@ pub fn load_offline(
             "The offline security snapshot does not match this customer deployment.",
         ));
     }
-    if storage::now_epoch_seconds() > credential.offline_valid_until {
+    let deadline = samples::offline_login_deadline(
+        credential.provisioned_at,
+        credential.offline_valid_until,
+        offline_login_max_days(state),
+    );
+    if storage::now_epoch_seconds() > deadline {
         return Err(CommandError::new(
             "OFFLINE_SNAPSHOT_EXPIRED",
             "The offline sign-in period has ended. Connect to the internet and sign in again.",

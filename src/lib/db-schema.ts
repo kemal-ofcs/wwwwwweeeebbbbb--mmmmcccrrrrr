@@ -14,7 +14,7 @@ import { runDatabaseMigrations } from "./db-migrations";
  * Rust DAN migrasi `ALTER TABLE` di `db-migrations.ts`, supaya klien mana pun
  * bisa menyembuhkan database buatan klien lain.
  */
-export const CURRENT_SCHEMA_VERSION = 8;
+export const CURRENT_SCHEMA_VERSION = 9;
 
 /** Tabel yang wajib ada sebelum database dianggap siap dipakai. */
 export const REQUIRED_TABLES = [
@@ -59,6 +59,10 @@ export const REQUIRED_TABLES = [
   "sample_status_log",
   // Foto (PRD F-07). Isi gambar tidak pernah ikut snapshot perangkat.
   "media_asset",
+  // Notifikasi divisi (PRD FR-08). Ketiganya cloud-only.
+  "notification_outbox",
+  "telegram_config",
+  "notification_seen",
 ] as const;
 
 export const REQUIRED_TABLE_COUNT = REQUIRED_TABLES.length;
@@ -122,6 +126,15 @@ export const DIVISION_ROLE_SEED_SQL = [
 export const SAMPLE_PERMISSION_SEED_SQL = [
   "INSERT OR IGNORE INTO role_permission (role_id, permission_key, is_allowed, updated_at, updated_by) SELECT r.id, p.permission_key, 1, datetime('now'), 'system' FROM app_role r JOIN app_permission p ON (r.role_key IN ('cs', 'crm') AND p.permission_key = 'samples.view') OR (r.role_key = 'cs' AND p.permission_key = 'samples.manage') WHERE r.role_key IN ('cs', 'crm') AND NOT EXISTS (SELECT 1 FROM setting_gex_system WHERE key = 'sample_permissions_seeded');",
   "INSERT OR IGNORE INTO setting_gex_system (key, value) VALUES ('sample_permissions_seeded', '1');",
+];
+
+/**
+ * Izin lonceng per divisi (PRD FR-08) untuk role divisi CS/RnD/Finance, sekali
+ * saja. WAJIB identik dengan seed yang sama di `turso.rs` (dites per karakter).
+ */
+export const NOTIFICATION_PERMISSION_SEED_SQL = [
+  "INSERT OR IGNORE INTO role_permission (role_id, permission_key, is_allowed, updated_at, updated_by) SELECT r.id, p.permission_key, 1, datetime('now'), 'system' FROM app_role r JOIN app_permission p ON (r.role_key = 'cs' AND p.permission_key = 'notifications_cs.view') OR (r.role_key = 'rnd' AND p.permission_key = 'notifications_rnd.view') OR (r.role_key = 'finance' AND p.permission_key = 'notifications_finance.view') WHERE r.role_key IN ('cs', 'rnd', 'finance') AND NOT EXISTS (SELECT 1 FROM setting_gex_system WHERE key = 'notification_permissions_seeded');",
+  "INSERT OR IGNORE INTO setting_gex_system (key, value) VALUES ('notification_permissions_seeded', '1');",
 ];
 
 export async function initDatabaseSchema(client: Client) {
@@ -479,6 +492,35 @@ export async function initDatabaseSchema(client: Client) {
       client_id TEXT NOT NULL UNIQUE,
       registered_at TEXT NOT NULL
       );`,
+    // Notifikasi divisi (PRD FR-08), cloud-only. `id` sekaligus kunci dedupe;
+    // `status` adalah status pengiriman Telegram, sedangkan lonceng membaca
+    // semua baris. `telegram_config` memegang token bot (tidak pernah dikirim ke
+    // frontend), `notification_seen` kapan operator terakhir membuka lonceng.
+    `CREATE TABLE IF NOT EXISTS notification_outbox (
+      id TEXT PRIMARY KEY,
+      event_type TEXT NOT NULL,
+      target_division TEXT NOT NULL,
+      payload_json TEXT NOT NULL DEFAULT '{}',
+      occurred_at TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'PENDING',
+      attempts INTEGER NOT NULL DEFAULT 0,
+      claimed_at TEXT,
+      next_attempt_at TEXT NOT NULL,
+      sent_at TEXT,
+      last_error TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL
+      );`,
+    `CREATE TABLE IF NOT EXISTS telegram_config (
+      id TEXT PRIMARY KEY,
+      bot_token TEXT,
+      is_active INTEGER NOT NULL DEFAULT 0,
+      updated_at TEXT NOT NULL,
+      updated_by TEXT
+      );`,
+    `CREATE TABLE IF NOT EXISTS notification_seen (
+      operator_id INTEGER PRIMARY KEY,
+      seen_at TEXT NOT NULL
+      );`,
     // =========================================
 
     `CREATE INDEX IF NOT EXISTS idx_operator_username ON master_operator(username);`,
@@ -493,6 +535,8 @@ export async function initDatabaseSchema(client: Client) {
     `CREATE INDEX IF NOT EXISTS idx_sample_feedbacks_request ON sample_feedbacks(sample_request_id, iteration_number);`,
     `CREATE INDEX IF NOT EXISTS idx_sample_status_log_request ON sample_status_log(sample_request_id, recorded_at);`,
     `CREATE INDEX IF NOT EXISTS idx_media_asset_owner ON media_asset(owner_type, owner_id);`,
+    `CREATE INDEX IF NOT EXISTS idx_notification_outbox_due ON notification_outbox(status, next_attempt_at);`,
+    `CREATE INDEX IF NOT EXISTS idx_notification_outbox_created ON notification_outbox(created_at);`,
 
     // Seed role bawaan. TIDAK ADA akun bawaan: operator pertama hanya lahir
     // lewat provisioning sekali-pakai, sehingga tidak ada kredensial default
@@ -528,6 +572,9 @@ export async function initDatabaseSchema(client: Client) {
       ('roles.manage', 'Manage roles and access', 'Roles', 'Set the permission matrix of each role.', 1, 90),
       ('settings.view', 'View system settings', 'Settings', 'View app and database settings.', 1, 100),
       ('settings.manage', 'Manage system settings', 'Settings', 'Change app and database settings.', 1, 110),
+      ('notifications_cs.view', 'CS notifications', 'Notifications', 'See new leads and leads that went Cold in the notification bell.', 1, 112),
+      ('notifications_rnd.view', 'RnD notifications', 'Notifications', 'See sample requests waiting for RnD review in the notification bell.', 1, 114),
+      ('notifications_finance.view', 'Finance notifications', 'Notifications', 'See sample fees and revision fees waiting for Finance in the notification bell.', 1, 116),
       ('sync.view', 'View sync status', 'Sync', 'View the sync indicator and queue.', 1, 120),
       ('sync.retry', 'Retry sync and resolve conflicts', 'Sync', 'Trigger a manual sync and resolve conflicts.', 1, 130),
       ('diagnostics.view', 'View system diagnostics', 'Diagnostics', 'View runtime information and database health.', 1, 140);`,
@@ -548,13 +595,14 @@ export async function initDatabaseSchema(client: Client) {
       SELECT 3, permission_key, 1, datetime('now'), 'system' FROM app_permission
       WHERE permission_key IN (
         'home.view', 'dashboard.view', 'clients.view', 'clients.manage',
-        'leads.view', 'leads.manage', 'samples.view', 'samples.manage', 'sync.view'
+        'leads.view', 'leads.manage', 'samples.view', 'samples.manage',
+        'notifications_cs.view', 'sync.view'
       );`,
 
     // `rbac_revision` WAJIB ada: nilainya yang dipakai Web dan perangkat untuk
     // mendeteksi pencabutan hak akses tanpa menunggu login ulang.
     `INSERT OR IGNORE INTO setting_gex_system (key, value) VALUES
-      ('app_name', 'App Template'),
+      ('app_name', 'Company OS'),
       ('rbac_revision', '1');`,
 
     // Role divisi (PRD FR-02), sekali saja: dijaga penanda supaya role yang
@@ -563,6 +611,8 @@ export async function initDatabaseSchema(client: Client) {
     // Izin tiket sampel (PRD F-06) untuk role divisi CS dan CRM, sekali saja
     // seperti `DIVISION_ROLE_SEED_SQL`.
     ...SAMPLE_PERMISSION_SEED_SQL,
+    // Izin lonceng per divisi (PRD FR-08), sekali saja.
+    ...NOTIFICATION_PERMISSION_SEED_SQL,
 
     // Angka 1 di sini disengaja dan TIDAK boleh diikatkan ke
     // `CURRENT_SCHEMA_VERSION`: baris ini menandai fondasi versi 1, sedangkan

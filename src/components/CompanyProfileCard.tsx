@@ -9,6 +9,7 @@ import {
   MAX_IMAGE_BASE64_LENGTH,
   saveCompanyProfile,
 } from "@/lib/gateways/company-profile";
+import { SYNC_COMPLETED_EVENT } from "@/lib/gateways/sync-status";
 
 /**
  * Identitas perusahaan pemakai aplikasi.
@@ -74,12 +75,27 @@ export function CompanyProfileCard() {
   const logoInput = useRef<HTMLInputElement>(null);
   const signatureInput = useRef<HTMLInputElement>(null);
 
+  // Nilai terakhir dari backend. Selama form masih sama persis dengannya
+  // (belum ada yang diketik), versi yang datang lewat sinkronisasi boleh
+  // menggantikannya; suntingan yang belum disimpan tidak pernah ditimpa.
+  const loadedRef = useRef<CompanyProfile>(EMPTY);
+
   useEffect(() => {
     let cancelled = false;
-    void getCompanyProfile()
-      .then((value) => {
-        if (!cancelled) setProfile(value);
-      })
+    const load = () =>
+      getCompanyProfile().then((value) => {
+        if (cancelled) return;
+        setProfile((current) => {
+          if (current !== loadedRef.current) return current;
+          loadedRef.current = value;
+          return value;
+        });
+      });
+    // Perangkat lain bisa mengubah identitas perusahaan kapan saja; tanpa ini
+    // kartu yang sedang terbuka tetap menampilkan nama lama.
+    const onSynced = () => void load().catch(() => undefined);
+    window.addEventListener(SYNC_COMPLETED_EVENT, onSynced);
+    void load()
       .catch((error: unknown) => {
         if (cancelled) return;
         setFeedback({
@@ -95,6 +111,7 @@ export function CompanyProfileCard() {
       });
     return () => {
       cancelled = true;
+      window.removeEventListener(SYNC_COMPLETED_EVENT, onSynced);
     };
   }, []);
 
@@ -150,7 +167,9 @@ export function CompanyProfileCard() {
     setFeedback(null);
     try {
       const { id: _id, updated_at: _updatedAt, ...draft } = profile;
-      setProfile(await saveCompanyProfile(draft));
+      const saved = await saveCompanyProfile(draft);
+      loadedRef.current = saved;
+      setProfile(saved);
       setFeedback({ tone: "success", text: "Company profile saved." });
     } catch (error) {
       setFeedback({

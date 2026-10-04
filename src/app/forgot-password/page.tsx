@@ -208,7 +208,7 @@ export default function ForgotPasswordPage() {
       <section className="app-panel w-full max-w-lg space-y-5 p-5 shadow-[0_8px_32px_rgb(11_28_48/0.08)] sm:p-6">
         <header className="space-y-1">
           <p className="text-body-sm font-semibold text-on-surface-variant">
-            App Template
+            Company OS
           </p>
           <h1 className="text-headline-xl text-on-surface">Forgot password</h1>
           <p className="text-body-md text-on-surface-variant">

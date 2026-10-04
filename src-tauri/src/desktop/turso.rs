@@ -13,6 +13,7 @@ use url::Url;
 use zeroize::Zeroizing;
 
 use super::clients;
+use super::notifications;
 use super::samples;
 use super::models::{CommandError, OperatorUser};
 // Seam transport: dekoder sel Hrana dan jalur SQLite lokal. SQL-nya sama,
@@ -399,7 +400,7 @@ const LEGACY_STORED_VALUES_SQL: &str = "SELECT COUNT(*) AS total FROM sqlite_mas
 
 const LEGACY_STORED_VALUES_MESSAGE: &str = "This database was created by a pre-release build that stored values in Indonesian. It cannot be upgraded in place. Create a new database (or a new Local Database Mode file) and connect this device to it.";
 
-/// Tabel inti yang wajib ada agar database dianggap benar-benar database App Template.
+/// Tabel inti yang wajib ada agar database dianggap benar-benar database Company OS.
 const DATABASE_CHECK_CORE_TABLES: [&str; 4] = [
     "app_role",
     "master_operator",
@@ -1409,6 +1410,9 @@ impl TursoClient {
                 ('roles.manage', 'Manage roles and access', 'Roles', 'Set the permission matrix of each role.', 1, 90),
                 ('settings.view', 'View system settings', 'Settings', 'View app and database settings.', 1, 100),
                 ('settings.manage', 'Manage system settings', 'Settings', 'Change app and database settings.', 1, 110),
+                ('notifications_cs.view', 'CS notifications', 'Notifications', 'See new leads and leads that went Cold in the notification bell.', 1, 112),
+                ('notifications_rnd.view', 'RnD notifications', 'Notifications', 'See sample requests waiting for RnD review in the notification bell.', 1, 114),
+                ('notifications_finance.view', 'Finance notifications', 'Notifications', 'See sample fees and revision fees waiting for Finance in the notification bell.', 1, 116),
                 ('sync.view', 'View sync status', 'Sync', 'View the sync indicator and queue.', 1, 120),
                 ('sync.retry', 'Retry sync and resolve conflicts', 'Sync', 'Trigger a manual sync and resolve conflicts.', 1, 130),
                 ('diagnostics.view', 'View system diagnostics', 'Diagnostics', 'View runtime information and database health.', 1, 140);"#,
@@ -1439,7 +1443,8 @@ impl TursoClient {
                 SELECT 3, permission_key, 1, datetime('now'), 'system' FROM app_permission
                 WHERE permission_key IN (
                     'home.view', 'dashboard.view', 'clients.view', 'clients.manage',
-                    'leads.view', 'leads.manage', 'samples.view', 'samples.manage', 'sync.view'
+                    'leads.view', 'leads.manage', 'samples.view', 'samples.manage',
+                    'notifications_cs.view', 'sync.view'
                 );"#,
                 vec![],
             ),
@@ -1448,7 +1453,7 @@ impl TursoClient {
             // yang dipakai perangkat untuk mendeteksi pencabutan hak akses.
             Statement::new(
                 r#"INSERT OR IGNORE INTO setting_gex_system (key, value) VALUES
-                ('app_name', 'App Template'),
+                ('app_name', 'Company OS'),
                 ('rbac_revision', '1');"#,
                 vec![],
             ),
@@ -1477,6 +1482,16 @@ impl TursoClient {
                 "INSERT OR IGNORE INTO setting_gex_system (key, value) VALUES ('sample_permissions_seeded', '1');",
                 vec![],
             ),
+            // Izin lonceng per divisi (PRD FR-08), sekali saja. WAJIB identik
+            // dengan `NOTIFICATION_PERMISSION_SEED_SQL` di `db-schema.ts`.
+            Statement::new(
+                "INSERT OR IGNORE INTO role_permission (role_id, permission_key, is_allowed, updated_at, updated_by) SELECT r.id, p.permission_key, 1, datetime('now'), 'system' FROM app_role r JOIN app_permission p ON (r.role_key = 'cs' AND p.permission_key = 'notifications_cs.view') OR (r.role_key = 'rnd' AND p.permission_key = 'notifications_rnd.view') OR (r.role_key = 'finance' AND p.permission_key = 'notifications_finance.view') WHERE r.role_key IN ('cs', 'rnd', 'finance') AND NOT EXISTS (SELECT 1 FROM setting_gex_system WHERE key = 'notification_permissions_seeded');",
+                vec![],
+            ),
+            Statement::new(
+                "INSERT OR IGNORE INTO setting_gex_system (key, value) VALUES ('notification_permissions_seeded', '1');",
+                vec![],
+            ),
             // Riwayat versi WAJIB lengkap, bukan hanya fondasinya.
             //
             // `isDatabaseSchemaReady` di `db-schema.ts` menuntut
@@ -1498,7 +1513,8 @@ impl TursoClient {
                 (5, 'audit-log-and-division-roles', datetime('now')),
                 (6, 'single-session', datetime('now')),
                 (7, 'sample-requests', datetime('now')),
-                (8, 'media-assets', datetime('now'));"#,
+                (8, 'media-assets', datetime('now')),
+                (9, 'telegram-notifications', datetime('now'));"#,
                 vec![],
             ),
             // ============ DOMAIN MAKLONOS ============
@@ -1673,6 +1689,43 @@ impl TursoClient {
                 );"#,
                 vec![],
             ),
+            // Notifikasi divisi (PRD FR-08), cloud-only. WAJIB identik dengan
+            // `db-schema.ts`. `id` sekaligus kunci dedupe; `status` adalah
+            // status pengiriman Telegram, lonceng membaca semua baris.
+            Statement::new(
+                r#"CREATE TABLE IF NOT EXISTS notification_outbox (
+                    id TEXT PRIMARY KEY,
+                    event_type TEXT NOT NULL,
+                    target_division TEXT NOT NULL,
+                    payload_json TEXT NOT NULL DEFAULT '{}',
+                    occurred_at TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'PENDING',
+                    attempts INTEGER NOT NULL DEFAULT 0,
+                    claimed_at TEXT,
+                    next_attempt_at TEXT NOT NULL,
+                    sent_at TEXT,
+                    last_error TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL
+                );"#,
+                vec![],
+            ),
+            Statement::new(
+                r#"CREATE TABLE IF NOT EXISTS telegram_config (
+                    id TEXT PRIMARY KEY,
+                    bot_token TEXT,
+                    is_active INTEGER NOT NULL DEFAULT 0,
+                    updated_at TEXT NOT NULL,
+                    updated_by TEXT
+                );"#,
+                vec![],
+            ),
+            Statement::new(
+                r#"CREATE TABLE IF NOT EXISTS notification_seen (
+                    operator_id INTEGER PRIMARY KEY,
+                    seen_at TEXT NOT NULL
+                );"#,
+                vec![],
+            ),
             Statement::new(
                 "CREATE INDEX IF NOT EXISTS idx_clients_phone ON clients(phone_normalized);",
                 vec![],
@@ -1715,6 +1768,14 @@ impl TursoClient {
             ),
             Statement::new(
                 "CREATE INDEX IF NOT EXISTS idx_media_asset_owner ON media_asset(owner_type, owner_id);",
+                vec![],
+            ),
+            Statement::new(
+                "CREATE INDEX IF NOT EXISTS idx_notification_outbox_due ON notification_outbox(status, next_attempt_at);",
+                vec![],
+            ),
+            Statement::new(
+                "CREATE INDEX IF NOT EXISTS idx_notification_outbox_created ON notification_outbox(created_at);",
                 vec![],
             ),
             // =========================================
@@ -1902,6 +1963,11 @@ impl TursoClient {
             vec![],
         )
         .await?;
+        self.query_one(
+            "INSERT OR IGNORE INTO schema_migration (version, name, applied_at) VALUES (-2017, 'telegram-notifications-v1', datetime('now'));",
+            vec![],
+        )
+        .await?;
 
         Ok(())
     }
@@ -2057,7 +2123,7 @@ impl TursoClient {
         Ok(())
     }
 
-    async fn ensure_schema_current(&self) -> Result<(), CommandError> {
+    pub(crate) async fn ensure_schema_current(&self) -> Result<(), CommandError> {
         let cache_key = self.base_url.as_str().to_owned();
         if schema_verified_cache()
             .lock()
@@ -2070,7 +2136,7 @@ impl TursoClient {
             .query_one(
                 // Sentinel WAJIB dinaikkan setiap kali ensure_schema menambah
                 // tabel atau kolom — nilainya di sini dan pada INSERT harus sama.
-                "SELECT COUNT(*) AS total FROM schema_migration WHERE version = -2016;",
+                "SELECT COUNT(*) AS total FROM schema_migration WHERE version = -2017;",
                 vec![],
             )
             .await
@@ -2839,7 +2905,7 @@ impl TursoClient {
             vec![json!(secret), json!(operator_id)],
         )
         .await?;
-        let label = format!("App Template:{}", row.username);
+        let label = format!("Company OS:{}", row.username);
         Ok(json!({
             "setup": {
                 "secret": secret,
@@ -4468,6 +4534,15 @@ async fn apply_event_to_turso(
                     ],
                 )
                 .await?;
+            // Notifikasi lead baru (PRD FR-08) lahir di transaksi yang sama:
+            // registrasi yang ditolak sebagai konflik tidak pernah memberi tahu.
+            // Lead hasil impor CSV tidak memberi tahu siapa pun (PRD FR-09,
+            // keputusan I): 1.000 baris impor bukan 1.000 pesan ke grup CS.
+            if operation == "register" && payload.get("imported").and_then(Value::as_bool) != Some(true) {
+                turso
+                    .query_one(notifications::NOTIFY_LEAD_NEW_SQL, vec![json!(entity_key)])
+                    .await?;
+            }
         }
         ("master-option", "upsert") => {
             let kind = text("kind");
@@ -4714,6 +4789,17 @@ async fn apply_event_to_turso(
                         json!(log.get("on_behalf_of_division").and_then(Value::as_str).unwrap_or_default()),
                         optional_int(log.get("recorded_by")),
                         json!(changed_at),
+                    ],
+                )
+                .await?;
+            // Tiket masuk antrean RnD/Finance (PRD FR-08); status lain tidak
+            // menulis apa pun.
+            turso
+                .query_one(
+                    notifications::NOTIFY_SAMPLE_STATUS_SQL,
+                    vec![
+                        json!(log.get("id").and_then(Value::as_str).unwrap_or_default()),
+                        json!(entity_key),
                     ],
                 )
                 .await?;
@@ -6506,7 +6592,7 @@ impl TursoClient {
             if sender_name.chars().count() < 2 {
                 return Err(CommandError::new(
                     "VALIDATION_ERROR",
-                    "Nama pengirim minimal 2 karakter.",
+                    "The sender name must be at least 2 characters.",
                 ));
             }
         }
@@ -6586,16 +6672,16 @@ impl TursoClient {
             .unwrap_or("Admin")
             .to_string();
         let body = format!(
-            "Hello {name},\n\nThis email was sent from Settings > System email to test the sender settings.\nIf it arrived, Forgot password is ready to use.\n\nApp Template"
+            "Hello {name},\n\nThis email was sent from Settings > System email to test the sender settings.\nIf it arrived, Forgot password is ready to use.\n\nCompany OS"
         );
         match self
-            .deliver_mail(&to, "Uji Kirim Email Sistem App Template", &body)
+            .deliver_mail(&to, "Company OS system email test", &body)
             .await
         {
             Ok(()) => Ok(json!({
                 "test": {
                     "delivered": true,
-                    "message": format!("Email uji terkirim ke {to}."),
+                    "message": format!("Test email sent to {to}."),
                     "detail": "",
                     "to": to,
                 }
@@ -6650,7 +6736,7 @@ impl TursoClient {
             });
         }
         let sender_name = if text("sender_name").is_empty() {
-            "App Template".to_string()
+            "Company Name".to_string()
         } else {
             text("sender_name")
         };
@@ -6689,7 +6775,7 @@ impl TursoClient {
         if !status.is_success() {
             let body = response.text().await.unwrap_or_default();
             return Err(MailFailure {
-                message: format!("Penyedia email menolak pengiriman (HTTP {}).", status.as_u16()),
+                message: format!("The email provider rejected the message (HTTP {}).", status.as_u16()),
                 detail: format!(
                     "HTTP {} from {provider}: {}",
                     status.as_u16(),
@@ -6721,39 +6807,28 @@ impl TursoClient {
             .and_then(|result| result.to_objects().into_iter().next())
             .and_then(|row| row.get("reset_base_url").and_then(Value::as_str).map(str::to_string))
             .unwrap_or_default();
+        // Teks WAJIB sama dengan `buildResetEmail` di `src/lib/mail/mail-config.ts`.
         let action = if base_url.is_empty() {
-            format!(
-                "Masukkan kode berikut pada halaman \"Lupa Password\" di aplikasi:
-{reset_token}"
-            )
+            format!("Enter this code on the \"Forgot password\" page in the app:\n{reset_token}")
         } else {
-            format!(
-                "Buka tautan berikut untuk membuat password baru:
-{base_url}/forgot-password/reset?token={reset_token}"
-            )
+            format!("Open this link to create a new password:\n{base_url}/forgot-password/reset?token={reset_token}")
         };
-        let body_text = format!(
-            "Halo {operator_name},
-
-\
-             Kami menerima permintaan pemulihan password untuk akun App Template Anda.
-\
-             Permintaan ini sudah melewati verifikasi wajah pada perangkat pemohon.
-
-\
-             {action}
-
-\
-             Tautan/kode ini berlaku {RESET_TOKEN_TTL_MINUTES} menit dan hanya dapat dipakai satu kali.
-\
-             Jika Anda tidak merasa mengajukan permintaan ini, abaikan email ini dan segera
-\
-             laporkan ke Admin — foto pemohon sudah tersimpan sebagai bukti.
-
-\
-             App Template"
-        );
-        self.deliver_mail(to, "App Template password recovery", &body_text)
+        let body_text = [
+            format!("Hello {operator_name},"),
+            String::new(),
+            "We received a password recovery request for your Company OS account.".to_owned(),
+            "The request passed face verification on the requester's device.".to_owned(),
+            String::new(),
+            action,
+            String::new(),
+            format!("This link or code is valid for {RESET_TOKEN_TTL_MINUTES} minutes and can be used once."),
+            "If you did not make this request, ignore this email and report it to your".to_owned(),
+            "Admin right away. The requester's photo has been saved as evidence.".to_owned(),
+            String::new(),
+            "Company OS".to_owned(),
+        ]
+        .join("\n");
+        self.deliver_mail(to, "Company OS password recovery", &body_text)
             .await
     }
 }
@@ -7365,6 +7440,9 @@ mod tests {
                 "sample_feedbacks",
                 "sample_status_log",
                 "media_asset",
+                "notification_outbox",
+                "telegram_config",
+                "notification_seen",
             ] {
                 let ada: i64 = connection
                     .query_row(
@@ -7423,7 +7501,9 @@ mod tests {
                 let connection = rusqlite::Connection::open(&hub).expect("buka hub");
                 connection
                     .execute_batch(
-                        "INSERT INTO clients (id, client_code, name, phone_normalized, lifecycle_status, free_revision_limit, created_at, updated_at) VALUES ('c1', 'KLN-20260925-0101', 'Aura', '6281200000001', 'LEAD', 1, '2026-09-25 01:00:00', '2026-09-25 01:00:00');",
+                        "INSERT INTO clients (id, client_code, name, phone_normalized, lifecycle_status, free_revision_limit, created_at, updated_at) VALUES ('c1', 'KLN-20260925-0101', 'Aura', '6281200000001', 'LEAD', 1, '2026-09-25 01:00:00', '2026-09-25 01:00:00');
+                         INSERT INTO telegram_config (id, bot_token, is_active, updated_at) VALUES ('default', '123456789:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw', 1, '2026-09-25 00:00:00');
+                         INSERT INTO setting_gex_system (key, value) VALUES ('telegram_chat_id_rnd', '-100123');",
                     )
                     .expect("klien uji");
             }
@@ -7502,6 +7582,74 @@ mod tests {
                 .query_row("SELECT COUNT(*) FROM sample_status_log WHERE sample_request_id = 's1';", [], |row| row.get(0))
                 .expect("riwayat");
             assert_eq!(logs, 1);
+            // Hanya langkah yang benar-benar diterapkan memberi tahu RnD (PRD FR-08).
+            let notified: Vec<(String, String, String)> = connection
+                .prepare("SELECT id, target_division, status FROM notification_outbox ORDER BY id;")
+                .expect("notifikasi")
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+                .expect("notifikasi")
+                .collect::<Result<_, _>>()
+                .expect("notifikasi");
+            assert_eq!(notified, vec![("sample:l1".to_owned(), "RND".to_owned(), "PENDING".to_owned())]);
+        });
+    }
+
+    /// Lead hasil impor CSV tidak memberi tahu siapa pun (PRD FR-09, keputusan
+    /// I); registrasi biasa tetap memberi tahu grup CS (FR-08).
+    #[test]
+    fn push_registrasi_impor_tidak_memicu_notifikasi() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("runtime uji");
+        runtime.block_on(async {
+            let dir = tempfile::tempdir().expect("direktori sementara");
+            let hub = dir.path().join("app-hub.db");
+            let client = TursoClient::local_file(
+                Url::parse(LOCAL_FILE_ORIGIN).expect("origin lokal"),
+                &hub,
+                Client::new(),
+            );
+            client.ensure_schema().await.expect("provisioning lokal");
+            rusqlite::Connection::open(&hub)
+                .expect("buka hub")
+                .execute_batch(
+                    "INSERT INTO telegram_config (id, bot_token, is_active, updated_at) VALUES ('default', '123456789:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw', 1, '2026-09-25 00:00:00');
+                     INSERT INTO setting_gex_system (key, value) VALUES ('telegram_chat_id_cs', '-100111');",
+                )
+                .expect("bot uji");
+            let event = |n: u32, imported: bool| {
+                json!({
+                    "eventId": format!("evt-{n:064x}"),
+                    "clientId": format!("desktop-{:064x}", 1),
+                    "domain": "client",
+                    "operation": "register",
+                    "entityKey": format!("c{n}"),
+                    "payload": {
+                        "id": format!("c{n}"),
+                        "client_code": format!("GNI-000{n}"),
+                        "name": "Auravia Skin",
+                        "phone_normalized": format!("62812000000{n}"),
+                        "lifecycle_status": "LEAD",
+                        "lead_id": format!("l{n}"),
+                        "channel_option_id": "meta",
+                        "product_category_option_id": "skin",
+                        "created_at": "2026-01-15 03:00:00",
+                        "updated_at": "2026-10-03 03:00:00",
+                        "imported": imported,
+                    },
+                })
+            };
+            let results = client.push_events(&[event(1, true), event(2, false)]).await.expect("push");
+            assert!(results.iter().all(|result| result["status"] == "applied"), "{results:?}");
+            let ids: Vec<String> = rusqlite::Connection::open(&hub)
+                .expect("buka hub")
+                .prepare("SELECT id FROM notification_outbox ORDER BY id;")
+                .expect("notifikasi")
+                .query_map([], |row| row.get(0))
+                .expect("notifikasi")
+                .collect::<Result<_, _>>()
+                .expect("notifikasi");
+            assert_eq!(ids, vec!["lead-new:c2".to_owned()]);
         });
     }
 

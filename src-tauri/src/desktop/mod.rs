@@ -5,6 +5,7 @@ pub mod commands;
 pub mod config;
 pub mod license;
 pub mod models;
+pub mod notifications;
 pub mod portability;
 pub mod secrets;
 pub mod sql_backend;

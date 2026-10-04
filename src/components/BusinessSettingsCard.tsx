@@ -14,6 +14,7 @@ import {
   LEAD_HOT_MAX_DAYS_LIMIT,
   LEAD_WARM_MAX_DAYS_LIMIT,
   MAX_PHOTOS_PER_SAMPLE_LIMIT,
+  OFFLINE_LOGIN_MAX_DAYS_LIMIT,
   type SampleFeeMode,
 } from "@/lib/validations/sample";
 
@@ -226,6 +227,54 @@ export function BusinessSettingsCard({ canManage }: { canManage: boolean }) {
                 className="app-input font-normal"
               />
             </label>
+            <label className="app-label grid gap-1.5">
+              Offline sign-in period (days)
+              <input
+                required
+                type="number"
+                min={1}
+                max={OFFLINE_LOGIN_MAX_DAYS_LIMIT}
+                step={1}
+                value={settings.offline_login_max_days}
+                onChange={(event) =>
+                  setSettings({
+                    ...settings,
+                    offline_login_max_days: wholeNumber(event.target.value),
+                  })
+                }
+                className="app-input font-normal"
+              />
+              <span className="text-body-sm font-normal text-on-surface-variant">
+                How long the Desktop and Mobile apps can sign in without a
+                connection, counted from the last online sign-in. At most{" "}
+                {OFFLINE_LOGIN_MAX_DAYS_LIMIT} days.
+              </span>
+            </label>
+          </fieldset>
+          <fieldset disabled={!canManage} className="grid gap-4 sm:grid-cols-3">
+            <legend className="mb-2 text-body-md text-on-surface-variant">
+              Telegram group chat ID per division. Leave empty to keep that
+              division's events in the app only.
+            </legend>
+            {(
+              [
+                ["telegram_chat_id_cs", "CS group"],
+                ["telegram_chat_id_rnd", "RnD group"],
+                ["telegram_chat_id_finance", "Finance group"],
+              ] as const
+            ).map(([key, label]) => (
+              <label key={key} className="app-label grid gap-1.5">
+                {label}
+                <input
+                  value={settings[key]}
+                  placeholder="-1001234567890"
+                  onChange={(event) =>
+                    setSettings({ ...settings, [key]: event.target.value })
+                  }
+                  className="app-input font-mono font-normal"
+                />
+              </label>
+            ))}
           </fieldset>
           {canManage ? (
             <button

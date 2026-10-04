@@ -60,6 +60,10 @@ function describe(entry: AuditEntry, operatorName: (id: number) => string) {
       return `Registered lead ${code} (${String(s.name ?? "")})`;
     case "client.update":
       return `Edited client ${code} (${String(s.name ?? "")})`;
+    case "client.import":
+      return `Imported ${String(s.added ?? 0)} clients from ${String(
+        s.file_name || "a CSV file",
+      )}; skipped ${String(s.skipped ?? 0)}, rejected ${String(s.invalid ?? 0)}`;
     case "master_option.save":
       return `Saved ${KIND_LABEL[String(s.kind)] ?? "option"} "${String(
         s.label ?? "",

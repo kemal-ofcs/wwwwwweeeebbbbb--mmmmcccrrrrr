@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "app-template",
+  "productName": "Company OS",
   "version": "0.1.0",
-  "identifier": "id.example.apptemplate",
+  "identifier": "id.kos.companyos",
   "build": {
     "frontendDist": "../out",
     "devUrl": "http://localhost:3000",
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "App Template",
+        "title": "Company OS",
         "width": 800,
         "height": 600,
         "resizable": true,

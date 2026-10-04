@@ -20,6 +20,10 @@ export const BUSINESS_SETTING_KEYS = {
   leadHotMaxDays: "lead_hot_max_days",
   leadWarmMaxDays: "lead_warm_max_days",
   maxPhotosPerSample: "max_photos_per_sample",
+  telegramChatIdCs: "telegram_chat_id_cs",
+  telegramChatIdRnd: "telegram_chat_id_rnd",
+  telegramChatIdFinance: "telegram_chat_id_finance",
+  offlineLoginMaxDays: "offline_login_max_days",
 } as const;
 
 export interface BusinessSettings {
@@ -29,6 +33,18 @@ export interface BusinessSettings {
   lead_warm_max_days: number;
   /** Batas foto per tiket sampel (PRD F-07, keputusan B 1.4b). */
   max_photos_per_sample: number;
+  /**
+   * Grup Telegram per divisi (PRD FR-08, FR-11). Kosong = kejadian divisi itu
+   * tidak dikirim ke Telegram (tetap tampil di lonceng aplikasi).
+   */
+  telegram_chat_id_cs: string;
+  telegram_chat_id_rnd: string;
+  telegram_chat_id_finance: string;
+  /**
+   * Masa login offline Desktop/Mobile dalam hari, 1 sampai batas build
+   * (`APP_OFFLINE_AUTH_MAX_AGE_HOURS`, 7 hari). Web tidak punya login offline.
+   */
+  offline_login_max_days: number;
 }
 
 export const DEFAULT_BUSINESS_SETTINGS: BusinessSettings = {
@@ -37,12 +53,17 @@ export const DEFAULT_BUSINESS_SETTINGS: BusinessSettings = {
   lead_hot_max_days: 3,
   lead_warm_max_days: 7,
   max_photos_per_sample: 10,
+  telegram_chat_id_cs: "",
+  telegram_chat_id_rnd: "",
+  telegram_chat_id_finance: "",
+  offline_login_max_days: 7,
 };
 
 export const FREE_REVISION_LIMIT_MAX = 20;
 export const LEAD_HOT_MAX_DAYS_LIMIT = 60;
 export const LEAD_WARM_MAX_DAYS_LIMIT = 180;
 export const MAX_PHOTOS_PER_SAMPLE_LIMIT = 50;
+export const OFFLINE_LOGIN_MAX_DAYS_LIMIT = 7;
 
 function wholeNumber(value: unknown): number | null {
   if (typeof value === "number") {
@@ -64,6 +85,23 @@ function strictInt(value: unknown): number | null {
 function inRange(value: number | null, min: number, max: number) {
   return value !== null && value >= min && value <= max ? value : null;
 }
+
+/**
+ * Chat ID Telegram: kosong, angka (grup bernilai negatif, mis.
+ * `-1001234567890`), atau `@nama_channel`. `null` = tidak sah. Padanan
+ * `normalize_telegram_chat_id` di `samples.rs`.
+ */
+export function normalizeTelegramChatId(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const text = value.trim();
+  if (text === "") return "";
+  return /^-?\d{1,20}$/.test(text) || /^@[A-Za-z0-9_]{5,32}$/.test(text)
+    ? text
+    : null;
+}
+
+export const TELEGRAM_CHAT_ID_INVALID =
+  "Enter a Telegram chat ID such as -1001234567890 or @channel_name, or leave it empty.";
 
 /**
  * Baca setelan dari baris `setting_gex_system` (kunci → teks). Nilai yang
@@ -107,6 +145,23 @@ export function readBusinessSettings(
         1,
         MAX_PHOTOS_PER_SAMPLE_LIMIT,
       ) ?? DEFAULT_BUSINESS_SETTINGS.max_photos_per_sample,
+    telegram_chat_id_cs:
+      normalizeTelegramChatId(values[BUSINESS_SETTING_KEYS.telegramChatIdCs]) ??
+      "",
+    telegram_chat_id_rnd:
+      normalizeTelegramChatId(
+        values[BUSINESS_SETTING_KEYS.telegramChatIdRnd],
+      ) ?? "",
+    telegram_chat_id_finance:
+      normalizeTelegramChatId(
+        values[BUSINESS_SETTING_KEYS.telegramChatIdFinance],
+      ) ?? "",
+    offline_login_max_days:
+      inRange(
+        wholeNumber(values[BUSINESS_SETTING_KEYS.offlineLoginMaxDays]),
+        1,
+        OFFLINE_LOGIN_MAX_DAYS_LIMIT,
+      ) ?? DEFAULT_BUSINESS_SETTINGS.offline_login_max_days,
   };
 }
 
@@ -159,6 +214,25 @@ export function validateBusinessSettings(
       error: "Photos per sample request must be a whole number from 1 to 50.",
     };
   }
+  // Wajib dikirim, walau kosong: field yang hilang dari draft akan menimpa
+  // chat ID tersimpan dengan kosong.
+  const chatCs = normalizeTelegramChatId(draft.telegram_chat_id_cs);
+  const chatRnd = normalizeTelegramChatId(draft.telegram_chat_id_rnd);
+  const chatFinance = normalizeTelegramChatId(draft.telegram_chat_id_finance);
+  if (chatCs === null || chatRnd === null || chatFinance === null) {
+    return { error: TELEGRAM_CHAT_ID_INVALID };
+  }
+  const offlineDays = inRange(
+    strictInt(draft.offline_login_max_days),
+    1,
+    OFFLINE_LOGIN_MAX_DAYS_LIMIT,
+  );
+  if (offlineDays === null) {
+    return {
+      error:
+        "The offline sign-in period must be a whole number of days from 1 to 7.",
+    };
+  }
   return {
     settings: {
       default_free_revision_limit: limit,
@@ -166,6 +240,10 @@ export function validateBusinessSettings(
       lead_hot_max_days: hot,
       lead_warm_max_days: warm,
       max_photos_per_sample: photos,
+      telegram_chat_id_cs: chatCs,
+      telegram_chat_id_rnd: chatRnd,
+      telegram_chat_id_finance: chatFinance,
+      offline_login_max_days: offlineDays,
     },
   };
 }

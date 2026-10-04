@@ -86,6 +86,23 @@ export const PERMISSION_CATALOG = [
     name: "Manage system settings",
     group: "Settings",
   },
+  // Siapa melihat kejadian divisi mana di lonceng (PRD FR-08). Di MVP Admin
+  // bisa memberi CS izin RnD/Finance karena CS mencatat langkah keduanya (D-23).
+  {
+    key: "notifications_cs.view",
+    name: "CS notifications",
+    group: "Notifications",
+  },
+  {
+    key: "notifications_rnd.view",
+    name: "RnD notifications",
+    group: "Notifications",
+  },
+  {
+    key: "notifications_finance.view",
+    name: "Finance notifications",
+    group: "Notifications",
+  },
   {
     key: "sync.view",
     name: "View sync status",
@@ -164,6 +181,7 @@ export const DEFAULT_ROLE_PERMISSIONS: Record<
     "leads.manage",
     "samples.view",
     "samples.manage",
+    "notifications_cs.view",
     "sync.view",
   ],
 };

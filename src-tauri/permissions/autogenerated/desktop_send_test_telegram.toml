@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-desktop-send-test-telegram"
+description = "Enables the desktop_send_test_telegram command without any pre-configured scope."
+commands.allow = ["desktop_send_test_telegram"]
+
+[[permission]]
+identifier = "deny-desktop-send-test-telegram"
+description = "Denies the desktop_send_test_telegram command without any pre-configured scope."
+commands.deny = ["desktop_send_test_telegram"]

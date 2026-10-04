@@ -27,6 +27,7 @@ import {
   normalizeWhatsapp,
   OPTION_LABEL_MAX,
 } from "@/lib/validations/client";
+import { NOTIFY_LEAD_NEW_SQL } from "@/lib/validations/notification";
 import { FREE_REVISION_LIMIT_MAX } from "@/lib/validations/sample";
 
 /**
@@ -386,6 +387,8 @@ export async function registerClient(
         timestamp,
       ],
     });
+    // Notifikasi lead baru (PRD FR-08), di transaksi yang sama.
+    await transaction.execute({ sql: NOTIFY_LEAD_NEW_SQL, args: [id] });
     await writeAudit(transaction, actor, "client.register", "client", id, {
       client_code: code,
       name: draft.name,

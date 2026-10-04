@@ -161,7 +161,7 @@ export async function beginTwoFactorSetup(
     otpauthUri: buildOtpAuthUri({
       secret,
       accountLabel: row.username,
-      issuer: "App Template",
+      issuer: "Company OS",
     }),
   };
 }

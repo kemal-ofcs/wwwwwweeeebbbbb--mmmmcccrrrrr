@@ -109,7 +109,12 @@ beforeAll(async () => {
 
 afterAll(() => {
   client.close();
-  rmSync(directory, { recursive: true, force: true });
+  try {
+    rmSync(directory, { recursive: true, force: true });
+  } catch {
+    // Windows: libsql baru melepas berkas database saat proses selesai, jadi
+    // penghapusan di sini gagal EBUSY. Folder temp boleh tertinggal.
+  }
 });
 
 describe("tiket sampel, jalur Web", () => {
@@ -145,6 +150,10 @@ describe("tiket sampel, jalur Web", () => {
         lead_hot_max_days: 3,
         lead_warm_max_days: 7,
         max_photos_per_sample: 10,
+        telegram_chat_id_cs: "",
+        telegram_chat_id_rnd: "",
+        telegram_chat_id_finance: "",
+        offline_login_max_days: 7,
       },
       ADMIN,
     );

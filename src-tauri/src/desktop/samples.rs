@@ -20,18 +20,27 @@ pub const SETTING_SAMPLE_FEE_MODE: &str = "sample_fee_mode";
 pub const SETTING_LEAD_HOT_MAX_DAYS: &str = "lead_hot_max_days";
 pub const SETTING_LEAD_WARM_MAX_DAYS: &str = "lead_warm_max_days";
 pub const SETTING_MAX_PHOTOS_PER_SAMPLE: &str = "max_photos_per_sample";
+pub const SETTING_TELEGRAM_CHAT_ID_CS: &str = "telegram_chat_id_cs";
+pub const SETTING_TELEGRAM_CHAT_ID_RND: &str = "telegram_chat_id_rnd";
+pub const SETTING_TELEGRAM_CHAT_ID_FINANCE: &str = "telegram_chat_id_finance";
+pub const SETTING_OFFLINE_LOGIN_MAX_DAYS: &str = "offline_login_max_days";
 pub const BUSINESS_SETTING_KEYS: &[&str] = &[
     SETTING_DEFAULT_FREE_REVISION_LIMIT,
     SETTING_SAMPLE_FEE_MODE,
     SETTING_LEAD_HOT_MAX_DAYS,
     SETTING_LEAD_WARM_MAX_DAYS,
     SETTING_MAX_PHOTOS_PER_SAMPLE,
+    SETTING_TELEGRAM_CHAT_ID_CS,
+    SETTING_TELEGRAM_CHAT_ID_RND,
+    SETTING_TELEGRAM_CHAT_ID_FINANCE,
+    SETTING_OFFLINE_LOGIN_MAX_DAYS,
 ];
 
 pub const FREE_REVISION_LIMIT_MAX: i64 = 20;
 pub const LEAD_HOT_MAX_DAYS_LIMIT: i64 = 60;
 pub const LEAD_WARM_MAX_DAYS_LIMIT: i64 = 180;
 pub const MAX_PHOTOS_PER_SAMPLE_LIMIT: i64 = 50;
+pub const OFFLINE_LOGIN_MAX_DAYS_LIMIT: i64 = 7;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BusinessSettings {
@@ -40,6 +49,12 @@ pub struct BusinessSettings {
     pub lead_hot_max_days: i64,
     pub lead_warm_max_days: i64,
     pub max_photos_per_sample: i64,
+    /// Grup Telegram per divisi (PRD FR-08). Kosong = tidak dikirim ke Telegram.
+    pub telegram_chat_id_cs: String,
+    pub telegram_chat_id_rnd: String,
+    pub telegram_chat_id_finance: String,
+    /// Masa login offline dalam hari, 1 sampai batas build (7 hari).
+    pub offline_login_max_days: i64,
 }
 
 impl Default for BusinessSettings {
@@ -50,6 +65,10 @@ impl Default for BusinessSettings {
             lead_hot_max_days: 3,
             lead_warm_max_days: 7,
             max_photos_per_sample: 10,
+            telegram_chat_id_cs: String::new(),
+            telegram_chat_id_rnd: String::new(),
+            telegram_chat_id_finance: String::new(),
+            offline_login_max_days: 7,
         }
     }
 }
@@ -62,6 +81,10 @@ impl BusinessSettings {
             "lead_hot_max_days": self.lead_hot_max_days,
             "lead_warm_max_days": self.lead_warm_max_days,
             "max_photos_per_sample": self.max_photos_per_sample,
+            "telegram_chat_id_cs": self.telegram_chat_id_cs,
+            "telegram_chat_id_rnd": self.telegram_chat_id_rnd,
+            "telegram_chat_id_finance": self.telegram_chat_id_finance,
+            "offline_login_max_days": self.offline_login_max_days,
         })
     }
 
@@ -73,6 +96,10 @@ impl BusinessSettings {
             (SETTING_LEAD_HOT_MAX_DAYS, self.lead_hot_max_days.to_string()),
             (SETTING_LEAD_WARM_MAX_DAYS, self.lead_warm_max_days.to_string()),
             (SETTING_MAX_PHOTOS_PER_SAMPLE, self.max_photos_per_sample.to_string()),
+            (SETTING_TELEGRAM_CHAT_ID_CS, self.telegram_chat_id_cs.clone()),
+            (SETTING_TELEGRAM_CHAT_ID_RND, self.telegram_chat_id_rnd.clone()),
+            (SETTING_TELEGRAM_CHAT_ID_FINANCE, self.telegram_chat_id_finance.clone()),
+            (SETTING_OFFLINE_LOGIN_MAX_DAYS, self.offline_login_max_days.to_string()),
         ]
     }
 }
@@ -87,6 +114,28 @@ fn stored_int(value: Option<&String>) -> Option<i64> {
 
 fn in_range(value: Option<i64>, min: i64, max: i64) -> Option<i64> {
     value.filter(|value| (min..=max).contains(value))
+}
+
+pub const TELEGRAM_CHAT_ID_INVALID: &str =
+    "Enter a Telegram chat ID such as -1001234567890 or @channel_name, or leave it empty.";
+
+/// Padanan `normalizeTelegramChatId`: kosong, angka (boleh negatif), atau
+/// `@nama_channel`. `None` = tidak sah.
+pub fn normalize_telegram_chat_id(value: &str) -> Option<String> {
+    let text = value.trim();
+    let digits = text.strip_prefix('-').unwrap_or(text);
+    let numeric = (1..=20).contains(&digits.len()) && digits.bytes().all(|byte| byte.is_ascii_digit());
+    let channel = text.strip_prefix('@').is_some_and(|name| {
+        (5..=32).contains(&name.len()) && name.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+    });
+    (text.is_empty() || numeric || channel).then(|| text.to_owned())
+}
+
+fn stored_chat_id(values: &HashMap<String, String>, key: &str) -> String {
+    values
+        .get(key)
+        .and_then(|value| normalize_telegram_chat_id(value))
+        .unwrap_or_default()
 }
 
 fn fee_mode(value: &str) -> Option<&'static str> {
@@ -121,7 +170,25 @@ pub fn read_business_settings(values: &HashMap<String, String>) -> BusinessSetti
             MAX_PHOTOS_PER_SAMPLE_LIMIT,
         )
         .unwrap_or(defaults.max_photos_per_sample),
+        telegram_chat_id_cs: stored_chat_id(values, SETTING_TELEGRAM_CHAT_ID_CS),
+        telegram_chat_id_rnd: stored_chat_id(values, SETTING_TELEGRAM_CHAT_ID_RND),
+        telegram_chat_id_finance: stored_chat_id(values, SETTING_TELEGRAM_CHAT_ID_FINANCE),
+        offline_login_max_days: in_range(
+            stored_int(values.get(SETTING_OFFLINE_LOGIN_MAX_DAYS)),
+            1,
+            OFFLINE_LOGIN_MAX_DAYS_LIMIT,
+        )
+        .unwrap_or(defaults.offline_login_max_days),
     }
+}
+
+/// Tenggat login offline: yang paling awal antara batas yang dicatat saat
+/// login online (`offline_valid_until`, dari batas build) dan masa offline
+/// menurut setelan perusahaan sejak login online itu. Memperpendek setelan
+/// berlaku segera setelah tersinkron, termasuk untuk snapshot yang sudah ada;
+/// memperpanjangnya tidak pernah melewati batas build.
+pub fn offline_login_deadline(provisioned_at: i64, offline_valid_until: i64, max_days: i64) -> i64 {
+    offline_valid_until.min(provisioned_at.saturating_add(max_days.saturating_mul(86_400)))
 }
 
 /// Bilangan bulat JSON saja; teks angka dari form ditolak, bukan ditebak.
@@ -145,12 +212,30 @@ pub fn validate_business_settings(draft: &Value) -> Result<BusinessSettings, &'s
         .ok_or("The Warm limit must be more days than the Hot limit, up to 180.")?;
     let photos = in_range(strict_int(draft.get("max_photos_per_sample")), 1, MAX_PHOTOS_PER_SAMPLE_LIMIT)
         .ok_or("Photos per sample request must be a whole number from 1 to 50.")?;
+    // Wajib dikirim, walau kosong: field yang hilang akan menimpa chat ID
+    // tersimpan dengan kosong.
+    let chat = |key: &str| {
+        draft
+            .get(key)
+            .and_then(Value::as_str)
+            .and_then(normalize_telegram_chat_id)
+            .ok_or(TELEGRAM_CHAT_ID_INVALID)
+    };
     Ok(BusinessSettings {
         default_free_revision_limit: limit,
         sample_fee_mode: mode,
         lead_hot_max_days: hot,
         lead_warm_max_days: warm,
         max_photos_per_sample: photos,
+        telegram_chat_id_cs: chat(SETTING_TELEGRAM_CHAT_ID_CS)?,
+        telegram_chat_id_rnd: chat(SETTING_TELEGRAM_CHAT_ID_RND)?,
+        telegram_chat_id_finance: chat(SETTING_TELEGRAM_CHAT_ID_FINANCE)?,
+        offline_login_max_days: in_range(
+            strict_int(draft.get(SETTING_OFFLINE_LOGIN_MAX_DAYS)),
+            1,
+            OFFLINE_LOGIN_MAX_DAYS_LIMIT,
+        )
+        .ok_or("The offline sign-in period must be a whole number of days from 1 to 7.")?,
     })
 }
 
@@ -572,6 +657,10 @@ mod tests {
                 ("lead_hot_max_days", "5"),
                 ("lead_warm_max_days", "14"),
                 ("max_photos_per_sample", "5"),
+                ("telegram_chat_id_cs", " -1001234567890 "),
+                ("telegram_chat_id_rnd", "@maklon_rnd"),
+                ("telegram_chat_id_finance", "finance group"),
+                ("offline_login_max_days", "3"),
             ]),
             BusinessSettings {
                 default_free_revision_limit: 2,
@@ -579,6 +668,10 @@ mod tests {
                 lead_hot_max_days: 5,
                 lead_warm_max_days: 14,
                 max_photos_per_sample: 5,
+                telegram_chat_id_cs: "-1001234567890".into(),
+                telegram_chat_id_rnd: "@maklon_rnd".into(),
+                telegram_chat_id_finance: String::new(),
+                offline_login_max_days: 3,
             }
         );
         assert_eq!(
@@ -588,9 +681,21 @@ mod tests {
                 ("lead_hot_max_days", "9"),
                 ("lead_warm_max_days", "9"),
                 ("max_photos_per_sample", "0"),
+                ("offline_login_max_days", "9"),
             ]),
             BusinessSettings::default()
         );
+    }
+
+    #[test]
+    fn tenggat_login_offline_mengikuti_setelan_terpendek() {
+        let day = 86_400;
+        // Login online pada t=0 dengan batas build 7 hari.
+        assert_eq!(offline_login_deadline(0, 7 * day, 7), 7 * day);
+        // Setelan diperpendek menjadi 3 hari: berlaku untuk snapshot yang sudah ada.
+        assert_eq!(offline_login_deadline(0, 7 * day, 3), 3 * day);
+        // Setelan tidak pernah melewati batas yang dicatat saat login online.
+        assert_eq!(offline_login_deadline(0, 2 * day, 7), 2 * day);
     }
 
     #[test]
@@ -601,6 +706,10 @@ mod tests {
             "lead_hot_max_days": 0,
             "lead_warm_max_days": 1,
             "max_photos_per_sample": 1,
+            "telegram_chat_id_cs": "",
+            "telegram_chat_id_rnd": "12345",
+            "telegram_chat_id_finance": "@finance_team",
+            "offline_login_max_days": 1,
         });
         assert_eq!(
             validate_business_settings(&valid),
@@ -610,6 +719,10 @@ mod tests {
                 lead_hot_max_days: 0,
                 lead_warm_max_days: 1,
                 max_photos_per_sample: 1,
+                telegram_chat_id_cs: String::new(),
+                telegram_chat_id_rnd: "12345".into(),
+                telegram_chat_id_finance: "@finance_team".into(),
+                offline_login_max_days: 1,
             })
         );
         let with = |key: &str, value: Value| {
@@ -633,6 +746,15 @@ mod tests {
             with("max_photos_per_sample", json!(0)),
             "Photos per sample request must be a whole number from 1 to 50."
         );
+        assert_eq!(with("telegram_chat_id_cs", json!("@abc")), TELEGRAM_CHAT_ID_INVALID);
+        assert_eq!(with("telegram_chat_id_rnd", json!("12-34")), TELEGRAM_CHAT_ID_INVALID);
+        assert_eq!(with("telegram_chat_id_finance", Value::Null), TELEGRAM_CHAT_ID_INVALID);
+        for days in [json!(0), json!(8), json!("3")] {
+            assert_eq!(
+                with("offline_login_max_days", days),
+                "The offline sign-in period must be a whole number of days from 1 to 7."
+            );
+        }
         let mut same = valid.clone();
         same["lead_hot_max_days"] = json!(5);
         same["lead_warm_max_days"] = json!(5);

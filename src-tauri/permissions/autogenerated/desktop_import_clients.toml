@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-desktop-import-clients"
+description = "Enables the desktop_import_clients command without any pre-configured scope."
+commands.allow = ["desktop_import_clients"]
+
+[[permission]]
+identifier = "deny-desktop-import-clients"
+description = "Denies the desktop_import_clients command without any pre-configured scope."
+commands.deny = ["desktop_import_clients"]

@@ -362,6 +362,234 @@ pub fn company_day_bounds_utc(date: &str, timezone: &str) -> Option<(String, Str
     Some((utc_timestamp(start), utc_timestamp(start + 86_400)))
 }
 
+// ---------------------------------------------------------------------------
+// Impor CSV (PRD FR-09). WAJIB identik dengan bagian "Kembar dengan
+// `clients.rs`" di `src/lib/validations/client-import.ts` (vektor sama di
+// `client-import.test.ts`). Dipanggil untuk pratinjau DAN simpan.
+// ---------------------------------------------------------------------------
+
+pub const IMPORT_MAX_ROWS: usize = 5000;
+pub const IMPORT_FOLLOWUPS_MAX: i64 = 10_000;
+pub const IMPORT_NOTE_PREFIX: &str = "Imported from sheet: ";
+pub const DATE_ORDERS: &[&str] = &["DMY", "MDY"];
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum SheetDate {
+    Value(String),
+    Empty,
+    Error(String),
+}
+
+fn digits_between(text: &str, min: usize, max: usize) -> Option<i64> {
+    ((min..=max).contains(&text.len()) && text.bytes().all(|byte| byte.is_ascii_digit()))
+        .then(|| text.parse().ok())
+        .flatten()
+}
+
+fn days_in_month(year: i64, month: i64) -> i64 {
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if (year % 4 == 0 && year % 100 != 0) || year % 400 == 0 => 29,
+        2 => 28,
+        _ => 0,
+    }
+}
+
+/// Padanan `parseSheetDate`: tanggal sheet (waktu perusahaan) → UTC kanonik.
+pub fn parse_sheet_date(raw: &str, order: &str, timezone: &str) -> SheetDate {
+    let text = raw.trim();
+    if text.is_empty() {
+        return SheetDate::Empty;
+    }
+    let error = || SheetDate::Error(format!("The date \"{text}\" could not be read."));
+    let (date_part, time_part) = match text.find([' ', 'T']) {
+        Some(index) => (&text[..index], Some(&text[index + 1..])),
+        None => (text, None),
+    };
+    let separators: Vec<char> = date_part.chars().filter(|c| matches!(c, '/' | '.' | '-')).collect();
+    let parts: Vec<&str> = date_part.split(['/', '.', '-']).collect();
+    if parts.len() != 3 {
+        return error();
+    }
+    let (year, month, day) = if parts[0].len() == 4 && separators.iter().all(|c| *c == '-') {
+        match (digits_between(parts[0], 4, 4), digits_between(parts[1], 1, 2), digits_between(parts[2], 1, 2)) {
+            (Some(year), Some(month), Some(day)) => (year, month, day),
+            _ => return error(),
+        }
+    } else {
+        match (digits_between(parts[0], 1, 2), digits_between(parts[1], 1, 2), digits_between(parts[2], 4, 4)) {
+            (Some(first), Some(second), Some(year)) if order == "DMY" => (year, second, first),
+            (Some(first), Some(second), Some(year)) => (year, first, second),
+            _ => return error(),
+        }
+    };
+    let (hour, minute, second) = match time_part {
+        None => (0, 0, 0),
+        Some(time) => {
+            let pieces: Vec<&str> = time.split(':').collect();
+            let hour = pieces.first().and_then(|piece| digits_between(piece, 1, 2));
+            let minute = pieces.get(1).and_then(|piece| digits_between(piece, 2, 2));
+            let second = match pieces.get(2) {
+                None => Some(0),
+                Some(piece) => digits_between(piece, 2, 2),
+            };
+            match (hour, minute, second, pieces.len() <= 3) {
+                (Some(hour), Some(minute), Some(second), true) => (hour, minute, second),
+                _ => return error(),
+            }
+        }
+    };
+    if year < 2000
+        || !(1..=12).contains(&month)
+        || day < 1
+        || day > days_in_month(year, month)
+        || hour > 23
+        || minute > 59
+        || second > 59
+    {
+        return error();
+    }
+    let Some(local) = parse_stored_timestamp(&format!(
+        "{year:04}-{month:02}-{day:02} {hour:02}:{minute:02}:{second:02}"
+    )) else {
+        return error();
+    };
+    SheetDate::Value(utc_timestamp(local - timezone_offset_hours(timezone) * 3600))
+}
+
+/// Padanan `normalizeImportPhone`: `normalize_whatsapp`, ditambah nomor yang
+/// kehilangan angka 0 di depan karena kolom sheet berformat angka.
+pub fn normalize_import_phone(raw: &str) -> Option<String> {
+    if let Some(phone) = normalize_whatsapp(raw) {
+        return Some(phone);
+    }
+    let digits: String = raw
+        .chars()
+        .filter(|c| !c.is_whitespace() && !matches!(c, '.' | '(' | ')' | '-'))
+        .collect();
+    let mobile = digits.starts_with('8')
+        && (9..=12).contains(&digits.len())
+        && digits.bytes().all(|byte| byte.is_ascii_digit());
+    if mobile {
+        normalize_whatsapp(&format!("62{digits}"))
+    } else {
+        None
+    }
+}
+
+pub struct ImportContext<'a> {
+    pub date_order: &'a str,
+    pub timezone: &'a str,
+    pub now_epoch: i64,
+    pub warm_max_days: i64,
+}
+
+fn import_text(input: &serde_json::Value, key: &str) -> String {
+    input.get(key).and_then(serde_json::Value::as_str).unwrap_or_default().to_owned()
+}
+
+fn sheet_timestamp(raw: &str, label: &str, context: &ImportContext<'_>, fallback: String) -> Result<String, String> {
+    match parse_sheet_date(raw, context.date_order, context.timezone) {
+        SheetDate::Error(message) => Err(format!("{label}: {message}")),
+        SheetDate::Empty => Ok(fallback),
+        SheetDate::Value(value) => {
+            if parse_stored_timestamp(&value).unwrap_or_default() > context.now_epoch {
+                Err(format!(
+                    "{label} is in the future. Check the date order (day/month or month/day)."
+                ))
+            } else {
+                Ok(value)
+            }
+        }
+    }
+}
+
+/// Padanan `validateImportRow`; keluaran berbentuk `ImportRow` di TS.
+pub fn validate_import_row(input: &serde_json::Value, context: &ImportContext<'_>) -> Result<serde_json::Value, String> {
+    let code = import_text(input, "client_code").trim().to_owned();
+    let code_valid = code.is_empty()
+        || (code.len() <= 40
+            && code.bytes().next().is_some_and(|byte| byte.is_ascii_alphanumeric())
+            && code
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'/' | b'-')));
+    if !code_valid {
+        return Err("Kode Klien may only use letters, digits, and . _ / - (up to 40 characters).".to_owned());
+    }
+    let name = import_text(input, "name").trim().to_owned();
+    if !(CLIENT_NAME_MIN..=CLIENT_NAME_MAX).contains(&name.chars().count()) {
+        return Err("The client name must be 2-120 characters.".to_owned());
+    }
+    let phone = normalize_import_phone(&import_text(input, "phone"))
+        .ok_or_else(|| "Enter a valid WhatsApp number that starts with 0 or 62.".to_owned())?;
+    let address = import_text(input, "address").trim().to_owned();
+    let city = import_text(input, "city").trim().to_owned();
+    let province = import_text(input, "province").trim().to_owned();
+    if [&address, &city, &province].iter().any(|value| value.chars().count() > CLIENT_TEXT_MAX) {
+        return Err("Address, city, and province can be at most 300 characters each.".to_owned());
+    }
+    let needs = import_text(input, "needs_notes").trim().to_owned();
+    if needs.chars().count() > CLIENT_NOTES_MAX {
+        return Err("Client needs can be at most 2000 characters.".to_owned());
+    }
+    let channel = import_text(input, "channel_option_id").trim().to_owned();
+    if channel.is_empty() {
+        return Err("Kode Asal Lead is empty or not matched, and no default was chosen.".to_owned());
+    }
+    let category = import_text(input, "product_category_option_id").trim().to_owned();
+    if category.is_empty() {
+        return Err("Kategori Produk is empty or not matched, and no default was chosen.".to_owned());
+    }
+    let created = sheet_timestamp(
+        &import_text(input, "lead_created_at"),
+        "Timelapse Input Data Lead",
+        context,
+        utc_timestamp(context.now_epoch),
+    )?;
+    // D-14: tanpa tanggal = sudah Cold menurut setelan perusahaan (keputusan F).
+    let last_update = sheet_timestamp(
+        &import_text(input, "last_update"),
+        "Tanggal Terakhir Update",
+        context,
+        utc_timestamp(context.now_epoch - (context.warm_max_days + 1) * 86_400),
+    )?;
+    let followups_text = import_text(input, "total_followups").trim().to_owned();
+    let followups = if followups_text.is_empty() {
+        Some(0)
+    } else if followups_text.bytes().all(|byte| byte.is_ascii_digit()) {
+        followups_text.parse::<i64>().ok().filter(|value| *value <= IMPORT_FOLLOWUPS_MAX)
+    } else {
+        None
+    }
+    .ok_or_else(|| "Jumlah FU must be a whole number from 0 to 10000.".to_owned())?;
+    let answer = import_text(input, "pic_answer").trim().to_owned();
+    let room = INTERACTION_NOTES_MAX - IMPORT_NOTE_PREFIX.chars().count();
+    let note = if answer.is_empty() {
+        String::new()
+    } else {
+        format!("{IMPORT_NOTE_PREFIX}{}", answer.chars().take(room).collect::<String>())
+    };
+    Ok(serde_json::json!({
+        "line": input.get("line").cloned().unwrap_or(serde_json::Value::Null),
+        "client_code": code,
+        "name": name,
+        "phone": phone,
+        "address": address,
+        "city": city,
+        "province": province,
+        "needs_notes": needs,
+        "channel_option_id": channel,
+        "product_category_option_id": category,
+        "pic_cs_id": input.get("pic_cs_id").filter(|value| value.is_i64()).cloned().unwrap_or(serde_json::Value::Null),
+        "created_at": created,
+        "last_client_response_at": last_update,
+        "total_followups": followups,
+        "interaction_note": note,
+        "note_truncated": answer.chars().count() > room,
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -535,5 +763,130 @@ mod tests {
         );
         assert_eq!(company_day_bounds_utc("25-09-2026", "Asia/Jakarta"), None);
         assert_eq!(company_day_bounds_utc("", "Asia/Jakarta"), None);
+    }
+
+    // ── Impor CSV (PRD FR-09). Vektor kembar dengan `client-import.test.ts`. ──
+
+    #[test]
+    fn tanggal_sheet_dibaca_menurut_urutan_dan_zona() {
+        let value = |raw: &str, order: &str, zone: &str| match parse_sheet_date(raw, order, zone) {
+            SheetDate::Value(value) => value,
+            other => panic!("{raw}: {other:?}"),
+        };
+        assert_eq!(value("10/3/2026 14:05:00", "MDY", "Asia/Jakarta"), "2026-10-03 07:05:00");
+        assert_eq!(value("10/3/2026 14:05:00", "DMY", "Asia/Jakarta"), "2026-03-10 07:05:00");
+        assert_eq!(value("12/5/2026", "MDY", "Asia/Jakarta"), "2026-12-04 17:00:00");
+        assert_eq!(value("2026-10-03", "DMY", "Asia/Makassar"), "2026-10-02 16:00:00");
+        assert_eq!(value("2026-10-03T08:30", "MDY", "Asia/Jakarta"), "2026-10-03 01:30:00");
+        assert_eq!(value("3.10.2026 9:05", "DMY", "Asia/Jakarta"), "2026-10-03 02:05:00");
+        assert_eq!(value("29/2/2028", "DMY", "Asia/Jakarta"), "2028-02-28 17:00:00");
+        assert_eq!(parse_sheet_date("  ", "DMY", "Asia/Jakarta"), SheetDate::Empty);
+        for raw in ["31/2/2026", "13/13/2026", "2026/10/03", "10/3/26", "10/3/2026 25:00", "1/1/1999", "kemarin"] {
+            assert_eq!(
+                parse_sheet_date(raw, "DMY", "Asia/Jakarta"),
+                SheetDate::Error(format!("The date \"{raw}\" could not be read.")),
+                "{raw}"
+            );
+        }
+    }
+
+    #[test]
+    fn nomor_sheet_tanpa_nol_di_depan_diterima() {
+        assert_eq!(normalize_import_phone("0812-2244-8890").as_deref(), Some("6281222448890"));
+        assert_eq!(normalize_import_phone("+6282311034657").as_deref(), Some("6282311034657"));
+        assert_eq!(normalize_import_phone("812-2244-8890").as_deref(), Some("6281222448890"));
+        assert_eq!(normalize_import_phone("81222448890").as_deref(), Some("6281222448890"));
+        assert_eq!(normalize_import_phone("12345"), None);
+        assert_eq!(normalize_import_phone("7812345678"), None);
+    }
+
+    fn import_base() -> serde_json::Value {
+        serde_json::json!({
+            "line": 2,
+            "client_code": " GNI-0261 ",
+            "name": "Auravia Skin",
+            "phone": "0812-2244-8890",
+            "address": "Jl. Merdeka 1",
+            "city": "Bandung",
+            "province": "Jawa Barat",
+            "needs_notes": "Sunscreen SPF 50, 50 ml",
+            "channel_option_id": "opt-meta",
+            "product_category_option_id": "opt-skin",
+            "pic_cs_id": 7,
+            "lead_created_at": "10/3/2026 14:05:00",
+            "last_update": "10/2/2026",
+            "total_followups": "2",
+            "pic_answer": "Sudah kirim pricelist, klien minta sampel",
+        })
+    }
+
+    fn import_context() -> ImportContext<'static> {
+        // 2026-10-03 12:00:00 UTC.
+        ImportContext { date_order: "MDY", timezone: "Asia/Jakarta", now_epoch: 1_791_028_800, warm_max_days: 7 }
+    }
+
+    #[test]
+    fn baris_impor_dinormalkan() {
+        assert_eq!(
+            validate_import_row(&import_base(), &import_context()),
+            Ok(serde_json::json!({
+                "line": 2,
+                "client_code": "GNI-0261",
+                "name": "Auravia Skin",
+                "phone": "6281222448890",
+                "address": "Jl. Merdeka 1",
+                "city": "Bandung",
+                "province": "Jawa Barat",
+                "needs_notes": "Sunscreen SPF 50, 50 ml",
+                "channel_option_id": "opt-meta",
+                "product_category_option_id": "opt-skin",
+                "pic_cs_id": 7,
+                "created_at": "2026-10-03 07:05:00",
+                "last_client_response_at": "2026-10-01 17:00:00",
+                "total_followups": 2,
+                "interaction_note": "Imported from sheet: Sudah kirim pricelist, klien minta sampel",
+                "note_truncated": false,
+            }))
+        );
+        let mut empty = import_base();
+        for key in ["client_code", "lead_created_at", "last_update", "total_followups", "pic_answer"] {
+            empty[key] = serde_json::json!("");
+        }
+        empty["pic_cs_id"] = serde_json::Value::Null;
+        let row = validate_import_row(&empty, &import_context()).expect("baris kosong sah");
+        assert_eq!(row["client_code"], "");
+        assert_eq!(row["created_at"], "2026-10-03 12:00:00");
+        // D-14: tanpa tanggal = warm + 1 hari sebelum impor (sudah Cold).
+        assert_eq!(row["last_client_response_at"], "2026-09-25 12:00:00");
+        assert_eq!(row["total_followups"], 0);
+        assert_eq!(row["interaction_note"], "");
+        assert_eq!(row["pic_cs_id"], serde_json::Value::Null);
+
+        let mut long = import_base();
+        long["pic_answer"] = serde_json::json!("x".repeat(1000));
+        let row = validate_import_row(&long, &import_context()).expect("catatan panjang dipotong");
+        assert_eq!(row["interaction_note"].as_str().map(|note| note.chars().count()), Some(1000));
+        assert_eq!(row["note_truncated"], true);
+    }
+
+    #[test]
+    fn baris_impor_ditolak_dengan_alasan() {
+        let cases: &[(&str, serde_json::Value, &str)] = &[
+            ("client_code", serde_json::json!("GNI 0261"), "Kode Klien may only use letters, digits, and . _ / - (up to 40 characters)."),
+            ("name", serde_json::json!("A"), "The client name must be 2-120 characters."),
+            ("phone", serde_json::json!("12345"), "Enter a valid WhatsApp number that starts with 0 or 62."),
+            ("channel_option_id", serde_json::json!(""), "Kode Asal Lead is empty or not matched, and no default was chosen."),
+            ("product_category_option_id", serde_json::json!(" "), "Kategori Produk is empty or not matched, and no default was chosen."),
+            ("lead_created_at", serde_json::json!("2/31/2026"), "Timelapse Input Data Lead: The date \"2/31/2026\" could not be read."),
+            ("last_update", serde_json::json!("10/5/2026"), "Tanggal Terakhir Update is in the future. Check the date order (day/month or month/day)."),
+            ("total_followups", serde_json::json!("2.5"), "Jumlah FU must be a whole number from 0 to 10000."),
+            ("total_followups", serde_json::json!("-1"), "Jumlah FU must be a whole number from 0 to 10000."),
+            ("total_followups", serde_json::json!("10001"), "Jumlah FU must be a whole number from 0 to 10000."),
+        ];
+        for (key, value, message) in cases {
+            let mut input = import_base();
+            input[*key] = value.clone();
+            assert_eq!(validate_import_row(&input, &import_context()), Err((*message).to_owned()), "{key}");
+        }
     }
 }

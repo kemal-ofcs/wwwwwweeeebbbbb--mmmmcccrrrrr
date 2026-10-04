@@ -15,7 +15,7 @@ use super::{
     clients,
     config::DesktopState,
     models::{CommandError, DesktopSyncStatus, SessionMode},
-    storage,
+    notifications, storage,
     turso::TursoClient,
 };
 
@@ -23,7 +23,7 @@ use super::{
 /// `CURRENT_SCHEMA_VERSION` di `web-desktop/src/lib/db-schema.ts` setiap kali
 /// migrasi baru ditambahkan, karena keduanya membaca tabel `schema_migration`
 /// yang sama di Turso.
-pub const CLIENT_SCHEMA_VERSION: i64 = 8;
+pub const CLIENT_SCHEMA_VERSION: i64 = 9;
 
 /// Hanya `cloud > client` yang berbahaya; `cloud <= client` adalah kondisi normal.
 fn is_client_schema_outdated(cloud_version: i64) -> bool {
@@ -1465,6 +1465,17 @@ pub async fn push_outbox(state: &DesktopState) -> Result<(), CommandError> {
 /// hanya berebut kunci tulis SQLite lokal dan berisiko "database is locked".
 static SYNC_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
 
+/// Penjaga pengirim notifikasi latar (lihat `synchronize`).
+static DISPATCH_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
+
+struct DispatchInFlightGuard;
+
+impl Drop for DispatchInFlightGuard {
+    fn drop(&mut self) {
+        DISPATCH_IN_FLIGHT.store(false, Ordering::Release);
+    }
+}
+
 struct SyncInFlightGuard;
 
 impl Drop for SyncInFlightGuard {
@@ -1499,6 +1510,22 @@ pub async fn synchronize(state: &DesktopState) -> Result<DesktopSyncStatus, Comm
     // request; perangkat memeriksanya sekali per siklus sinkronisasi.
     enforce_rbac_revision(state).await;
     ensure_device_tag(state).await;
+    // Pengirim notifikasi (PRD FR-08), best effort dan DILEPAS ke latar:
+    // banyak command (termasuk login) menunggu `synchronize`, dan Telegram
+    // yang lambat tidak boleh menahan mereka maupun kunci `SYNC_IN_FLIGHT`.
+    // Satu pengirim saja pada satu waktu; klaim di cloud menjaga sisanya.
+    if let Ok(turso) = state.get_turso_client() {
+        if DISPATCH_IN_FLIGHT
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            let http = state.http.clone();
+            tauri::async_runtime::spawn(async move {
+                let _in_flight = DispatchInFlightGuard;
+                let _ = notifications::dispatch(&turso, &http).await;
+            });
+        }
+    }
 
     let superseded = push_error
         .as_ref()

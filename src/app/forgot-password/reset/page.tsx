@@ -127,7 +127,7 @@ function ResetPasswordForm() {
     <PageShell>
       <header className="space-y-1">
         <p className="text-body-sm font-semibold text-on-surface-variant">
-          App Template
+          Company OS
         </p>
         <h1 className="text-headline-xl text-on-surface">
           Create a new password

@@ -105,7 +105,12 @@ beforeEach(async () => {
 
 afterAll(() => {
   client.close();
-  rmSync(directory, { recursive: true, force: true });
+  try {
+    rmSync(directory, { recursive: true, force: true });
+  } catch {
+    // Windows: libsql baru melepas berkas database saat proses selesai, jadi
+    // penghapusan di sini gagal EBUSY. Folder temp boleh tertinggal.
+  }
 });
 
 describe("interaksi lead, jalur Web", () => {

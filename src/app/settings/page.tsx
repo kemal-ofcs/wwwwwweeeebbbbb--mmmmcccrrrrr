@@ -17,6 +17,7 @@ import { DatabaseBackupCard } from "@/components/DatabaseBackupCard";
 import { LicenseCard } from "@/components/license/LicenseCard";
 import { MailSettingsCard } from "@/components/MailSettingsCard";
 import { PasswordRecoveryCard } from "@/components/PasswordRecoveryCard";
+import { TelegramSettingsCard } from "@/components/TelegramSettingsCard";
 import { TwoFactorCard } from "@/components/TwoFactorCard";
 import { FeedbackBanner } from "@/components/ui/FeedbackBanner";
 import { PageHeader } from "@/components/ui/PageHeader";
@@ -449,6 +450,7 @@ export default function SettingsPage() {
       {hasPermission(user, "settings.manage") ? <CompanyProfileCard /> : null}
 
       {hasPermission(user, "settings.manage") ? <MailSettingsCard /> : null}
+      {hasPermission(user, "settings.manage") ? <TelegramSettingsCard /> : null}
 
       {/* Domain MaklonOS: pilihan form intake dan bentuk kode klien. */}
       <BusinessSettingsCard

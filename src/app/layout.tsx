@@ -18,12 +18,12 @@ const jetbrainsMono = JetBrains_Mono({
 
 export const metadata: Metadata = {
   title: {
-    default: "App Template",
-    template: "%s · App Template",
+    default: "Company OS",
+    template: "%s · Company OS",
   },
   description:
     "Offline-first operations system for Web and Desktop, online and offline.",
-  applicationName: "App Template",
+  applicationName: "Company OS",
 };
 
 export default function RootLayout({

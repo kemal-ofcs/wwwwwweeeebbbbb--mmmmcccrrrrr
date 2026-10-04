@@ -4,6 +4,7 @@ const DESKTOP_COMMANDS: &[&str] = &[
     "desktop_get_database_config",
     "desktop_list_clients",
     "desktop_register_client",
+    "desktop_import_clients",
     "desktop_update_client",
     "desktop_list_master_options",
     "desktop_save_master_option",
@@ -55,6 +56,12 @@ const DESKTOP_COMMANDS: &[&str] = &[
     "desktop_send_test_mail",
     "desktop_get_mail_config",
     "desktop_save_mail_config",
+    "desktop_get_telegram_config",
+    "desktop_save_telegram_config",
+    "desktop_send_test_telegram",
+    "desktop_retry_failed_notifications",
+    "desktop_list_notifications",
+    "desktop_mark_notifications_seen",
     "desktop_get_two_factor_status",
     "desktop_begin_two_factor_setup",
     "desktop_confirm_two_factor_setup",
@@ -231,7 +238,15 @@ fn main() {
     expose_build_value("TURSO_AUTH_TOKEN", &local);
     expose_build_value("SPPG_API_BASE_URL", &local);
     expose_build_value("SPPG_DEV_API_BASE_URL", &local);
-    expose_build_value("SPPG_OFFLINE_AUTH_MAX_AGE_HOURS", &local);
+    // Masa login offline (jam) yang dibaca `config.rs` lewat
+    // `option_env!("APP_OFFLINE_AUTH_MAX_AGE_HOURS")`. Build rilis TIDAK punya
+    // nilai bawaan di sana, jadi tanpa baris ini aplikasi rilis menolak start dan
+    // tertutup sendiri saat dibuka. Nama lama `SPPG_OFFLINE_AUTH_MAX_AGE_HOURS`
+    // tidak pernah dibaca kode. 168 jam = keputusan pemilik produk (2026-10-04);
+    // Admin bisa memperpendeknya dari Pengaturan, tidak memperpanjangnya.
+    if expose_build_value("APP_OFFLINE_AUTH_MAX_AGE_HOURS", &local).is_none() {
+        println!("cargo:rustc-env=APP_OFFLINE_AUTH_MAX_AGE_HOURS=168");
+    }
 
     tauri_build::try_build(
         tauri_build::Attributes::new()

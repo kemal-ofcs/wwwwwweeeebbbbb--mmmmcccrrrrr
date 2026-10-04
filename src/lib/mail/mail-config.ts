@@ -113,7 +113,7 @@ export function buildResetEmail(input: {
   const text = [
     `Hello ${operatorName},`,
     "",
-    "We received a password recovery request for your App Template account.",
+    "We received a password recovery request for your Company OS account.",
     "The request passed face verification on the requester's device.",
     "",
     action,
@@ -122,7 +122,7 @@ export function buildResetEmail(input: {
     "If you did not make this request, ignore this email and report it to your",
     "Admin right away. The requester's photo has been saved as evidence.",
     "",
-    "App Template",
+    "Company OS",
   ].join("\n");
 
   const safeName = escapeHtml(operatorName);
@@ -132,16 +132,16 @@ export function buildResetEmail(input: {
   const html = [
     '<div style="font-family:system-ui,-apple-system,Segoe UI,sans-serif;color:#0f172a;line-height:1.6">',
     `<p>Hello <strong>${safeName}</strong>,</p>`,
-    "<p>We received a password recovery request for your App Template account. The request passed face verification on the requester's device.</p>",
+    "<p>We received a password recovery request for your Company OS account. The request passed face verification on the requester's device.</p>",
     htmlAction,
     `<p>This link or code is valid for <strong>${expiresInMinutes} minutes</strong> and can be used once.</p>`,
     "<p>If you did not make this request, ignore this email and report it to your Admin right away. The requester's photo has been saved as evidence.</p>",
-    "<p>App Template</p>",
+    "<p>Company OS</p>",
     "</div>",
   ].join("");
 
   return {
-    subject: "App Template password recovery",
+    subject: "Company OS password recovery",
     text,
     html,
   };

@@ -99,6 +99,8 @@ export async function createOperator(actorId: number, draft: OperatorDraft) {
           kode_operator: draft.kodeOperator,
           nama_operator: draft.name,
           username: draft.username,
+          email: draft.email,
+          no_hp: draft.noHp,
           password: draft.password,
           role_id: draft.roleId,
           status: draft.status,
@@ -126,6 +128,8 @@ export async function updateMasterOperator(
       operatorId,
       draft: {
         nama_operator: draft.name,
+        email: draft.email,
+        no_hp: draft.noHp,
         password: draft.password,
         role_id: draft.roleId,
         status: draft.status,

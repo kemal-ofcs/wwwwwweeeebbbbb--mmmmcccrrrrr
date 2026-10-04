@@ -216,7 +216,7 @@ export function MailSettingsCard() {
           <input
             value={senderName}
             onChange={(event) => setSenderName(event.target.value)}
-            placeholder="App Template"
+            placeholder="Company Name"
             className="app-input font-normal"
           />
         </label>

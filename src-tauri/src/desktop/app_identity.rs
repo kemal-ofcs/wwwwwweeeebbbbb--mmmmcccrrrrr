@@ -13,11 +13,11 @@
 //! `bun run rename` mengganti keduanya sekaligus.
 
 /// Nama mesin produk: huruf kecil, angka, dan tanda hubung.
-pub const APP_SLUG: &str = "app-template";
+pub const APP_SLUG: &str = "companyos";
 
 /// Nama yang dilihat pengguna.
 #[allow(dead_code)]
-pub const APP_DISPLAY_NAME: &str = "App Template";
+pub const APP_DISPLAY_NAME: &str = "Company OS";
 
 /// Alamat server aplikasi bawaan.
 ///

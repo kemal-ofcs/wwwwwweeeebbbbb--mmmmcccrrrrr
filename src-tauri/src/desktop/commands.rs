@@ -11,7 +11,7 @@ use super::{
         CommandError, DesktopLoginResult, DesktopRuntimeStatus, DesktopSession, DesktopSyncStatus,
         OperatorUser, SessionMode,
     },
-    portability, secrets, storage, sync, turso,
+    notifications, portability, secrets, storage, sync, turso,
 };
 
 /// Pastikan sesi aktif memiliki permission yang diminta.
@@ -956,6 +956,88 @@ pub async fn desktop_save_mail_config(
         .await
 }
 
+/// Pengaturan › Notifikasi (PRD FR-08): status bot tanpa token, antrean, dan
+/// daftar kiriman gagal beserta error Telegram apa adanya (E-09).
+#[tauri::command]
+pub async fn desktop_get_telegram_config(
+    state: State<'_, DesktopState>,
+) -> Result<Value, CommandError> {
+    require_permission(&state, "settings.manage")?;
+    notifications::telegram_settings(&state.get_turso_client()?).await
+}
+
+/// Simpan token dan sakelar bot. Token kosong = pertahankan yang lama (aturan 11).
+#[tauri::command]
+pub async fn desktop_save_telegram_config(
+    state: State<'_, DesktopState>,
+    draft: Value,
+) -> Result<Value, CommandError> {
+    let actor = require_permission(&state, "settings.manage")?;
+    notifications::save_telegram_config(&state.get_turso_client()?, &draft, &actor.kode_operator).await
+}
+
+/// Uji kirim ke grup satu divisi (`CS`, `RND`, atau `FINANCE`).
+#[tauri::command]
+pub async fn desktop_send_test_telegram(
+    state: State<'_, DesktopState>,
+    division: String,
+) -> Result<Value, CommandError> {
+    require_permission(&state, "settings.manage")?;
+    notifications::send_test(&state.get_turso_client()?, &state.http, &division).await
+}
+
+/// Kembalikan semua kiriman `FAILED` ke antrean, lalu langsung coba kirim.
+#[tauri::command]
+pub async fn desktop_retry_failed_notifications(
+    state: State<'_, DesktopState>,
+) -> Result<Value, CommandError> {
+    require_permission(&state, "settings.manage")?;
+    let turso = state.get_turso_client()?;
+    notifications::retry_failed(&turso).await?;
+    let _ = notifications::dispatch(&turso, &state.http).await;
+    notifications::telegram_settings(&turso).await
+}
+
+/// Divisi lonceng yang boleh dilihat sesi ini (urutan CS, RnD, Finance).
+/// Setiap izin diperiksa lewat `require_permission`, termasuk gerbang lisensi;
+/// tanpa satu pun, penolakan terakhir dikembalikan.
+fn notification_access(state: &DesktopState) -> Result<(OperatorUser, [bool; 3]), CommandError> {
+    let mut allowed = [false; 3];
+    let mut granted = None;
+    let mut denied = None;
+    for (index, division) in notifications::NOTIFICATION_DIVISIONS.iter().enumerate() {
+        let permission = notifications::division_permission(division).unwrap_or_default();
+        match require_permission(state, permission) {
+            Ok(operator) => {
+                allowed[index] = true;
+                granted = Some(operator);
+            }
+            Err(error) => denied = Some(error),
+        }
+    }
+    granted
+        .map(|operator| (operator, allowed))
+        .ok_or_else(|| denied.unwrap_or_else(CommandError::internal))
+}
+
+/// Lonceng (PRD FR-08): 30 kejadian terakhir dan jumlah yang belum dibaca.
+#[tauri::command]
+pub async fn desktop_list_notifications(
+    state: State<'_, DesktopState>,
+) -> Result<Value, CommandError> {
+    let (operator, allowed) = notification_access(&state)?;
+    notifications::bell(&state.get_turso_client()?, allowed, operator.id).await
+}
+
+/// Membuka lonceng menandai semua kejadian sudah dibaca, di semua perangkat.
+#[tauri::command]
+pub async fn desktop_mark_notifications_seen(
+    state: State<'_, DesktopState>,
+) -> Result<(), CommandError> {
+    let (operator, _) = notification_access(&state)?;
+    notifications::mark_seen(&state.get_turso_client()?, operator.id).await
+}
+
 /// Pengelolaan verifikasi dua langkah.
 ///
 /// `status`, `begin`, `confirm`, dan `disable` selalu bekerja pada akun
@@ -1351,11 +1433,20 @@ pub fn desktop_get_server_url(state: State<'_, DesktopState>) -> Result<String, 
     Ok(state.server_origin())
 }
 
+/// Alamat server ikut membentuk kunci vault login offline (`secrets.rs`), jadi
+/// mengubahnya tanpa sesi bisa merusak login offline semua akun perangkat ini.
 #[tauri::command]
 pub fn desktop_set_server_url(
     state: State<'_, DesktopState>,
     url: String,
 ) -> Result<String, CommandError> {
+    let operator = require_permission(&state, "settings.manage")?;
+    if !operator.is_superadmin {
+        return Err(CommandError::new(
+            "DESKTOP_ACCESS_DENIED",
+            "The server address can only be changed by the Superadmin.",
+        ));
+    }
     state.set_server_url(&url)
 }
 
@@ -2230,6 +2321,338 @@ pub async fn desktop_register_client(
 
     let _ = sync::synchronize(&state).await;
     Ok(json!({ "sukses": true, "id": id, "client_code": code }))
+}
+
+/// Hasil pemeriksaan satu impor: baris yang akan disimpan dan laporan per baris.
+struct ImportPlan {
+    valid: Vec<Value>,
+    results: Vec<Value>,
+    warnings: Vec<Value>,
+}
+
+impl ImportPlan {
+    fn report(&self, dry_run: bool, total: usize) -> Value {
+        let count = |status: &str| {
+            self.results
+                .iter()
+                .filter(|result| result["status"] == status)
+                .count()
+        };
+        json!({
+            "dry_run": dry_run,
+            "total": total,
+            "added": self.valid.len(),
+            "skipped": count("skipped"),
+            "invalid": count("invalid"),
+            "results": self.results,
+            "warnings": self.warnings,
+        })
+    }
+}
+
+/// Periksa setiap baris impor terhadap aturan kembar (`validate_import_row`)
+/// dan data lokal: opsi Master Data aktif, PIC aktif, kode/nomor yang sudah
+/// ada, dan duplikat di dalam berkas. Padanan `planImport` di
+/// `src/lib/server/client-import.ts`; pratinjau dan simpan memanggil ini.
+fn plan_import(
+    connection: &rusqlite::Connection,
+    rows: &[Value],
+    context: &clients::ImportContext<'_>,
+    importer_id: i64,
+    code_source: Option<(String, String, String)>,
+) -> Result<ImportPlan, CommandError> {
+    let strings = |sql: &str| -> Result<Vec<(String, String)>, CommandError> {
+        let mut statement = connection.prepare(sql).map_err(|_| CommandError::internal())?;
+        let rows = statement
+            .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+            .map_err(|_| CommandError::internal())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| CommandError::internal());
+        rows
+    };
+    let options: std::collections::HashSet<(String, String)> =
+        strings("SELECT id, kind FROM master_option WHERE is_active = 1;")?.into_iter().collect();
+    let operators: std::collections::HashSet<String> = strings(
+        "SELECT CAST(id AS TEXT), '' FROM master_operator WHERE COALESCE(status, 'Active') = 'Active';",
+    )?
+    .into_iter()
+    .map(|(id, _)| id)
+    .collect();
+    let existing_codes: Vec<String> =
+        strings("SELECT client_code, '' FROM clients;")?.into_iter().map(|(code, _)| code).collect();
+    // Keunikan tanpa membedakan huruf besar-kecil; urutan kode dihitung dari ejaan asli.
+    let mut codes: std::collections::HashSet<String> = existing_codes.iter().map(|code| code.to_lowercase()).collect();
+    let phones: std::collections::HashMap<String, String> =
+        strings("SELECT phone_normalized, client_code FROM clients;")?.into_iter().collect();
+    let mut seen_phones: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    // Kode baru untuk baris tanpa Kode Klien (keputusan D): `(awalan, tanggal, tag)`.
+    let mut next_sequence = code_source
+        .as_ref()
+        .and_then(|(_, stamp, tag)| clients::next_client_sequence(existing_codes.iter().map(String::as_str), stamp, tag));
+
+    let mut plan = ImportPlan { valid: Vec::new(), results: Vec::new(), warnings: Vec::new() };
+    for input in rows {
+        let line = input.get("line").cloned().unwrap_or(Value::Null);
+        let mut reject = |status: &str, message: String| {
+            plan.results.push(json!({ "line": line, "status": status, "message": message }));
+        };
+        let mut row = match clients::validate_import_row(input, context) {
+            Ok(row) => row,
+            Err(message) => {
+                reject("invalid", message);
+                continue;
+            }
+        };
+        let text = |key: &str| row[key].as_str().unwrap_or_default().to_owned();
+        if !options.contains(&(text("channel_option_id"), "LEAD_CHANNEL".to_owned())) {
+            reject("invalid", "The lead source is not an active Master Data lead channel.".to_owned());
+            continue;
+        }
+        if !options.contains(&(text("product_category_option_id"), "PRODUCT_CATEGORY".to_owned())) {
+            reject("invalid", "The product category is not an active Master Data category.".to_owned());
+            continue;
+        }
+        let pic = row["pic_cs_id"].as_i64().unwrap_or(importer_id);
+        if !operators.contains(&pic.to_string()) {
+            reject("invalid", "The PIC is not an active operator.".to_owned());
+            continue;
+        }
+        let phone = text("phone");
+        if let Some(owner) = phones.get(&phone) {
+            reject("skipped", format!("The WhatsApp number {phone} is already registered to client {owner}."));
+            continue;
+        }
+        if seen_phones.contains(&phone) {
+            reject("skipped", format!("The WhatsApp number {phone} appears more than once in this file."));
+            continue;
+        }
+        let mut code = text("client_code");
+        if code.is_empty() {
+            let generated = match (&code_source, next_sequence) {
+                (Some((prefix, stamp, tag)), Some(sequence)) => clients::format_client_code(prefix, stamp, tag, sequence),
+                _ => None,
+            };
+            let Some(generated) = generated else {
+                reject(
+                    "invalid",
+                    if code_source.is_none() {
+                        "Kode Klien is empty and this device has no client code tag yet. Connect it to the database once to get one.".to_owned()
+                    } else {
+                        "Kode Klien is empty and no new client codes are left for today.".to_owned()
+                    },
+                );
+                continue;
+            };
+            next_sequence = next_sequence.map(|sequence| sequence + 1);
+            code = generated;
+        } else if codes.contains(&code.to_lowercase()) {
+            reject("skipped", format!("Kode Klien {code} already exists or appears more than once in this file."));
+            continue;
+        }
+        codes.insert(code.to_lowercase());
+        seen_phones.insert(phone);
+        if row["note_truncated"] == true {
+            plan.warnings.push(json!({
+                "line": line,
+                "message": "Jawaban PIC is longer than 1000 characters and was shortened.",
+            }));
+        }
+        row["client_code"] = json!(code);
+        row["pic_cs_id"] = json!(pic);
+        plan.valid.push(row);
+    }
+    Ok(plan)
+}
+
+/// Impor CSV Sheet Database CS per PIC / Database Klien (PRD FR-09).
+///
+/// `dry_run: true` = pratinjau tanpa menulis apa pun; `false` = simpan baris
+/// yang sama dalam SATU transaksi lokal (FR-09.6), hanya menambah (FR-09.5),
+/// dengan satu entri audit (FR-09.7). Impor menetapkan PIC untuk operator
+/// lain, jadi selain `clients.manage` ia menuntut `leads.reassign`
+/// (keputusan H). Lead hasil impor tidak memicu notifikasi (keputusan I).
+#[tauri::command]
+pub async fn desktop_import_clients(
+    state: State<'_, DesktopState>,
+    import: Value,
+) -> Result<Value, CommandError> {
+    let operator = require_permission(&state, "clients.manage")?;
+    require_permission(&state, "leads.reassign")?;
+    let invalid = |message: &str| CommandError::new("CLIENT_IMPORT_INVALID", message.to_owned());
+    let dry_run = import.get("dry_run").and_then(Value::as_bool) != Some(false);
+    let date_order = draft_text(&import, "date_order");
+    if !clients::DATE_ORDERS.contains(&date_order.as_str()) {
+        return Err(invalid("Choose the date order used in the sheet."));
+    }
+    let file_name: String = draft_text(&import, "file_name").chars().take(200).collect();
+    let rows = import
+        .get("rows")
+        .and_then(Value::as_array)
+        .filter(|rows| !rows.is_empty())
+        .ok_or_else(|| invalid("The file has no data rows."))?;
+    if rows.len() > clients::IMPORT_MAX_ROWS {
+        return Err(invalid("One import can hold at most 5000 rows. Split the file and import each part."));
+    }
+    // Keputusan K: tarik data cloud dulu supaya klien yang sudah ada terlihat
+    // sebagai "dilewati", bukan baru ketahuan sebagai konflik setelah disimpan.
+    if dry_run {
+        let _ = sync::synchronize(&state).await;
+    }
+
+    let now = storage::now_epoch_seconds();
+    let timestamp = clients::utc_timestamp(now);
+    let (plan, free_revisions) = {
+        let connection = storage::database(&state.data_dir)?;
+        let business = business_settings(&connection);
+        let timezone = company_timezone(&connection);
+        let context = clients::ImportContext {
+            date_order: &date_order,
+            timezone: &timezone,
+            now_epoch: now,
+            warm_max_days: business.lead_warm_max_days,
+        };
+        let code_source = sync::local_device_tag(&state)?.map(|tag| {
+            (client_code_prefix(&state), clients::company_date_stamp(now, &timezone), tag)
+        });
+        (
+            plan_import(&connection, rows, &context, operator.id, code_source)?,
+            business.default_free_revision_limit,
+        )
+    };
+    if dry_run || plan.valid.is_empty() {
+        return Ok(plan.report(dry_run, rows.len()));
+    }
+
+    let client_id = sync::ensure_client_id(&state)?;
+    {
+        let mut connection = storage::database(&state.data_dir)?;
+        let transaction = connection.transaction().map_err(|_| CommandError::internal())?;
+        let failed = || CommandError::new("CLIENT_IMPORT_FAILED", "The import could not be saved. Nothing was saved.");
+        for row in &plan.valid {
+            let text = |key: &str| row[key].as_str().unwrap_or_default().to_owned();
+            let id = clients::new_uuid();
+            let lead_id = clients::new_uuid();
+            let pic = row["pic_cs_id"].as_i64();
+            let total_followups = row["total_followups"].as_i64().unwrap_or_default();
+            transaction
+                .execute(
+                    r#"INSERT INTO clients
+                        (id, client_code, name, phone_normalized, address, city, province,
+                         lifecycle_status, free_revision_limit, is_white_label, assigned_crm_id,
+                         created_by, created_at, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, 'LEAD', ?, 0, NULL, ?, ?, ?);"#,
+                    rusqlite::params![
+                        &id, text("client_code"), text("name"), text("phone"), text("address"),
+                        text("city"), text("province"), free_revisions, operator.id,
+                        text("created_at"), &timestamp
+                    ],
+                )
+                .map_err(|_| failed())?;
+            transaction
+                .execute(
+                    r#"INSERT INTO leads
+                        (id, client_id, pic_cs_id, channel_option_id, product_category_option_id,
+                         needs_notes, last_followup_at, last_client_response_at, total_followups,
+                         created_at, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?);"#,
+                    rusqlite::params![
+                        &lead_id, &id, pic, text("channel_option_id"), text("product_category_option_id"),
+                        text("needs_notes"), text("last_client_response_at"), total_followups,
+                        text("created_at"), &timestamp
+                    ],
+                )
+                .map_err(|_| failed())?;
+            sync::enqueue(
+                &transaction,
+                &client_id,
+                "client",
+                "register",
+                &id,
+                &json!({
+                    "id": id,
+                    "client_code": text("client_code"),
+                    "name": text("name"),
+                    "phone_normalized": text("phone"),
+                    "address": text("address"),
+                    "city": text("city"),
+                    "province": text("province"),
+                    "lifecycle_status": "LEAD",
+                    "free_revision_limit": free_revisions,
+                    "is_white_label": 0,
+                    "assigned_crm_id": Value::Null,
+                    "created_by": operator.id,
+                    "created_at": text("created_at"),
+                    "updated_at": timestamp,
+                    "lead_id": lead_id,
+                    "pic_cs_id": pic,
+                    "channel_option_id": text("channel_option_id"),
+                    "product_category_option_id": text("product_category_option_id"),
+                    "needs_notes": text("needs_notes"),
+                    "last_followup_at": "",
+                    "last_client_response_at": text("last_client_response_at"),
+                    "total_followups": total_followups,
+                    // Lead hasil impor tidak memberi tahu siapa pun (keputusan I).
+                    "imported": true,
+                }),
+                None,
+            )?;
+            let note = text("interaction_note");
+            if !note.is_empty() {
+                // Keputusan E: INBOUND pada waktu respons terakhir, jadi
+                // ringkasan lead (dan Jumlah FU dari sheet) tidak berubah.
+                let interaction_id = clients::new_uuid();
+                let occurred_at = text("last_client_response_at");
+                transaction
+                    .execute(
+                        clients::LEAD_INTERACTION_INSERT_SQL,
+                        rusqlite::params![
+                            &interaction_id, &lead_id, pic, "INBOUND", "OTHER", &note, &occurred_at, &timestamp
+                        ],
+                    )
+                    .map_err(|_| failed())?;
+                sync::enqueue(
+                    &transaction,
+                    &client_id,
+                    "lead-interaction",
+                    "record",
+                    &interaction_id,
+                    &json!({
+                        "id": interaction_id,
+                        "lead_id": lead_id,
+                        "operator_id": pic,
+                        "direction": "INBOUND",
+                        "kind": "OTHER",
+                        "notes": note,
+                        "occurred_at": occurred_at,
+                        "created_at": timestamp,
+                    }),
+                    None,
+                )?;
+            }
+        }
+        let report = plan.report(false, rows.len());
+        write_audit(
+            &transaction,
+            &client_id,
+            AuditEntry {
+                actor: &operator,
+                action: "client.import",
+                entity_type: "client",
+                entity_id: "import",
+                summary: json!({
+                    "file_name": file_name,
+                    "added": report["added"],
+                    "skipped": report["skipped"],
+                    "invalid": report["invalid"],
+                }),
+                on_behalf_of: None,
+            },
+        )?;
+        transaction.commit().map_err(|_| failed())?;
+    }
+    let _ = sync::synchronize(&state).await;
+    Ok(plan.report(false, rows.len()))
 }
 
 /// Ubah data kontak klien dan kebutuhan lead-nya. Kode klien, pembuat, dan
@@ -3697,5 +4120,77 @@ mod tests_provisioning {
         )
         .expect_err("Turso tanpa alamat harus ditolak");
         assert_eq!(error.code, "TURSO_NOT_CONFIGURED");
+    }
+}
+
+#[cfg(test)]
+mod tests_import {
+    use super::*;
+
+    /// Impor CSV (PRD FR-09): pratinjau melaporkan setiap baris dengan
+    /// alasannya, kode kosong dibuatkan kode baru, dan klien yang sudah ada
+    /// atau muncul dua kali di berkas dilewati, bukan ditimpa.
+    #[test]
+    fn rencana_impor_melaporkan_setiap_baris() {
+        let directory = tempfile::tempdir().expect("direktori sementara");
+        storage::initialize(directory.path()).expect("skema lokal");
+        let connection = storage::database(directory.path()).expect("database lokal");
+        connection
+            .execute_batch(
+                "INSERT INTO master_option (id, kind, code, label, is_active, updated_at) VALUES
+                    ('meta', 'LEAD_CHANNEL', 'META', 'Meta', 1, ''),
+                    ('old', 'LEAD_CHANNEL', 'OLD', 'Old', 0, ''),
+                    ('skin', 'PRODUCT_CATEGORY', 'SKIN', 'Skincare', 1, '');
+                 INSERT INTO master_operator (id, kode_operator, nama_operator, status) VALUES
+                    (1, 'SPD001', 'Kemal', 'Active'), (7, 'OP7', 'Rina', 'Active'), (9, 'OP9', 'Lama', 'Inactive');
+                 INSERT INTO clients (id, client_code, name, phone_normalized, created_at, updated_at) VALUES
+                    ('c0', 'GNI-0001', 'Lama', '6281100000000', '', '');",
+            )
+            .expect("data uji");
+        let row = |line: i64, code: &str, phone: &str, channel: &str, pic: Value| {
+            json!({
+                "line": line, "client_code": code, "name": "Auravia Skin", "phone": phone,
+                "address": "", "city": "", "province": "", "needs_notes": "",
+                "channel_option_id": channel, "product_category_option_id": "skin", "pic_cs_id": pic,
+                "lead_created_at": "10/3/2026 14:05:00", "last_update": "", "total_followups": "2", "pic_answer": "",
+            })
+        };
+        let rows = vec![
+            row(2, "GNI-0261", "0812-2244-8890", "meta", json!(7)),
+            row(3, "", "+6282311034657", "meta", Value::Null),
+            row(4, "gni-0261", "0812-0000-0004", "meta", json!(7)),
+            row(5, "GNI-0300", "0811-0000-0000", "meta", json!(7)),
+            row(6, "GNI-0301", "0812-2244-8890", "meta", json!(7)),
+            row(7, "GNI-0302", "0812-0000-0007", "old", json!(7)),
+            row(8, "GNI-0303", "0812-0000-0008", "meta", json!(9)),
+            row(9, "GNI-0304", "12345", "meta", json!(7)),
+        ];
+        let context = clients::ImportContext {
+            date_order: "MDY",
+            timezone: "Asia/Jakarta",
+            now_epoch: 1_791_028_800,
+            warm_max_days: 7,
+        };
+        let source = Some(("KLN".to_owned(), "20261003".to_owned(), "A1".to_owned()));
+        let plan = plan_import(&connection, &rows, &context, 1, source).expect("rencana");
+
+        let codes: Vec<&str> = plan.valid.iter().map(|row| row["client_code"].as_str().unwrap_or_default()).collect();
+        assert_eq!(codes, vec!["GNI-0261", "KLN-20261003-A101"]);
+        assert_eq!(plan.valid[1]["pic_cs_id"], json!(1), "PIC kosong = pengimpor");
+        let statuses: Vec<(i64, &str)> = plan
+            .results
+            .iter()
+            .map(|result| (result["line"].as_i64().unwrap_or_default(), result["status"].as_str().unwrap_or_default()))
+            .collect();
+        assert_eq!(
+            statuses,
+            vec![(4, "skipped"), (5, "skipped"), (6, "skipped"), (7, "invalid"), (8, "invalid"), (9, "invalid")]
+        );
+        assert_eq!(
+            plan.results[1]["message"],
+            json!("The WhatsApp number 6281100000000 is already registered to client GNI-0001.")
+        );
+        let report = plan.report(true, rows.len());
+        assert_eq!((report["added"].clone(), report["skipped"].clone(), report["invalid"].clone()), (json!(2), json!(3), json!(3)));
     }
 }

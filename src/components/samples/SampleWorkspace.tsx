@@ -21,6 +21,7 @@ import {
   type SampleRequestRecord,
 } from "@/lib/gateways/samples";
 import { SYNC_COMPLETED_EVENT } from "@/lib/gateways/sync-status";
+import { onOpenDetail, requestedDetail } from "@/lib/utils/open-detail";
 import {
   SAMPLE_TERMINAL_STATUSES,
   type SampleStatus,
@@ -116,7 +117,11 @@ export function SampleWorkspace() {
     draft: SampleDraftInput;
     locked: boolean;
   } | null>(null);
-  const [detailId, setDetailId] = useState<string | null>(null);
+  const [detailId, setDetailId] = useState<string | null>(
+    () => requestedDetail().id ?? null,
+  );
+  // Tautan lonceng saat halaman ini sudah terbuka (PRD FR-08).
+  useEffect(() => onOpenDetail(({ id }) => setDetailId(id ?? null)), []);
 
   const refresh = useCallback(async () => {
     try {

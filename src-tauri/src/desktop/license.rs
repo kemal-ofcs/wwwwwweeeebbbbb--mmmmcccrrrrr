@@ -31,7 +31,7 @@ use super::{config::DesktopState, models::CommandError, storage, sync};
 /// Kode produk aplikasi ini di alat lisensi. Setiap aplikasi penerbit punya
 /// kode (dan pasangan kunci) sendiri, supaya lisensi satu aplikasi tidak sah
 /// di aplikasi lain.
-pub const LICENSE_PRODUCT: &str = "kos-template";
+pub const LICENSE_PRODUCT: &str = "kos-companyos";
 pub const LICENSE_SETTING_KEY: &str = "app_license";
 /// Penerbit lisensi yang disebut di pesan untuk klien. Padanannya di UI:
 /// `LICENSE_ISSUER` di `lib/gateways/license.ts`.
@@ -42,7 +42,7 @@ pub const LICENSE_ISSUER: &str = "Kemal Office Studio";
 /// ditolak — gagal tertutup, bukan terbuka. `rename-project.ts` mengembalikannya
 /// ke nol, karena aplikasi baru wajib punya pasangan kunci sendiri.
 const PRODUCT_PUBLIC_KEY_HEX: &str =
-    "0000000000000000000000000000000000000000000000000000000000000000";
+    "01cbcd5d55e74a3e6d33c99c616a881a5e0da79af9e021deb29c4bdb1c00e989";
 
 /// Tanggal build (WIB), ditulis `build.rs`. Dibandingkan dengan
 /// `pembaruan_sampai`: versi yang dibangun setelah masa pembaruan habis tidak

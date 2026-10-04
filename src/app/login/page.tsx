@@ -204,7 +204,7 @@ export default function LoginPage() {
       <div className="app-panel w-full max-w-md space-y-5 p-5 shadow-[0_8px_32px_rgb(11_28_48/0.08)] sm:p-6">
         <div className="flex items-start justify-between gap-3">
           <div>
-            <h1 className="text-headline-xl text-on-surface">App Template</h1>
+            <h1 className="text-headline-xl text-on-surface">Company OS</h1>
             <p className="mt-1 text-body-md text-on-surface-variant">
               Sign in to continue.
             </p>

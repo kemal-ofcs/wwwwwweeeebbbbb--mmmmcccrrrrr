@@ -29,6 +29,7 @@ import {
 } from "@/lib/gateways/clients";
 import { SYNC_COMPLETED_EVENT } from "@/lib/gateways/sync-status";
 import { isDesktopRuntime } from "@/lib/runtime/app-runtime";
+import { onOpenDetail, requestedDetail } from "@/lib/utils/open-detail";
 import {
   CLIENT_NAME_MAX,
   CLIENT_NOTES_MAX,
@@ -107,11 +108,24 @@ export function ClientWorkspace() {
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [search, setSearch] = useState("");
-  const [tab, setTab] = useState<Tab>("pipeline");
+  const [tab, setTab] = useState<Tab>(() =>
+    requestedDetail().tab === "cold" ? "cold" : "pipeline",
+  );
   const [categoryFilter, setCategoryFilter] = useState("");
   /** `""` = semua PIC, `"mine"` = milik saya, selain itu id operator. */
   const [picFilter, setPicFilter] = useState("");
-  const [detailId, setDetailId] = useState<string | null>(null);
+  const [detailId, setDetailId] = useState<string | null>(
+    () => requestedDetail().id ?? null,
+  );
+  // Tautan lonceng saat halaman ini sudah terbuka (PRD FR-08).
+  useEffect(
+    () =>
+      onOpenDetail(({ id, tab: next }) => {
+        if (next === "cold" || next === "pipeline") setTab(next);
+        setDetailId(id ?? null);
+      }),
+    [],
+  );
   /** `null` = form tertutup, `""` = klien baru, selain itu id klien yang disunting. */
   const [editingId, setEditingId] = useState<string | null>(null);
   const [draft, setDraft] = useState<ClientDraft>(EMPTY_DRAFT);
@@ -284,15 +298,27 @@ export function ClientWorkspace() {
         description="Every lead starts here. A client stays a lead until the first sample ticket is created."
         actions={
           canManage ? (
-            <button
-              type="button"
-              onClick={openNew}
-              disabled={needsDeviceTag}
-              className="app-btn app-btn-primary w-full sm:w-auto"
-            >
-              <Icon name="plus" className="size-4" />
-              New lead
-            </button>
+            <div className="flex flex-col gap-2 sm:flex-row">
+              {canReassign ? (
+                // Impor menetapkan PIC orang lain (PRD FR-09, keputusan H).
+                <Link
+                  href="/clients/import"
+                  className="app-btn app-btn-secondary w-full sm:w-auto"
+                >
+                  <Icon name="upload" className="size-4" />
+                  Import CSV
+                </Link>
+              ) : null}
+              <button
+                type="button"
+                onClick={openNew}
+                disabled={needsDeviceTag}
+                className="app-btn app-btn-primary w-full sm:w-auto"
+              >
+                <Icon name="plus" className="size-4" />
+                New lead
+              </button>
+            </div>
           ) : null
         }
       />

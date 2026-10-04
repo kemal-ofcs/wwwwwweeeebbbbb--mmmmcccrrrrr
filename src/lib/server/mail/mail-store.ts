@@ -152,7 +152,7 @@ export async function sendMail(
     };
   }
 
-  const senderName = config.senderName || "App Template";
+  const senderName = config.senderName || "Company Name";
   try {
     const response =
       config.provider === "resend"
@@ -190,17 +190,17 @@ export async function sendMail(
       const body = await response.text().catch(() => "");
       return {
         delivered: false,
-        message: `Penyedia email menolak pengiriman (HTTP ${response.status}).`,
+        message: `The email provider rejected the message (HTTP ${response.status}).`,
         detail: `HTTP ${response.status} dari ${config.provider}: ${body
           .replace(/\s+/g, " ")
           .slice(0, 400)}`,
       };
     }
-    return { delivered: true, message: "Email terkirim.", detail: "" };
+    return { delivered: true, message: "Email sent.", detail: "" };
   } catch (error) {
     return {
       delivered: false,
-      detail: `Permintaan ke ${config.provider} gagal: ${
+      detail: `Request to ${config.provider} failed: ${
         error instanceof Error ? error.message : "unknown cause"
       }`,
       message:
@@ -236,9 +236,9 @@ export async function sendTestMail(client: Client, operatorId: number) {
   const result = await sendMail(
     client,
     to,
-    "Uji Kirim Email Sistem App Template",
-    `Hello ${name},\n\nThis email was sent from Settings > System email to test the sender settings.\nIf it arrived, Forgot password is ready to use.\n\nApp Template`,
-    `<p>Hello <strong>${name}</strong>,</p><p>This email was sent from Settings &gt; System email to test the sender settings. If it arrived, Forgot password is ready to use.</p><p>App Template</p>`,
+    "Company OS system email test",
+    `Hello ${name},\n\nThis email was sent from Settings > System email to test the sender settings.\nIf it arrived, Forgot password is ready to use.\n\nCompany OS`,
+    `<p>Hello <strong>${name}</strong>,</p><p>This email was sent from Settings &gt; System email to test the sender settings. If it arrived, Forgot password is ready to use.</p><p>Company OS</p>`,
   );
   return { ...result, to };
 }

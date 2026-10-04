@@ -5,6 +5,7 @@ import { type AuditActor, writeAudit } from "@/lib/server/audit";
 import { loadBusinessSettings } from "@/lib/server/business-settings";
 import { ApiRequestError } from "@/lib/server/http/api-response";
 import { listSampleMedia } from "@/lib/server/media";
+import { NOTIFY_SAMPLE_STATUS_SQL } from "@/lib/validations/notification";
 import {
   applySampleAction,
   CLIENT_LIFECYCLE_FROM_SAMPLES_SQL,
@@ -381,10 +382,11 @@ export async function recordSampleStep(
     if (changed.rowsAffected === 0) {
       throw new ApiRequestError(SAMPLE_CHANGED_ELSEWHERE, 409);
     }
+    const logId = crypto.randomUUID();
     await transaction.execute({
       sql: SAMPLE_STATUS_LOG_INSERT_SQL,
       args: [
-        crypto.randomUUID(),
+        logId,
         id,
         baseStatus,
         result.status,
@@ -394,6 +396,11 @@ export async function recordSampleStep(
         actor.id,
         now,
       ],
+    });
+    // Antrean RnD/Finance (PRD FR-08); status lain tidak menulis apa pun.
+    await transaction.execute({
+      sql: NOTIFY_SAMPLE_STATUS_SQL,
+      args: [logId, id],
     });
     if (result.client_decision) {
       await transaction.execute({

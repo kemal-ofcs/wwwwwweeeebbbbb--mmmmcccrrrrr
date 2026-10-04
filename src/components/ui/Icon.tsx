@@ -5,6 +5,7 @@ export type IconName =
   | "alert"
   | "arrow-left"
   | "arrow-right"
+  | "bell"
   | "calendar"
   | "check"
   | "chevron-right"
@@ -19,6 +20,7 @@ export type IconName =
   | "home"
   | "logout"
   | "lock"
+  | "menu"
   | "palette"
   | "phone"
   | "plus"
@@ -49,6 +51,12 @@ const paths: Record<IconName, ReactNode> = {
   ),
   "arrow-left": <path d="m12 19-7-7 7-7M19 12H5" />,
   "arrow-right": <path d="M5 12h14M12 5l7 7-7 7" />,
+  bell: (
+    <>
+      <path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9" />
+      <path d="M10.3 21a1.94 1.94 0 0 0 3.4 0" />
+    </>
+  ),
   calendar: (
     <>
       <rect width="18" height="18" x="3" y="4" rx="2" />
@@ -137,6 +145,7 @@ const paths: Record<IconName, ReactNode> = {
       <path d="M8 10V7a4 4 0 0 1 8 0v3" />
     </>
   ),
+  menu: <path d="M4 6h16M4 12h16M4 18h16" />,
   palette: (
     <>
       <circle cx="13.5" cy="6.5" r="1" />

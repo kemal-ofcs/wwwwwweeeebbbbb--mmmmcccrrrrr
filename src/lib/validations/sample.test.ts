@@ -6,6 +6,7 @@ import {
   SAMPLE_ACTIONS,
   SAMPLE_STATUSES,
   type SampleAction,
+  TELEGRAM_CHAT_ID_INVALID,
   validateBusinessSettings,
   validateSampleDraft,
 } from "./sample";
@@ -14,14 +15,19 @@ import {
 // masukan dan keluaran yang persis sama. Ubah keduanya bersamaan.
 
 describe("readBusinessSettings", () => {
+  const defaults = {
+    default_free_revision_limit: 1,
+    sample_fee_mode: "PER_REQUEST" as const,
+    lead_hot_max_days: 3,
+    lead_warm_max_days: 7,
+    max_photos_per_sample: 10,
+    telegram_chat_id_cs: "",
+    telegram_chat_id_rnd: "",
+    telegram_chat_id_finance: "",
+    offline_login_max_days: 7,
+  };
   test("kosong = bawaan", () => {
-    expect(readBusinessSettings({})).toEqual({
-      default_free_revision_limit: 1,
-      sample_fee_mode: "PER_REQUEST",
-      lead_hot_max_days: 3,
-      lead_warm_max_days: 7,
-      max_photos_per_sample: 10,
-    });
+    expect(readBusinessSettings({})).toEqual(defaults);
   });
   test("nilai sah dipakai, nilai rusak jatuh ke bawaan satu per satu", () => {
     expect(
@@ -31,6 +37,10 @@ describe("readBusinessSettings", () => {
         lead_hot_max_days: "5",
         lead_warm_max_days: "14",
         max_photos_per_sample: "5",
+        telegram_chat_id_cs: " -1001234567890 ",
+        telegram_chat_id_rnd: "@maklon_rnd",
+        telegram_chat_id_finance: "finance group",
+        offline_login_max_days: "3",
       }),
     ).toEqual({
       default_free_revision_limit: 2,
@@ -38,6 +48,10 @@ describe("readBusinessSettings", () => {
       lead_hot_max_days: 5,
       lead_warm_max_days: 14,
       max_photos_per_sample: 5,
+      telegram_chat_id_cs: "-1001234567890",
+      telegram_chat_id_rnd: "@maklon_rnd",
+      telegram_chat_id_finance: "",
+      offline_login_max_days: 3,
     });
     expect(
       readBusinessSettings({
@@ -46,14 +60,9 @@ describe("readBusinessSettings", () => {
         lead_hot_max_days: "9",
         lead_warm_max_days: "9",
         max_photos_per_sample: "0",
+        offline_login_max_days: "9",
       }),
-    ).toEqual({
-      default_free_revision_limit: 1,
-      sample_fee_mode: "PER_REQUEST",
-      lead_hot_max_days: 3,
-      lead_warm_max_days: 7,
-      max_photos_per_sample: 10,
-    });
+    ).toEqual(defaults);
   });
 });
 
@@ -64,6 +73,10 @@ describe("validateBusinessSettings", () => {
     lead_hot_max_days: 0,
     lead_warm_max_days: 1,
     max_photos_per_sample: 1,
+    telegram_chat_id_cs: "",
+    telegram_chat_id_rnd: "12345",
+    telegram_chat_id_finance: "@finance_team",
+    offline_login_max_days: 1,
   };
   test("sah", () => {
     expect(validateBusinessSettings(valid)).toEqual({
@@ -103,6 +116,16 @@ describe("validateBusinessSettings", () => {
       { ...valid, max_photos_per_sample: 0 },
       "Photos per sample request must be a whole number from 1 to 50.",
     ],
+    [{ ...valid, telegram_chat_id_cs: "@abc" }, TELEGRAM_CHAT_ID_INVALID],
+    [{ ...valid, telegram_chat_id_rnd: "12-34" }, TELEGRAM_CHAT_ID_INVALID],
+    [{ ...valid, telegram_chat_id_finance: null }, TELEGRAM_CHAT_ID_INVALID],
+    ...[0, 8, "3"].map(
+      (days) =>
+        [
+          { ...valid, offline_login_max_days: days },
+          "The offline sign-in period must be a whole number of days from 1 to 7.",
+        ] as [Record<string, unknown>, string],
+    ),
   ];
   for (const [draft, message] of cases) {
     test(message, () => {

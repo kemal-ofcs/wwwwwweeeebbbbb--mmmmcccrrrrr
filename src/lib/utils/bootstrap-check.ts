@@ -100,7 +100,7 @@ export function summarizeDatabaseCheck(
       tone: "warning",
       title: "The database is empty",
       detail:
-        "There are no tables at all. The App Template schema is created automatically when the first Superadmin is set up. Make sure this URL really is your new database.",
+        "There are no tables at all. The Company OS schema is created automatically when the first Superadmin is set up. Make sure this URL really is your new database.",
       canCreateSuperadmin: true,
       canUseExisting: false,
       requiresConfirmation: false,
@@ -111,7 +111,7 @@ export function summarizeDatabaseCheck(
   if (!check.schemaReady) {
     return {
       tone: "danger",
-      title: "Connected, but this is not an App Template schema",
+      title: "Connected, but this is not an Company OS schema",
       detail: `Missing core tables: ${check.missingTables.join(", ")}. The database URL is most likely wrong. Check it again before continuing so the database of another app is not changed.`,
       canCreateSuperadmin: true,
       canUseExisting: false,
@@ -125,7 +125,7 @@ export function summarizeDatabaseCheck(
       tone: "danger",
       title: "The bootstrap claim was already used",
       detail:
-        "An App Template schema was found, but the Superadmin claim on this database was already used and there is no active Superadmin. Reactivate the old Superadmin account, or use another database.",
+        "An Company OS schema was found, but the Superadmin claim on this database was already used and there is no active Superadmin. Reactivate the old Superadmin account, or use another database.",
       canCreateSuperadmin: true,
       canUseExisting: false,
       requiresConfirmation: true,
@@ -135,7 +135,7 @@ export function summarizeDatabaseCheck(
 
   return {
     tone: "success",
-    title: "This App Template database is ready to provision",
+    title: "This Company OS database is ready to provision",
     detail:
       "The schema is complete and has no active Superadmin yet. Continue creating the first Superadmin account.",
     canCreateSuperadmin: true,

@@ -78,6 +78,25 @@ fn parse_offline_hours() -> Result<u64, String> {
     parse_offline_hours_value(BUILD_OFFLINE_MAX_AGE_HOURS, cfg!(debug_assertions))
 }
 
+/// Alamat server saat aplikasi start, sebelum database dikonfigurasi.
+///
+/// Instalasi baru belum punya alamat (`DEFAULT_SERVER_ORIGIN` sengaja kosong):
+/// biarkan kosong sampai provisioning memanggil `set_database_config`.
+/// Mengurai string kosong membuat build rilis tertutup sendiri saat dibuka;
+/// build debug tidak pernah menunjukkannya karena membawa URL dari `.env`.
+fn origin_from_saved_url(saved: Option<&str>) -> Result<String, String> {
+    let url = saved
+        .map(str::trim)
+        .filter(|url| !url.is_empty())
+        .unwrap_or(DEFAULT_FALLBACK_URL);
+    if url.trim().is_empty() {
+        return Ok(String::new());
+    }
+    parse_server_url(url)
+        .map(|url| url.origin().ascii_serialization())
+        .map_err(|error| error.message)
+}
+
 fn parse_server_url(raw_url: &str) -> Result<Url, CommandError> {
     let mut parsed = Url::parse(raw_url.trim())
         .map_err(|_| CommandError::new("SERVER_URL_INVALID", "Invalid server URL format."))?;
@@ -215,11 +234,8 @@ impl DesktopState {
                 .map_err(|error| error.message)?
         } else {
             let saved_url = storage::get_system_setting(&data_dir, "server_api_base_url")
-                .map_err(|error| error.message)?
-                .unwrap_or_else(|| DEFAULT_FALLBACK_URL.into());
-            parse_server_url(&saved_url)
-                .map(|url| url.origin().ascii_serialization())
-                .map_err(|error| error.message)?
+                .map_err(|error| error.message)?;
+            origin_from_saved_url(saved_url.as_deref())?
         };
 
         Ok(Self {
@@ -411,6 +427,26 @@ mod tests {
         parse_bool_setting, parse_offline_hours_value, parse_provider_setting, parse_server_url,
         DatabaseProvider,
     };
+
+    #[test]
+    fn instalasi_baru_tanpa_alamat_server_tetap_bisa_start() {
+        assert_eq!(super::origin_from_saved_url(None), Ok(String::new()));
+        assert_eq!(super::origin_from_saved_url(Some("  ")), Ok(String::new()));
+        assert_eq!(
+            super::origin_from_saved_url(Some("https://db.example.com/")),
+            Ok("https://db.example.com".to_owned())
+        );
+        assert!(super::origin_from_saved_url(Some("bukan alamat")).is_err());
+    }
+
+    /// Masa login offline ditanam `build.rs`. Tanpanya build rilis
+    /// menolak start, dan aplikasi tertutup sendiri saat dibuka (Android
+    /// maupun Windows) tanpa pesan apa pun di layar.
+    #[test]
+    fn masa_login_offline_ditanam_saat_build() {
+        assert_eq!(super::BUILD_OFFLINE_MAX_AGE_HOURS, Some("168"));
+        assert_eq!(super::parse_offline_hours_value(super::BUILD_OFFLINE_MAX_AGE_HOURS, false), Ok(168));
+    }
 
     #[test]
     fn turso_endpoint_normalization() {

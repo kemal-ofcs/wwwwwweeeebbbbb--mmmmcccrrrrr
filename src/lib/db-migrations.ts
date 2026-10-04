@@ -261,4 +261,14 @@ export async function runDatabaseMigrations(client: Client) {
           VALUES (8, 'media-assets', ?);`,
     args: [new Date().toISOString()],
   });
+
+  // Versi 9: notifikasi divisi (`notification_outbox`, `telegram_config`,
+  // `notification_seen`, izin `notifications.*`, PRD FR-08). Tabelnya baru,
+  // jadi cukup DDL awal `db-schema.ts`. Nomor dan nama WAJIB sama dengan
+  // `turso.rs`.
+  await client.execute({
+    sql: `INSERT OR IGNORE INTO schema_migration (version, name, applied_at)
+          VALUES (9, 'telegram-notifications', ?);`,
+    args: [new Date().toISOString()],
+  });
 }
