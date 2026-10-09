@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import {
   type FormEvent,
   useCallback,
@@ -411,6 +412,10 @@ export function FinanceWorkspace() {
               >
                 Record payment
               </button>
+              {/* Data Uang Masuk lama (v2.7, PRD F-22). */}
+              <Link href="/import" className="app-btn app-btn-secondary">
+                Import CSV
+              </Link>
             </div>
           ) : null
         }

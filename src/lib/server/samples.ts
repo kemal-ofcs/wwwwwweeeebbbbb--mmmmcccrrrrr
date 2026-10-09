@@ -4,7 +4,11 @@ import type { Client, Row, Transaction } from "@libsql/client";
 import { type AuditActor, writeAudit } from "@/lib/server/audit";
 import { loadBusinessSettings } from "@/lib/server/business-settings";
 import { ApiRequestError } from "@/lib/server/http/api-response";
-import { listSampleMedia } from "@/lib/server/media";
+import {
+  clientEvidence,
+  insertClientEvidence,
+  listSampleMedia,
+} from "@/lib/server/media";
 import {
   applyDesignAction,
   DESIGN_ACTIVE_SQL,
@@ -21,6 +25,7 @@ import {
   TRACKING_NO_INVALID,
 } from "@/lib/validations/design";
 import { INVOICE_LIST_SQL } from "@/lib/validations/finance";
+import { LEGAL_LIST_SQL } from "@/lib/validations/legal";
 import { MOU_LIST_SQL } from "@/lib/validations/mou";
 import {
   NOTIFY_DESIGN_SQL,
@@ -67,6 +72,17 @@ import {
  */
 
 type Executor = Client | Transaction;
+
+/**
+ * Pencatat langkah: staf (transaksi sendiri, jawaban klien wajib membawa
+ * tangkapan layar) atau halaman tautan persetujuan (`viaLink`, memakai
+ * transaksi pemanggil supaya token dipakai di transaksi yang sama).
+ */
+export interface StepOptions {
+  transaction?: Transaction;
+  viaLink?: boolean;
+}
+
 type Draft = Record<string, unknown>;
 
 function invalid(message: string): never {
@@ -178,6 +194,14 @@ export async function getSampleRequest(
         })
       ).rows.map(plain)[0] ?? null,
     dp_percentage_bp: settings.dp_percentage_bp,
+    approval_link_enabled: settings.approval_web_url !== "",
+    // Dokumen legal semua MoU tiket ini (v2.6).
+    legal_documents: (
+      await client.execute({
+        sql: `${LEGAL_LIST_SQL} WHERE l.sample_request_id = ? ORDER BY l.created_at, l.rowid;`,
+        args: [key],
+      })
+    ).rows.map(plain),
   };
 }
 
@@ -427,10 +451,16 @@ export async function recordSampleStep(
   client: Client,
   input: Draft,
   actor: AuditActor,
+  options: StepOptions = {},
 ) {
   const id = typeof input.id === "string" ? input.id.trim() : "";
   const action = input.action;
   if (!isSampleAction(action)) invalid(SAMPLE_STEP_NOT_ALLOWED);
+  const evidence = clientEvidence(
+    action,
+    input.evidence_base64,
+    options.viaLink === true,
+  );
   const notes = normalizeSampleNotes(input.notes);
   if (!notes) invalid("Notes are required, up to 1000 characters.");
   const checkedRnd = validateRndStep(action, input.rnd);
@@ -458,7 +488,9 @@ export async function recordSampleStep(
       ? input.revision_fee_idr
       : null;
 
-  const transaction = await client.transaction("write");
+  const own = !options.transaction;
+  const transaction =
+    options.transaction ?? (await client.transaction("write"));
   try {
     const current = await findSample(transaction, id);
     const baseStatus = String(current.status);
@@ -502,6 +534,8 @@ export async function recordSampleStep(
     if (changed.rowsAffected === 0) {
       throw new ApiRequestError(SAMPLE_CHANGED_ELSEWHERE, 409);
     }
+    if (evidence)
+      await insertClientEvidence(transaction, id, evidence, actor.id, now);
     if (rnd.formula_code !== null) {
       // Iterasi ke-n = revisi ke-(n-1), sama dengan `sample_feedbacks`.
       await transaction.execute({
@@ -576,10 +610,10 @@ export async function recordSampleStep(
       },
       division,
     );
-    await transaction.commit();
+    if (own) await transaction.commit();
     return { status: result.status, revision_index: result.revision_index };
   } finally {
-    transaction.close();
+    if (own) transaction.close();
   }
 }
 
@@ -653,6 +687,7 @@ export async function recordDesignStep(
   input: Draft,
   actor: AuditActor,
   canOverride: boolean,
+  options: StepOptions = {},
 ) {
   const id = typeof input.id === "string" ? input.id.trim() : "";
   const action = typeof input.action === "string" ? input.action : "";
@@ -660,8 +695,15 @@ export async function recordDesignStep(
   if (!notes) invalid("Notes are required, up to 1000 characters.");
   const tracking = normalizeTrackingNo(input.tracking_no);
   if (tracking === null) invalid(TRACKING_NO_INVALID);
+  const evidence = clientEvidence(
+    action,
+    input.evidence_base64,
+    options.viaLink === true,
+  );
 
-  const transaction = await client.transaction("write");
+  const own = !options.transaction;
+  const transaction =
+    options.transaction ?? (await client.transaction("write"));
   try {
     const found = await transaction.execute({
       sql: `${DESIGN_LIST_SQL} WHERE d.id = ?;`,
@@ -711,6 +753,15 @@ export async function recordDesignStep(
     if (changed.rowsAffected === 0) {
       throw new ApiRequestError(DESIGN_CHANGED_ELSEWHERE, 409);
     }
+    if (evidence) {
+      await insertClientEvidence(
+        transaction,
+        sampleId,
+        evidence,
+        actor.id,
+        now,
+      );
+    }
     const logId = crypto.randomUUID();
     await transaction.execute({
       sql: SAMPLE_STATUS_LOG_INSERT_SQL,
@@ -738,10 +789,10 @@ export async function recordDesignStep(
       override_limit: override,
       notes,
     });
-    await transaction.commit();
+    if (own) await transaction.commit();
     return result;
   } finally {
-    transaction.close();
+    if (own) transaction.close();
   }
 }
 

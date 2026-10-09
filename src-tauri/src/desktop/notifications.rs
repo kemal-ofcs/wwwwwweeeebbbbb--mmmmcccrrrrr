@@ -249,6 +249,26 @@ pub fn render_notification(
             format!("Since {when}"),
         ]
         .join("\n"),
+        "CLIENT_RESPONDED" => {
+            let kind = match field(payload, "entity_type").as_str() {
+                "SAMPLE" => "Sample".to_owned(),
+                "DUMMY" => "Packaging dummy".to_owned(),
+                "MOU" => "MoU".to_owned(),
+                other => other.to_owned(),
+            };
+            let decision = match field(payload, "decision").as_str() {
+                "APPROVE" => "approved".to_owned(),
+                "REVISE" => "needs changes".to_owned(),
+                "REJECT" => "rejected".to_owned(),
+                other => other.to_owned(),
+            };
+            [
+                format!("The client answered through the approval link: {sample}"),
+                format!("{kind} {decision} by {}", or_dash(field(payload, "responder"))),
+                format!("Answered {when}"),
+            ]
+            .join("\n")
+        }
         "MOU_ACCEPTED" => [
             format!("MoU accepted, issue the down payment invoice: {sample}"),
             format!(
@@ -300,6 +320,11 @@ pub const NOTIFY_SAMPLE_STATUS_SQL: &str = "INSERT INTO notification_outbox (id,
 /// Harga Finance tersimpan (v2.2): grup CS boleh mengirim sampel.
 /// Brief desain baru dan dummy direvisi klien (v2.4). ?1 = id log, ?2 = id tiket desain.
 pub const NOTIFY_DESIGN_SQL: &str = "INSERT INTO notification_outbox (id, event_type, target_division, payload_json, occurred_at, status, attempts, next_attempt_at, created_at) SELECT 'design:' || ?1, CASE d.status WHEN 'MOCKUP' THEN 'DESIGN_REQUESTED' ELSE 'DUMMY_REVISED' END, 'DESIGN', json_object('sample_id', s.id, 'client_code', COALESCE(c.client_code, ''), 'client_name', COALESCE(c.name, ''), 'brand_name', s.brand_name, 'brief', d.brief, 'revision_notes', d.revision_notes, 'rejection_count', d.dummy_rejection_count), d.status_changed_at, CASE WHEN EXISTS (SELECT 1 FROM telegram_config t WHERE t.id = 'default' AND t.is_active = 1 AND TRIM(COALESCE(t.bot_token, '')) <> '') AND TRIM(COALESCE((SELECT g.value FROM setting_gex_system g WHERE g.key = 'telegram_chat_id_design'), '')) <> '' THEN 'PENDING' ELSE 'SKIPPED' END, 0, datetime('now'), datetime('now') FROM design_tickets d JOIN sample_requests s ON s.id = d.sample_request_id LEFT JOIN clients c ON c.id = s.client_id WHERE d.id = ?2 AND d.status IN ('MOCKUP', 'DUMMY_REVISION') LIMIT 1 ON CONFLICT(id) DO NOTHING;";
+
+/// Klien menjawab lewat tautan persetujuan, ke grup CS (v2.5b). Hanya Web yang
+/// menulisnya; ada di sini supaya paritas teksnya tetap dites dari sisi TS.
+#[allow(dead_code)]
+pub const NOTIFY_CLIENT_RESPONSE_SQL: &str = "INSERT INTO notification_outbox (id, event_type, target_division, payload_json, occurred_at, status, attempts, next_attempt_at, created_at) SELECT 'approval:' || a.id, 'CLIENT_RESPONDED', 'CS', json_object('sample_id', s.id, 'client_code', COALESCE(c.client_code, ''), 'client_name', COALESCE(c.name, ''), 'brand_name', s.brand_name, 'entity_type', a.entity_type, 'decision', json_extract(a.response_json, '$.decision'), 'responder', json_extract(a.response_json, '$.responder_name')), a.used_at, CASE WHEN EXISTS (SELECT 1 FROM telegram_config t WHERE t.id = 'default' AND t.is_active = 1 AND TRIM(COALESCE(t.bot_token, '')) <> '') AND TRIM(COALESCE((SELECT g.value FROM setting_gex_system g WHERE g.key = 'telegram_chat_id_cs'), '')) <> '' THEN 'PENDING' ELSE 'SKIPPED' END, 0, datetime('now'), datetime('now') FROM approval_tokens a JOIN sample_requests s ON s.id = a.sample_request_id LEFT JOIN clients c ON c.id = s.client_id WHERE a.id = ?1 AND a.used_at IS NOT NULL LIMIT 1 ON CONFLICT(id) DO NOTHING;";
 
 /// MoU disetujui klien, ke grup Finance (v2.5a). ?1 = id log, ?2 = id MoU.
 pub const NOTIFY_MOU_SQL: &str = "INSERT INTO notification_outbox (id, event_type, target_division, payload_json, occurred_at, status, attempts, next_attempt_at, created_at) SELECT 'mou:' || ?1, 'MOU_ACCEPTED', 'FINANCE', json_object('sample_id', s.id, 'client_code', COALESCE(c.client_code, ''), 'client_name', COALESCE(c.name, ''), 'brand_name', s.brand_name, 'mou_number', m.mou_number, 'dp_amount_idr', m.dp_amount_required_idr), m.status_changed_at, CASE WHEN EXISTS (SELECT 1 FROM telegram_config t WHERE t.id = 'default' AND t.is_active = 1 AND TRIM(COALESCE(t.bot_token, '')) <> '') AND TRIM(COALESCE((SELECT g.value FROM setting_gex_system g WHERE g.key = 'telegram_chat_id_finance'), '')) <> '' THEN 'PENDING' ELSE 'SKIPPED' END, 0, datetime('now'), datetime('now') FROM production_mou m JOIN sample_requests s ON s.id = m.sample_request_id LEFT JOIN clients c ON c.id = m.client_id WHERE m.id = ?2 AND m.status = 'ACCEPTED' LIMIT 1 ON CONFLICT(id) DO NOTHING;";
@@ -870,6 +895,11 @@ mod tests {
         assert_eq!(
             render_notification("DUMMY_REVISED", &design, "2026-10-03 07:05:00", "Asia/Jakarta"),
             "The client wants dummy revision 1: Aura Glow for Aura Beauty (KLN-20261003-WB01)\nNotes: Logo bigger\nSince 2026-10-03 14:05 WIB"
+        );
+        let answered = json!({ "client_name": "Aura Beauty", "client_code": "KLN-20261003-WB01", "brand_name": "Aura Glow", "entity_type": "DUMMY", "decision": "REVISE", "responder": "Rina" });
+        assert_eq!(
+            render_notification("CLIENT_RESPONDED", &answered, "2026-10-03 07:05:00", "Asia/Jakarta"),
+            "The client answered through the approval link: Aura Glow for Aura Beauty (KLN-20261003-WB01)\nPackaging dummy needs changes by Rina\nAnswered 2026-10-03 14:05 WIB"
         );
         let mou = json!({ "client_name": "Aura Beauty", "client_code": "KLN-20261003-WB01", "brand_name": "Aura Glow", "mou_number": "MOU-20261009-WB01", "dp_amount_idr": 162500000 });
         assert_eq!(

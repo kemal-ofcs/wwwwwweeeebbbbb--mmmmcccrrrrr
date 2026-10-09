@@ -32,6 +32,8 @@ export const BUSINESS_SETTING_KEYS = {
   defaultDummyFeeIdr: "default_dummy_fee_idr",
   maxDummyRejections: "max_dummy_rejections",
   dpPercentageBp: "dp_percentage_bp",
+  approvalWebUrl: "approval_web_url",
+  approvalTokenTtlDays: "approval_token_ttl_days",
 } as const;
 
 export interface BusinessSettings {
@@ -74,6 +76,13 @@ export interface BusinessSettings {
   max_dummy_rejections: number;
   /** Persen DP bawaan MoU dalam basis poin (v2.5a, F-20); disalin ke MoU. */
   dp_percentage_bp: number;
+  /**
+   * Alamat Web untuk tautan persetujuan klien (v2.5b, F-18, keputusan K);
+   * kosong = hanya jalur manual WhatsApp.
+   */
+  approval_web_url: string;
+  /** Masa berlaku tautan persetujuan dalam hari (keputusan L). */
+  approval_token_ttl_days: number;
 }
 
 export const DEFAULT_BUSINESS_SETTINGS: BusinessSettings = {
@@ -94,6 +103,8 @@ export const DEFAULT_BUSINESS_SETTINGS: BusinessSettings = {
   default_dummy_fee_idr: 0,
   max_dummy_rejections: 0,
   dp_percentage_bp: 5000,
+  approval_web_url: "",
+  approval_token_ttl_days: 3,
 };
 
 export const FREE_REVISION_LIMIT_MAX = 20;
@@ -106,7 +117,44 @@ export const DEFAULT_FEE_MAX = 100_000_000_000;
 export const INVOICE_DUE_DAYS_LIMIT = 90;
 export const PAYMENT_INSTRUCTIONS_MAX = 1000;
 export const MAX_DUMMY_REJECTIONS_LIMIT = 20;
-export const DP_PERCENTAGE_INVALID = "The down payment must be from 0.01% to 100%.";
+export const APPROVAL_TTL_DAYS_LIMIT = 30;
+export const APPROVAL_WEB_URL_MAX = 200;
+export const APPROVAL_WEB_URL_INVALID =
+  "Enter the approval web address as https://..., or leave it empty.";
+export const APPROVAL_TTL_INVALID =
+  "Approval links must last a whole number of days from 1 to 30.";
+
+/**
+ * Alamat Web tautan persetujuan: kosong, atau `https://host[:port][/path]`
+ * tanpa garis miring penutup. `null` = tidak sah. Diperiksa per karakter
+ * (bukan regex) supaya identik dengan `normalize_approval_web_url`.
+ */
+export function normalizeApprovalWebUrl(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  let text = value.trim();
+  while (text.endsWith("/")) text = text.slice(0, -1);
+  if (text === "") return "";
+  if (text.length > APPROVAL_WEB_URL_MAX || !text.startsWith("https://")) {
+    return null;
+  }
+  const rest = text.slice("https://".length);
+  const slash = rest.indexOf("/");
+  const hostPort = slash === -1 ? rest : rest.slice(0, slash);
+  const path = slash === -1 ? "" : rest.slice(slash);
+  const [host = "", port, extra] = hostPort.split(":");
+  const hostOk =
+    host !== "" && [...host].every((char) => /[A-Za-z0-9.-]/.test(char));
+  const portOk =
+    port === undefined ||
+    (port.length >= 1 &&
+      port.length <= 5 &&
+      [...port].every((char) => char >= "0" && char <= "9"));
+  const pathOk = [...path].every((char) => /[A-Za-z0-9._~/-]/.test(char));
+  return hostOk && portOk && extra === undefined && pathOk ? text : null;
+}
+
+export const DP_PERCENTAGE_INVALID =
+  "The down payment must be from 0.01% to 100%.";
 export const PAYMENT_INSTRUCTIONS_INVALID =
   "Payment instructions are up to 1000 characters.";
 
@@ -250,6 +298,15 @@ export function readBusinessSettings(
         1,
         10_000,
       ) ?? DEFAULT_BUSINESS_SETTINGS.dp_percentage_bp,
+    approval_web_url:
+      normalizeApprovalWebUrl(values[BUSINESS_SETTING_KEYS.approvalWebUrl]) ??
+      "",
+    approval_token_ttl_days:
+      inRange(
+        wholeNumber(values[BUSINESS_SETTING_KEYS.approvalTokenTtlDays]),
+        1,
+        APPROVAL_TTL_DAYS_LIMIT,
+      ) ?? DEFAULT_BUSINESS_SETTINGS.approval_token_ttl_days,
   };
 }
 
@@ -385,6 +442,15 @@ export function validateBusinessSettings(
   }
   const dpBp = inRange(strictInt(draft.dp_percentage_bp), 1, 10_000);
   if (dpBp === null) return { error: DP_PERCENTAGE_INVALID };
+  // Wajib dikirim, walau kosong: field yang hilang akan menimpa alamat tersimpan.
+  const approvalUrl = normalizeApprovalWebUrl(draft.approval_web_url);
+  if (approvalUrl === null) return { error: APPROVAL_WEB_URL_INVALID };
+  const ttl = inRange(
+    strictInt(draft.approval_token_ttl_days),
+    1,
+    APPROVAL_TTL_DAYS_LIMIT,
+  );
+  if (ttl === null) return { error: APPROVAL_TTL_INVALID };
   return {
     settings: {
       default_free_revision_limit: limit,
@@ -404,6 +470,8 @@ export function validateBusinessSettings(
       default_dummy_fee_idr: dummyFee,
       max_dummy_rejections: dummyLimit,
       dp_percentage_bp: dpBp,
+      approval_web_url: approvalUrl,
+      approval_token_ttl_days: ttl,
     },
   };
 }
@@ -1102,7 +1170,7 @@ export const SAMPLE_FEEDBACK_INSERT_SQL =
  * dan perangkat; WAJIB identik dengan `SAMPLE_LIST_SQL` di Rust.
  */
 export const SAMPLE_LIST_SQL =
-  "SELECT s.*, c.client_code, c.name AS client_name, c.free_revision_limit, o.nama_operator AS pic_crm_name, (SELECT p.final_unit_price_idr FROM pricing_formulas p WHERE p.sample_request_id = s.id AND p.iteration_number = s.revision_index + 1 ORDER BY p.recorded_at DESC, p.rowid DESC LIMIT 1) AS unit_price_idr, EXISTS (SELECT 1 FROM invoices i WHERE i.sample_request_id = s.id AND ((s.status = 'WAITING_SAMPLE_PAYMENT' AND i.ref_type = 'SAMPLE_FEE') OR (s.status = 'WAITING_REVISION_PAYMENT' AND i.ref_type = 'REVISION_FEE' AND i.revision_index = s.revision_index)) AND (i.status = 'RESCHEDULED' OR (i.status = 'OPEN' AND (SELECT COALESCE(SUM(a.amount_idr), 0) FROM fund_allocations a WHERE a.invoice_id = i.id) >= i.total_idr))) AS fee_paid, EXISTS (SELECT 1 FROM invoices i WHERE i.sample_request_id = s.id AND i.ref_type = 'TEST_FEE' AND (i.status = 'RESCHEDULED' OR (i.status = 'OPEN' AND (SELECT COALESCE(SUM(a.amount_idr), 0) FROM fund_allocations a WHERE a.invoice_id = i.id) >= i.total_idr))) AS test_paid, (SELECT d.status FROM design_tickets d WHERE d.sample_request_id = s.id AND d.status <> 'CANCELLED' ORDER BY d.created_at DESC, d.rowid DESC LIMIT 1) AS design_status, (SELECT d.dummy_rejection_count FROM design_tickets d WHERE d.sample_request_id = s.id AND d.status <> 'CANCELLED' ORDER BY d.created_at DESC, d.rowid DESC LIMIT 1) AS dummy_round, ((s.is_dummy_required = 0 AND NOT EXISTS (SELECT 1 FROM design_tickets d WHERE d.sample_request_id = s.id AND d.status <> 'CANCELLED')) OR EXISTS (SELECT 1 FROM media_asset m WHERE m.owner_type = 'sample' AND m.owner_id = s.id AND m.purpose = 'MOCKUP')) AS mockup_ready, (SELECT m.status FROM production_mou m WHERE m.sample_request_id = s.id AND m.status NOT IN ('CANCELLED', 'REJECTED') ORDER BY m.created_at DESC, m.rowid DESC LIMIT 1) AS mou_status, (SELECT m.dp_amount_required_idr FROM production_mou m WHERE m.sample_request_id = s.id AND m.status = 'ACCEPTED' ORDER BY m.created_at DESC, m.rowid DESC LIMIT 1) AS mou_dp_idr, EXISTS (SELECT 1 FROM invoices i WHERE i.sample_request_id = s.id AND i.ref_type = 'DP_PRODUCTION_LEGAL' AND (i.status = 'RESCHEDULED' OR (i.status = 'OPEN' AND (SELECT COALESCE(SUM(a.amount_idr), 0) FROM fund_allocations a WHERE a.invoice_id = i.id) >= i.total_idr))) AS dp_paid FROM sample_requests s LEFT JOIN clients c ON c.id = s.client_id LEFT JOIN master_operator o ON o.id = s.pic_crm_id";
+  "SELECT s.*, c.client_code, c.name AS client_name, c.free_revision_limit, o.nama_operator AS pic_crm_name, (SELECT p.final_unit_price_idr FROM pricing_formulas p WHERE p.sample_request_id = s.id AND p.iteration_number = s.revision_index + 1 ORDER BY p.recorded_at DESC, p.rowid DESC LIMIT 1) AS unit_price_idr, EXISTS (SELECT 1 FROM invoices i WHERE i.sample_request_id = s.id AND ((s.status = 'WAITING_SAMPLE_PAYMENT' AND i.ref_type = 'SAMPLE_FEE') OR (s.status = 'WAITING_REVISION_PAYMENT' AND i.ref_type = 'REVISION_FEE' AND i.revision_index = s.revision_index)) AND (i.status = 'RESCHEDULED' OR (i.status = 'OPEN' AND (SELECT COALESCE(SUM(a.amount_idr), 0) FROM fund_allocations a WHERE a.invoice_id = i.id) >= i.total_idr))) AS fee_paid, EXISTS (SELECT 1 FROM invoices i WHERE i.sample_request_id = s.id AND i.ref_type = 'TEST_FEE' AND (i.status = 'RESCHEDULED' OR (i.status = 'OPEN' AND (SELECT COALESCE(SUM(a.amount_idr), 0) FROM fund_allocations a WHERE a.invoice_id = i.id) >= i.total_idr))) AS test_paid, (SELECT d.status FROM design_tickets d WHERE d.sample_request_id = s.id AND d.status <> 'CANCELLED' ORDER BY d.created_at DESC, d.rowid DESC LIMIT 1) AS design_status, (SELECT d.dummy_rejection_count FROM design_tickets d WHERE d.sample_request_id = s.id AND d.status <> 'CANCELLED' ORDER BY d.created_at DESC, d.rowid DESC LIMIT 1) AS dummy_round, ((s.is_dummy_required = 0 AND NOT EXISTS (SELECT 1 FROM design_tickets d WHERE d.sample_request_id = s.id AND d.status <> 'CANCELLED')) OR EXISTS (SELECT 1 FROM media_asset m WHERE m.owner_type = 'sample' AND m.owner_id = s.id AND m.purpose = 'MOCKUP')) AS mockup_ready, (SELECT m.status FROM production_mou m WHERE m.sample_request_id = s.id AND m.status NOT IN ('CANCELLED', 'REJECTED') ORDER BY m.created_at DESC, m.rowid DESC LIMIT 1) AS mou_status, (SELECT m.dp_amount_required_idr FROM production_mou m WHERE m.sample_request_id = s.id AND m.status = 'ACCEPTED' ORDER BY m.created_at DESC, m.rowid DESC LIMIT 1) AS mou_dp_idr, EXISTS (SELECT 1 FROM invoices i WHERE i.sample_request_id = s.id AND i.ref_type = 'DP_PRODUCTION_LEGAL' AND (i.status = 'RESCHEDULED' OR (i.status = 'OPEN' AND (SELECT COALESCE(SUM(a.amount_idr), 0) FROM fund_allocations a WHERE a.invoice_id = i.id) >= i.total_idr))) AS dp_paid, (SELECT CASE m.regulatory_path WHEN 'WITH_BPOM' THEN 4 ELSE 1 END - (SELECT COUNT(DISTINCT l.kind) FROM legal_documents l WHERE l.mou_id = m.id AND l.status IN ('ISSUED', 'NOT_REQUIRED') AND (m.regulatory_path = 'WITH_BPOM' OR l.kind = 'HALAL')) FROM production_mou m WHERE m.sample_request_id = s.id AND m.status = 'ACCEPTED' ORDER BY m.created_at DESC, m.rowid DESC LIMIT 1) AS legal_open FROM sample_requests s LEFT JOIN clients c ON c.id = s.client_id LEFT JOIN master_operator o ON o.id = s.pic_crm_id";
 
 /** Satu harga per simpan (v2.2), hanya-tambah; terbaru per iterasi berlaku. */
 export const PRICE_INSERT_SQL =

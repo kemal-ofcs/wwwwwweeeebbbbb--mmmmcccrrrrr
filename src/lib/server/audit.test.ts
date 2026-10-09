@@ -192,6 +192,7 @@ describe("role divisi", () => {
       "invoices.view",
       "leads.manage",
       "leads.view",
+      "mou.manage",
       "notifications_cs.view",
       "samples.manage",
       "samples.view",

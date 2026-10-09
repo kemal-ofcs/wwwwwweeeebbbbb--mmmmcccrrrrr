@@ -14,6 +14,7 @@ import {
   updateMou,
 } from "@/lib/gateways/samples";
 import { requestSyncNow } from "@/lib/gateways/sync-status";
+import { isClientDecisionAction } from "@/lib/validations/approval";
 import {
   applyMouAction,
   MOU_ACTIONS,
@@ -25,6 +26,8 @@ import {
   type RegulatoryPath,
 } from "@/lib/validations/mou";
 import { formatRupiah, SAMPLE_NOTES_MAX } from "@/lib/validations/sample";
+import { ClientApproval } from "./ClientApproval";
+import { EvidencePicker } from "./EvidencePicker";
 import {
   MOU_ACTION_LABEL,
   MOU_STATUS_LABEL,
@@ -45,6 +48,8 @@ interface SampleMouProps {
   mou: MouRecord | null;
   /** Setelan persen DP bawaan untuk draf baru. */
   dpDefaultBp: number;
+  /** Alamat Web persetujuan disetel (v2.5b). */
+  linkEnabled: boolean;
   onChanged: () => void;
 }
 
@@ -65,6 +70,7 @@ export function SampleMou({
   sample,
   mou,
   dpDefaultBp,
+  linkEnabled,
   onChanged,
 }: SampleMouProps) {
   const { user } = useAuth();
@@ -74,6 +80,7 @@ export function SampleMou({
   const [form, setForm] = useState<FormState | null>(null);
   const [action, setAction] = useState<MouAction | null>(null);
   const [notes, setNotes] = useState("");
+  const [evidence, setEvidence] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
@@ -127,6 +134,7 @@ export function SampleMou({
       setForm(null);
       setAction(null);
       setNotes("");
+      setEvidence("");
       setNotice(done);
       onChanged();
       requestSyncNow();
@@ -152,7 +160,8 @@ export function SampleMou({
       notes: form.notes,
     };
     void run(
-      () => (active ? updateMou(active.id, terms) : createMou(sample.id, terms)),
+      () =>
+        active ? updateMou(active.id, terms) : createMou(sample.id, terms),
       active ? "MoU saved." : "MoU drafted.",
     );
   };
@@ -161,7 +170,13 @@ export function SampleMou({
     event.preventDefault();
     if (!active || !action) return;
     void run(
-      () => recordMouStep({ id: active.id, action, notes }),
+      () =>
+        recordMouStep({
+          id: active.id,
+          action,
+          notes,
+          evidence_base64: isClientDecisionAction(action) ? evidence : "",
+        }),
       "MoU updated.",
     );
   };
@@ -220,8 +235,8 @@ export function SampleMou({
           </p>
           <p className="text-body-sm text-on-surface-variant">
             Down payment {active.dp_bp / 100}% ={" "}
-            {formatRupiah(active.dp_amount_required_idr)} · Production lead
-            time {active.production_lead_time_days} days ·{" "}
+            {formatRupiah(active.dp_amount_required_idr)} · Production lead time{" "}
+            {active.production_lead_time_days} days ·{" "}
             {REGULATORY_PATH_LABEL[active.regulatory_path] ??
               active.regulatory_path}
           </p>
@@ -237,8 +252,7 @@ export function SampleMou({
           ) : null}
           {active.status === "DRAFT" && active.dummy_ready !== 1 ? (
             <p className="text-body-sm text-on-surface-variant">
-              The MoU can be sent after the client approves the packaging
-              dummy.
+              The MoU can be sent after the client approves the packaging dummy.
             </p>
           ) : null}
           {active.status === "ACCEPTED" ? (
@@ -258,6 +272,23 @@ export function SampleMou({
             ? `The last MoU (${mou.mou_number}) was ${MOU_STATUS_LABEL[mou.status]?.toLowerCase() ?? mou.status}.`
             : "No MoU yet."}
         </p>
+      ) : null}
+
+      {active?.status === "SENT" && !form && !action ? (
+        <ClientApproval
+          entityType="MOU"
+          entityId={active.id}
+          linkEnabled={linkEnabled}
+          canCreate={canMou}
+          title={`MoU ${active.mou_number} for ${active.brand_name}`}
+          lines={[
+            `For ${active.client_name ?? ""} (${active.client_code ?? ""})`,
+            `${active.total_units.toLocaleString("id-ID")} units x ${formatRupiah(active.unit_price_idr)} = ${formatRupiah(active.total_production_cost_idr)} before tax`,
+            `Down payment ${active.dp_bp / 100}%: ${formatRupiah(active.dp_amount_required_idr)}`,
+            `Production lead time: ${active.production_lead_time_days} days`,
+          ]}
+          decisions={["APPROVE", "REVISE", "REJECT"]}
+        />
       ) : null}
 
       {!form && !action ? (
@@ -410,8 +441,8 @@ export function SampleMou({
           {!canPrice ? (
             <p className="text-body-sm text-on-surface-variant sm:col-span-2">
               The unit price comes from the sample price and the down payment
-              from Business settings. Finance can change both while the MoU is
-              a draft.
+              from Business settings. Finance can change both while the MoU is a
+              draft.
             </p>
           ) : null}
           <div className="flex flex-wrap gap-2 sm:col-span-2">
@@ -439,8 +470,13 @@ export function SampleMou({
           <p className="text-body-md font-semibold text-on-surface">
             {MOU_ACTION_LABEL[action] ?? action}
           </p>
+          {isClientDecisionAction(action) ? (
+            <EvidencePicker value={evidence} onChange={setEvidence} />
+          ) : null}
           <label htmlFor="mou-notes" className="app-label">
-            {action === "MOU_REVISE" ? "What the client wants changed" : "Notes"}
+            {action === "MOU_REVISE"
+              ? "What the client wants changed"
+              : "Notes"}
           </label>
           <textarea
             id="mou-notes"

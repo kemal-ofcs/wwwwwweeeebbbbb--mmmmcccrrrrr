@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { ActiveSessions } from "@/components/audit/ActiveSessions";
 import {
   DESIGN_STATUS_LABEL,
+  MOU_STATUS_LABEL,
   SAMPLE_STATUS_LABEL,
 } from "@/components/samples/labels";
 import { FeedbackBanner } from "@/components/ui/FeedbackBanner";
@@ -92,6 +93,29 @@ function describe(entry: AuditEntry, operatorName: (id: number) => string) {
       return `Requested a design for sample "${String(s.brand_name ?? "")}" for ${code}: ${String(s.brief ?? "")}`;
     case "design.step":
       return `Moved the design of "${String(s.brand_name ?? "")}" for ${code} from ${DESIGN_STATUS_LABEL[String(s.from)] ?? String(s.from ?? "")} to ${DESIGN_STATUS_LABEL[String(s.to)] ?? String(s.to ?? "")}${s.override_limit === true ? " (rejection limit overridden)" : ""}: ${String(s.notes ?? "")}`;
+    case "approval.response":
+      return `The client (${String(s.responder_name ?? "")}) answered ${String(s.entity_type ?? "").toLowerCase()} for ${code} through the approval link: ${String(s.decision ?? "").toLowerCase()}`;
+    case "approval.invalid":
+      return "Someone opened an approval link that is not valid or has expired";
+    case "sheet.import":
+      return `Imported ${String(s.added ?? 0)} ${s.kind === "FUNDS" ? "incoming payments" : s.kind === "FORMULA" ? "formula records" : "design records"} from ${String(s.file_name ?? "a CSV file")} (skipped ${String(s.skipped ?? 0)}, rejected ${String(s.invalid ?? 0)})`;
+    case "legal.record": {
+      const record = (s.record ?? {}) as Record<string, unknown>;
+      return `Recorded ${String(record.kind ?? "")} as ${String(
+        record.status ?? "",
+      )
+        .toLowerCase()
+        .replace(
+          "_",
+          " ",
+        )} for ${code}${record.certificate_no ? `: certificate ${String(record.certificate_no)}` : record.reference_no ? `: number ${String(record.reference_no)}` : ""}`;
+    }
+    case "mou.create":
+      return `Drafted MoU ${String(s.mou_number ?? "")} for sample "${String(s.brand_name ?? "")}" of ${code}`;
+    case "mou.update":
+      return `Changed draft MoU ${String(s.mou_number ?? "")} for ${code}`;
+    case "mou.step":
+      return `Moved MoU ${String(s.mou_number ?? "")} for ${code} from ${MOU_STATUS_LABEL[String(s.from)] ?? String(s.from ?? "")} to ${MOU_STATUS_LABEL[String(s.to)] ?? String(s.to ?? "")}: ${String(s.notes ?? "")}`;
     case "sample.photo":
       return `Added a ${s.purpose === "PAYMENT_PROOF" ? "payment proof" : s.purpose === "MOCKUP" ? "mockup" : "reference"} photo (${Math.round(Number(s.byte_size ?? 0) / 1024)} KB) to sample "${String(s.brand_name ?? "")}" for ${code}`;
     case "settings.business":

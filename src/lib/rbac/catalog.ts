@@ -63,6 +63,9 @@ export const PERMISSION_CATALOG = [
   // MoU produksi (v2.5a, PRD F-20): CS membuat, mengirim, dan mencatat
   // jawaban klien. Harga satuan dan persen DP memakai `finance.manage`.
   { key: "mou.manage", name: "Manage MoUs", group: "Samples" },
+  // Dokumen legal (v2.6, PRD F-21): BPOM, Halal, HKI. SIG dicatat RnD
+  // (`rnd.manage`). Tidak menghapus apa pun, jadi tidak sensitif.
+  { key: "legal.manage", name: "Record legal documents", group: "Legal" },
   {
     key: "design.override_dummy_limit",
     name: "Override the dummy rejection limit",

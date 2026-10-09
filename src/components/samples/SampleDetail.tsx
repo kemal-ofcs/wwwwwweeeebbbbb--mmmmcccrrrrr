@@ -28,6 +28,7 @@ import {
 } from "@/lib/gateways/samples";
 import { requestSyncNow } from "@/lib/gateways/sync-status";
 import { formatDateTime } from "@/lib/utils/format";
+import { isClientDecisionAction } from "@/lib/validations/approval";
 import {
   applySampleAction,
   FORMULA_CODE_MAX,
@@ -38,14 +39,20 @@ import {
   type SampleAction,
   sampleActionPermission,
 } from "@/lib/validations/sample";
+import { ClientApproval } from "./ClientApproval";
+import { EvidencePicker } from "./EvidencePicker";
 import {
   DESIGN_STATUS_LABEL,
+  LEGAL_STATUS_LABEL,
+  MOU_STATUS_LABEL,
   SAMPLE_ACTION_LABEL,
   SAMPLE_ACTION_PAST,
   SAMPLE_STATUS_LABEL,
   SAMPLE_STATUS_TONE,
 } from "./labels";
 import { SampleDesign } from "./SampleDesign";
+import { SampleLegal } from "./SampleLegal";
+import { SampleMou } from "./SampleMou";
 import { SamplePhotos } from "./SamplePhotos";
 import { SamplePricing } from "./SamplePricing";
 
@@ -86,9 +93,15 @@ function DetailRow({ label, value }: { label: string; value: string }) {
   );
 }
 
-/** Linimasa memuat langkah tiket sampel dan tiket desain (v2.4). */
+/** Linimasa memuat langkah tiket sampel, tiket desain (v2.4), dan MoU (v2.5a). */
 function statusLabel(status: string) {
-  return SAMPLE_STATUS_LABEL[status] ?? DESIGN_STATUS_LABEL[status] ?? status;
+  return (
+    SAMPLE_STATUS_LABEL[status] ??
+    DESIGN_STATUS_LABEL[status] ??
+    MOU_STATUS_LABEL[status] ??
+    LEGAL_STATUS_LABEL[status] ??
+    status
+  );
 }
 
 export function SampleDetail({
@@ -111,6 +124,7 @@ export function SampleDetail({
   const canDesign = hasPermission(user, "design.manage");
   const [action, setAction] = useState<SampleAction | null>(null);
   const [notes, setNotes] = useState("");
+  const [evidence, setEvidence] = useState("");
   const [leadTime, setLeadTime] = useState("");
   const [revisionFee, setRevisionFee] = useState("");
   const [productClass, setProductClass] = useState("");
@@ -200,9 +214,11 @@ export function SampleDetail({
         },
         revision_fee_idr:
           revisionFee === "" ? null : Math.trunc(Number(revisionFee)),
+        evidence_base64: isClientDecisionAction(action) ? evidence : "",
       });
       setAction(null);
       setNotes("");
+      setEvidence("");
       setLeadTime("");
       setRevisionFee("");
       setProductClass("");
@@ -454,11 +470,52 @@ export function SampleDetail({
               </section>
             ) : null}
 
+            {request.status === "SAMPLE_SENT" ? (
+              <ClientApproval
+                entityType="SAMPLE"
+                entityId={request.id}
+                linkEnabled={data.approval_link_enabled}
+                canCreate={canManage}
+                title={`Sample ${request.brand_name}, iteration ${request.revision_index + 1}`}
+                lines={[
+                  `For ${request.client_name ?? ""} (${request.client_code ?? ""})`,
+                  `Packaging: ${request.packaging}`,
+                  ...(request.unit_price_idr == null
+                    ? []
+                    : [
+                        `Unit price before tax: ${formatRupiah(request.unit_price_idr)}`,
+                      ]),
+                ]}
+                decisions={["APPROVE", "REVISE", "REJECT"]}
+              />
+            ) : null}
+
             <SampleDesign
               sample={request}
               design={data.design}
               maxRejections={data.max_dummy_rejections}
               canManage={canManage}
+              linkEnabled={data.approval_link_enabled}
+              onChanged={() => {
+                void load();
+                onChanged();
+              }}
+            />
+
+            <SampleMou
+              sample={request}
+              mou={data.mou}
+              dpDefaultBp={data.dp_percentage_bp}
+              linkEnabled={data.approval_link_enabled}
+              onChanged={() => {
+                void load();
+                onChanged();
+              }}
+            />
+
+            <SampleLegal
+              mou={data.mou}
+              documents={data.legal_documents}
               onChanged={() => {
                 void load();
                 onChanged();
@@ -629,6 +686,9 @@ export function SampleDetail({
                         />
                       </label>
                     ) : null}
+                    {isClientDecisionAction(action) ? (
+                      <EvidencePicker value={evidence} onChange={setEvidence} />
+                    ) : null}
                     <label className="app-label grid gap-1.5">
                       Notes
                       <textarea
@@ -739,7 +799,9 @@ export function SampleDetail({
                       <p className="text-body-md text-on-surface">
                         <span className="font-semibold">
                           {entry.recorded_by_name ??
-                            `Operator #${entry.recorded_by ?? "?"}`}
+                            (entry.recorded_by == null
+                              ? "Client"
+                              : `Operator #${entry.recorded_by}`)}
                         </span>{" "}
                         {SAMPLE_ACTION_PAST[entry.action] ?? entry.action}
                       </p>

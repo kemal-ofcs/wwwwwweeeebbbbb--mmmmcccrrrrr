@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { FeedbackBanner } from "@/components/ui/FeedbackBanner";
 import { PageHeader } from "@/components/ui/PageHeader";
@@ -40,7 +41,15 @@ import { SampleForm } from "./SampleForm";
  * klien itu (tombol dari panel lead).
  */
 
-type View = "rnd" | "finance" | "design" | "active" | "closed" | "all";
+type View =
+  | "rnd"
+  | "finance"
+  | "design"
+  | "mou"
+  | "legal"
+  | "active"
+  | "closed"
+  | "all";
 
 /** Antrean kerja RnD (v2.1): menunggu keputusan atau sedang dibuat. */
 const RND_QUEUE_STATUSES = ["RND_REVIEW", "IN_RND"];
@@ -71,6 +80,24 @@ function inDesignQueue(row: SampleRequestRecord) {
     (row.design_status === "MOCKUP" ||
       row.design_status === "DUMMY_REVISION") &&
     row.status === "CLIENT_ACC"
+  );
+}
+
+/** Antrean MoU (v2.5a): draf, menunggu klien, dan menunggu DP lunas. */
+function inMouQueue(row: SampleRequestRecord) {
+  return (
+    row.mou_status === "DRAFT" ||
+    row.mou_status === "SENT" ||
+    (row.mou_status === "ACCEPTED" && row.dp_paid !== 1)
+  );
+}
+
+/** Antrean dokumen legal (v2.6): MoU disetujui, DP lunas, dokumen belum lengkap. */
+function inLegalQueue(row: SampleRequestRecord) {
+  return (
+    row.mou_status === "ACCEPTED" &&
+    row.dp_paid === 1 &&
+    (row.legal_open ?? 0) > 0
   );
 }
 
@@ -140,6 +167,8 @@ export function SampleWorkspace() {
   const canRnd = hasPermission(user, "rnd.manage");
   const canFinance = hasPermission(user, "finance.manage");
   const canDesign = hasPermission(user, "design.manage");
+  const canMou = hasPermission(user, "mou.manage");
+  const canLegal = hasPermission(user, "legal.manage");
   const [requests, setRequests] = useState<SampleRequestRecord[]>([]);
   const [feeMode, setFeeMode] = useState<SampleFeeMode>("PER_REQUEST");
   const [clients, setClients] = useState<ClientRecord[]>([]);
@@ -158,7 +187,9 @@ export function SampleWorkspace() {
           ? "finance"
           : canDesign
             ? "design"
-            : "active",
+            : canLegal
+              ? "legal"
+              : "active",
   );
   const [search, setSearch] = useState("");
   const [form, setForm] = useState<{
@@ -240,6 +271,8 @@ export function SampleWorkspace() {
         return false;
       if (view === "finance" && !inFinanceQueue(row)) return false;
       if (view === "design" && !inDesignQueue(row)) return false;
+      if (view === "mou" && !inMouQueue(row)) return false;
+      if (view === "legal" && !inLegalQueue(row)) return false;
       if (view === "active" && closed) return false;
       if (view === "closed" && !closed) return false;
       if (!term) return true;
@@ -263,14 +296,26 @@ export function SampleWorkspace() {
         title="Samples"
         description="Sample requests from first brief to the client's decision, with the free revision quota of each client."
         actions={
-          canManage ? (
-            <button
-              type="button"
-              onClick={() => setForm({ draft: emptyDraft(""), locked: false })}
-              className="app-btn app-btn-primary"
-            >
-              New sample request
-            </button>
+          canManage || canRnd || canDesign ? (
+            <div className="flex flex-wrap gap-2">
+              {canManage ? (
+                <button
+                  type="button"
+                  onClick={() =>
+                    setForm({ draft: emptyDraft(""), locked: false })
+                  }
+                  className="app-btn app-btn-primary"
+                >
+                  New sample request
+                </button>
+              ) : null}
+              {/* Database Formulasi/Desain lama (v2.7, PRD F-22). */}
+              {canRnd || canDesign ? (
+                <Link href="/import" className="app-btn app-btn-secondary">
+                  Import CSV
+                </Link>
+              ) : null}
+            </div>
           ) : null
         }
       />
@@ -297,6 +342,10 @@ export function SampleWorkspace() {
               ...(canRnd ? ([["rnd", "RnD queue"]] as const) : []),
               ...(canFinance ? ([["finance", "Finance queue"]] as const) : []),
               ...(canDesign ? ([["design", "Design queue"]] as const) : []),
+              ...(canMou || canFinance ? ([["mou", "MoU"]] as const) : []),
+              ...(canLegal || canRnd
+                ? ([["legal", "Legal queue"]] as const)
+                : []),
               ["active", "In progress"],
               ["closed", "Closed"],
               ["all", "All"],

@@ -32,6 +32,8 @@ pub const SETTING_TELEGRAM_CHAT_ID_DESIGN: &str = "telegram_chat_id_design";
 pub const SETTING_DEFAULT_DUMMY_FEE_IDR: &str = "default_dummy_fee_idr";
 pub const SETTING_MAX_DUMMY_REJECTIONS: &str = "max_dummy_rejections";
 pub const SETTING_DP_PERCENTAGE_BP: &str = "dp_percentage_bp";
+pub const SETTING_APPROVAL_WEB_URL: &str = "approval_web_url";
+pub const SETTING_APPROVAL_TOKEN_TTL_DAYS: &str = "approval_token_ttl_days";
 pub const BUSINESS_SETTING_KEYS: &[&str] = &[
     SETTING_DEFAULT_FREE_REVISION_LIMIT,
     SETTING_SAMPLE_FEE_MODE,
@@ -50,6 +52,8 @@ pub const BUSINESS_SETTING_KEYS: &[&str] = &[
     SETTING_DEFAULT_DUMMY_FEE_IDR,
     SETTING_MAX_DUMMY_REJECTIONS,
     SETTING_DP_PERCENTAGE_BP,
+    SETTING_APPROVAL_WEB_URL,
+    SETTING_APPROVAL_TOKEN_TTL_DAYS,
 ];
 
 pub const FREE_REVISION_LIMIT_MAX: i64 = 20;
@@ -62,6 +66,35 @@ pub const INVOICE_DUE_DAYS_LIMIT: i64 = 90;
 pub const PAYMENT_INSTRUCTIONS_MAX: usize = 1000;
 pub const MAX_DUMMY_REJECTIONS_LIMIT: i64 = 20;
 pub const DP_PERCENTAGE_INVALID: &str = "The down payment must be from 0.01% to 100%.";
+pub const APPROVAL_TTL_DAYS_LIMIT: i64 = 30;
+pub const APPROVAL_WEB_URL_MAX: usize = 200;
+pub const APPROVAL_WEB_URL_INVALID: &str = "Enter the approval web address as https://..., or leave it empty.";
+pub const APPROVAL_TTL_INVALID: &str = "Approval links must last a whole number of days from 1 to 30.";
+
+/// Padanan `normalizeApprovalWebUrl`: kosong, atau `https://host[:port][/path]`
+/// tanpa garis miring penutup. `None` = tidak sah.
+pub fn normalize_approval_web_url(value: &str) -> Option<String> {
+    let text = value.trim().trim_end_matches('/');
+    if text.is_empty() {
+        return Some(String::new());
+    }
+    if text.len() > APPROVAL_WEB_URL_MAX {
+        return None;
+    }
+    let rest = text.strip_prefix("https://")?;
+    let (host_port, path) = match rest.find('/') {
+        Some(index) => (&rest[..index], &rest[index..]),
+        None => (rest, ""),
+    };
+    let mut parts = host_port.split(':');
+    let host = parts.next().unwrap_or_default();
+    let port = parts.next();
+    let extra = parts.next();
+    let host_ok = !host.is_empty() && host.chars().all(|char| char.is_ascii_alphanumeric() || matches!(char, '.' | '-'));
+    let port_ok = port.is_none_or(|port| (1..=5).contains(&port.len()) && port.chars().all(|char| char.is_ascii_digit()));
+    let path_ok = path.chars().all(|char| char.is_ascii_alphanumeric() || matches!(char, '.' | '_' | '~' | '/' | '-'));
+    (host_ok && port_ok && extra.is_none() && path_ok).then(|| text.to_owned())
+}
 pub const PAYMENT_INSTRUCTIONS_INVALID: &str = "Payment instructions are up to 1000 characters.";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -92,6 +125,10 @@ pub struct BusinessSettings {
     pub max_dummy_rejections: i64,
     /// Persen DP bawaan MoU dalam basis poin (v2.5a, F-20).
     pub dp_percentage_bp: i64,
+    /// Alamat Web tautan persetujuan (v2.5b); kosong = hanya jalur manual.
+    pub approval_web_url: String,
+    /// Masa berlaku tautan persetujuan dalam hari.
+    pub approval_token_ttl_days: i64,
 }
 
 impl Default for BusinessSettings {
@@ -114,6 +151,8 @@ impl Default for BusinessSettings {
             default_dummy_fee_idr: 0,
             max_dummy_rejections: 0,
             dp_percentage_bp: 5000,
+            approval_web_url: String::new(),
+            approval_token_ttl_days: 3,
         }
     }
 }
@@ -138,6 +177,8 @@ impl BusinessSettings {
             "default_dummy_fee_idr": self.default_dummy_fee_idr,
             "max_dummy_rejections": self.max_dummy_rejections,
             "dp_percentage_bp": self.dp_percentage_bp,
+            "approval_web_url": self.approval_web_url,
+            "approval_token_ttl_days": self.approval_token_ttl_days,
         })
     }
 
@@ -161,6 +202,8 @@ impl BusinessSettings {
             (SETTING_DEFAULT_DUMMY_FEE_IDR, self.default_dummy_fee_idr.to_string()),
             (SETTING_MAX_DUMMY_REJECTIONS, self.max_dummy_rejections.to_string()),
             (SETTING_DP_PERCENTAGE_BP, self.dp_percentage_bp.to_string()),
+            (SETTING_APPROVAL_WEB_URL, self.approval_web_url.clone()),
+            (SETTING_APPROVAL_TOKEN_TTL_DAYS, self.approval_token_ttl_days.to_string()),
         ]
     }
 }
@@ -263,6 +306,16 @@ pub fn read_business_settings(values: &HashMap<String, String>) -> BusinessSetti
         .unwrap_or(defaults.max_dummy_rejections),
         dp_percentage_bp: in_range(stored_int(values.get(SETTING_DP_PERCENTAGE_BP)), 1, 10_000)
             .unwrap_or(defaults.dp_percentage_bp),
+        approval_web_url: values
+            .get(SETTING_APPROVAL_WEB_URL)
+            .and_then(|value| normalize_approval_web_url(value))
+            .unwrap_or_default(),
+        approval_token_ttl_days: in_range(
+            stored_int(values.get(SETTING_APPROVAL_TOKEN_TTL_DAYS)),
+            1,
+            APPROVAL_TTL_DAYS_LIMIT,
+        )
+        .unwrap_or(defaults.approval_token_ttl_days),
     }
 }
 
@@ -348,6 +401,18 @@ pub fn validate_business_settings(draft: &Value) -> Result<BusinessSettings, &'s
         .ok_or("The dummy rejection limit must be a whole number from 0 to 20.")?,
         dp_percentage_bp: in_range(strict_int(draft.get(SETTING_DP_PERCENTAGE_BP)), 1, 10_000)
             .ok_or(DP_PERCENTAGE_INVALID)?,
+        // Wajib dikirim, walau kosong: field yang hilang akan menimpa alamat tersimpan.
+        approval_web_url: draft
+            .get(SETTING_APPROVAL_WEB_URL)
+            .and_then(Value::as_str)
+            .and_then(normalize_approval_web_url)
+            .ok_or(APPROVAL_WEB_URL_INVALID)?,
+        approval_token_ttl_days: in_range(
+            strict_int(draft.get(SETTING_APPROVAL_TOKEN_TTL_DAYS)),
+            1,
+            APPROVAL_TTL_DAYS_LIMIT,
+        )
+        .ok_or(APPROVAL_TTL_INVALID)?,
     })
 }
 
@@ -898,7 +963,7 @@ pub const SAMPLE_FEEDBACK_INSERT_SQL: &str = "INSERT INTO sample_feedbacks (id, 
 /// Padanan `SAMPLE_LIST_SQL`: `unit_price_idr` = harga Finance terbaru untuk
 /// iterasi yang sedang berjalan (NULL = belum diberi harga, gerbang D-27).
 /// Seri di detik yang sama dipisahkan `rowid`; lihat catatan `ponytail` di TS.
-pub const SAMPLE_LIST_SQL: &str = "SELECT s.*, c.client_code, c.name AS client_name, c.free_revision_limit, o.nama_operator AS pic_crm_name, (SELECT p.final_unit_price_idr FROM pricing_formulas p WHERE p.sample_request_id = s.id AND p.iteration_number = s.revision_index + 1 ORDER BY p.recorded_at DESC, p.rowid DESC LIMIT 1) AS unit_price_idr, EXISTS (SELECT 1 FROM invoices i WHERE i.sample_request_id = s.id AND ((s.status = 'WAITING_SAMPLE_PAYMENT' AND i.ref_type = 'SAMPLE_FEE') OR (s.status = 'WAITING_REVISION_PAYMENT' AND i.ref_type = 'REVISION_FEE' AND i.revision_index = s.revision_index)) AND (i.status = 'RESCHEDULED' OR (i.status = 'OPEN' AND (SELECT COALESCE(SUM(a.amount_idr), 0) FROM fund_allocations a WHERE a.invoice_id = i.id) >= i.total_idr))) AS fee_paid, EXISTS (SELECT 1 FROM invoices i WHERE i.sample_request_id = s.id AND i.ref_type = 'TEST_FEE' AND (i.status = 'RESCHEDULED' OR (i.status = 'OPEN' AND (SELECT COALESCE(SUM(a.amount_idr), 0) FROM fund_allocations a WHERE a.invoice_id = i.id) >= i.total_idr))) AS test_paid, (SELECT d.status FROM design_tickets d WHERE d.sample_request_id = s.id AND d.status <> 'CANCELLED' ORDER BY d.created_at DESC, d.rowid DESC LIMIT 1) AS design_status, (SELECT d.dummy_rejection_count FROM design_tickets d WHERE d.sample_request_id = s.id AND d.status <> 'CANCELLED' ORDER BY d.created_at DESC, d.rowid DESC LIMIT 1) AS dummy_round, ((s.is_dummy_required = 0 AND NOT EXISTS (SELECT 1 FROM design_tickets d WHERE d.sample_request_id = s.id AND d.status <> 'CANCELLED')) OR EXISTS (SELECT 1 FROM media_asset m WHERE m.owner_type = 'sample' AND m.owner_id = s.id AND m.purpose = 'MOCKUP')) AS mockup_ready, (SELECT m.status FROM production_mou m WHERE m.sample_request_id = s.id AND m.status NOT IN ('CANCELLED', 'REJECTED') ORDER BY m.created_at DESC, m.rowid DESC LIMIT 1) AS mou_status, (SELECT m.dp_amount_required_idr FROM production_mou m WHERE m.sample_request_id = s.id AND m.status = 'ACCEPTED' ORDER BY m.created_at DESC, m.rowid DESC LIMIT 1) AS mou_dp_idr, EXISTS (SELECT 1 FROM invoices i WHERE i.sample_request_id = s.id AND i.ref_type = 'DP_PRODUCTION_LEGAL' AND (i.status = 'RESCHEDULED' OR (i.status = 'OPEN' AND (SELECT COALESCE(SUM(a.amount_idr), 0) FROM fund_allocations a WHERE a.invoice_id = i.id) >= i.total_idr))) AS dp_paid FROM sample_requests s LEFT JOIN clients c ON c.id = s.client_id LEFT JOIN master_operator o ON o.id = s.pic_crm_id";
+pub const SAMPLE_LIST_SQL: &str = "SELECT s.*, c.client_code, c.name AS client_name, c.free_revision_limit, o.nama_operator AS pic_crm_name, (SELECT p.final_unit_price_idr FROM pricing_formulas p WHERE p.sample_request_id = s.id AND p.iteration_number = s.revision_index + 1 ORDER BY p.recorded_at DESC, p.rowid DESC LIMIT 1) AS unit_price_idr, EXISTS (SELECT 1 FROM invoices i WHERE i.sample_request_id = s.id AND ((s.status = 'WAITING_SAMPLE_PAYMENT' AND i.ref_type = 'SAMPLE_FEE') OR (s.status = 'WAITING_REVISION_PAYMENT' AND i.ref_type = 'REVISION_FEE' AND i.revision_index = s.revision_index)) AND (i.status = 'RESCHEDULED' OR (i.status = 'OPEN' AND (SELECT COALESCE(SUM(a.amount_idr), 0) FROM fund_allocations a WHERE a.invoice_id = i.id) >= i.total_idr))) AS fee_paid, EXISTS (SELECT 1 FROM invoices i WHERE i.sample_request_id = s.id AND i.ref_type = 'TEST_FEE' AND (i.status = 'RESCHEDULED' OR (i.status = 'OPEN' AND (SELECT COALESCE(SUM(a.amount_idr), 0) FROM fund_allocations a WHERE a.invoice_id = i.id) >= i.total_idr))) AS test_paid, (SELECT d.status FROM design_tickets d WHERE d.sample_request_id = s.id AND d.status <> 'CANCELLED' ORDER BY d.created_at DESC, d.rowid DESC LIMIT 1) AS design_status, (SELECT d.dummy_rejection_count FROM design_tickets d WHERE d.sample_request_id = s.id AND d.status <> 'CANCELLED' ORDER BY d.created_at DESC, d.rowid DESC LIMIT 1) AS dummy_round, ((s.is_dummy_required = 0 AND NOT EXISTS (SELECT 1 FROM design_tickets d WHERE d.sample_request_id = s.id AND d.status <> 'CANCELLED')) OR EXISTS (SELECT 1 FROM media_asset m WHERE m.owner_type = 'sample' AND m.owner_id = s.id AND m.purpose = 'MOCKUP')) AS mockup_ready, (SELECT m.status FROM production_mou m WHERE m.sample_request_id = s.id AND m.status NOT IN ('CANCELLED', 'REJECTED') ORDER BY m.created_at DESC, m.rowid DESC LIMIT 1) AS mou_status, (SELECT m.dp_amount_required_idr FROM production_mou m WHERE m.sample_request_id = s.id AND m.status = 'ACCEPTED' ORDER BY m.created_at DESC, m.rowid DESC LIMIT 1) AS mou_dp_idr, EXISTS (SELECT 1 FROM invoices i WHERE i.sample_request_id = s.id AND i.ref_type = 'DP_PRODUCTION_LEGAL' AND (i.status = 'RESCHEDULED' OR (i.status = 'OPEN' AND (SELECT COALESCE(SUM(a.amount_idr), 0) FROM fund_allocations a WHERE a.invoice_id = i.id) >= i.total_idr))) AS dp_paid, (SELECT CASE m.regulatory_path WHEN 'WITH_BPOM' THEN 4 ELSE 1 END - (SELECT COUNT(DISTINCT l.kind) FROM legal_documents l WHERE l.mou_id = m.id AND l.status IN ('ISSUED', 'NOT_REQUIRED') AND (m.regulatory_path = 'WITH_BPOM' OR l.kind = 'HALAL')) FROM production_mou m WHERE m.sample_request_id = s.id AND m.status = 'ACCEPTED' ORDER BY m.created_at DESC, m.rowid DESC LIMIT 1) AS legal_open FROM sample_requests s LEFT JOIN clients c ON c.id = s.client_id LEFT JOIN master_operator o ON o.id = s.pic_crm_id";
 
 /// Satu harga per simpan (v2.2), hanya-tambah. ?1 id, ?2 tiket, ?3 iterasi,
 /// ?4-?7 komponen, ?8 HPP, ?9 margin, ?10 harga jual, ?11 catatan,
@@ -936,7 +1001,8 @@ pub const SAMPLE_CHANGED_ELSEWHERE: &str =
 // Kompresi dikerjakan webview; di sini hanya pemeriksaan ulang hasilnya.
 // ---------------------------------------------------------------------------
 
-pub const SAMPLE_MEDIA_PURPOSES: &[&str] = &["REFERENCE", "PAYMENT_PROOF", "MOCKUP"];
+pub const SAMPLE_MEDIA_PURPOSES: &[&str] =
+    &["REFERENCE", "PAYMENT_PROOF", "MOCKUP", "CLIENT_RESPONSE", "LEGAL_DOCUMENT"];
 
 /// Padanan `mediaPurposePermission`: mockup milik desainer (v2.4).
 pub fn media_purpose_permission(purpose: &str) -> &'static str {
@@ -1022,6 +1088,8 @@ mod tests {
                 ("default_dummy_fee_idr", "75000"),
                 ("max_dummy_rejections", "3"),
                 ("dp_percentage_bp", "3000"),
+                ("approval_web_url", " https://crm.company.id/ "),
+                ("approval_token_ttl_days", "7"),
             ]),
             BusinessSettings {
                 default_free_revision_limit: 2,
@@ -1041,6 +1109,8 @@ mod tests {
                 default_dummy_fee_idr: 75_000,
                 max_dummy_rejections: 3,
                 dp_percentage_bp: 3000,
+                approval_web_url: "https://crm.company.id".into(),
+                approval_token_ttl_days: 7,
             }
         );
         assert_eq!(
@@ -1053,9 +1123,32 @@ mod tests {
                 ("offline_login_max_days", "9"),
                 ("max_dummy_rejections", "21"),
                 ("dp_percentage_bp", "0"),
+                ("approval_web_url", "http://crm.company.id"),
+                ("approval_token_ttl_days", "31"),
             ]),
             BusinessSettings::default()
         );
+    }
+
+    #[test]
+    fn alamat_web_persetujuan_dinormalkan() {
+        let cases: &[(&str, Option<&str>)] = &[
+            ("", Some("")),
+            ("  ", Some("")),
+            ("https://crm.company.id", Some("https://crm.company.id")),
+            ("https://crm.company.id/", Some("https://crm.company.id")),
+            ("https://10.0.0.5:3000/maklon/", Some("https://10.0.0.5:3000/maklon")),
+            ("http://crm.company.id", None),
+            ("https://", None),
+            ("https://crm.company.id:abc", None),
+            ("https://crm.company.id:1:2", None),
+            ("https://crm.company.id/a?b=1", None),
+            ("https://user@crm.company.id", None),
+        ];
+        for (value, expected) in cases {
+            assert_eq!(normalize_approval_web_url(value).as_deref(), *expected, "{value}");
+        }
+        assert_eq!(normalize_approval_web_url(&format!("https://{}.id", "a".repeat(200))), None);
     }
 
     #[test]
@@ -1089,6 +1182,8 @@ mod tests {
             "default_dummy_fee_idr": 50000,
             "max_dummy_rejections": 2,
             "dp_percentage_bp": 10000,
+            "approval_web_url": "",
+            "approval_token_ttl_days": 30,
         });
         assert_eq!(
             validate_business_settings(&valid),
@@ -1110,6 +1205,8 @@ mod tests {
                 default_dummy_fee_idr: 50_000,
                 max_dummy_rejections: 2,
                 dp_percentage_bp: 10_000,
+                approval_web_url: String::new(),
+                approval_token_ttl_days: 30,
             })
         );
         let with = |key: &str, value: Value| {
@@ -1132,6 +1229,12 @@ mod tests {
         }
         for dp in [json!(0), json!(10_001), json!("50")] {
             assert_eq!(with("dp_percentage_bp", dp), DP_PERCENTAGE_INVALID);
+        }
+        for url in [json!("http://crm.company.id"), Value::Null, json!("https://crm company.id")] {
+            assert_eq!(with("approval_web_url", url), APPROVAL_WEB_URL_INVALID);
+        }
+        for ttl in [json!(0), json!(31), json!("3")] {
+            assert_eq!(with("approval_token_ttl_days", ttl), APPROVAL_TTL_INVALID);
         }
         assert_eq!(with("invoice_payment_instructions", Value::Null), PAYMENT_INSTRUCTIONS_INVALID);
         assert_eq!(with("invoice_payment_instructions", json!("x".repeat(1001))), PAYMENT_INSTRUCTIONS_INVALID);
@@ -1470,6 +1573,8 @@ mod tests {
             ("REFERENCE", TINY_WEBP, Ok(16)),
             ("PAYMENT_PROOF", TINY_WEBP, Ok(16)),
             ("MOCKUP", TINY_WEBP, Ok(16)),
+            ("CLIENT_RESPONSE", TINY_WEBP, Ok(16)),
+            ("LEGAL_DOCUMENT", TINY_WEBP, Ok(16)),
             ("INVOICE", TINY_WEBP, Err(MEDIA_PURPOSE_INVALID)),
             ("REFERENCE", PNG, Err(MEDIA_NOT_WEBP)),
             ("REFERENCE", "not base64!", Err(MEDIA_NOT_WEBP)),

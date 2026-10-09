@@ -474,6 +474,42 @@ pub fn initialize(path: &Path) -> Result<(), String> {
       );
       CREATE INDEX IF NOT EXISTS idx_local_production_mou_sample
         ON production_mou(sample_request_id);
+      -- Dokumen legal (v2.6, PRD F-21), cache cloud.
+      CREATE TABLE IF NOT EXISTS legal_documents (
+        id TEXT PRIMARY KEY,
+        mou_id TEXT NOT NULL,
+        sample_request_id TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        status TEXT NOT NULL,
+        reference_no TEXT NOT NULL DEFAULT '',
+        certificate_no TEXT NOT NULL DEFAULT '',
+        bpom_type TEXT NOT NULL DEFAULT '',
+        submitted_on TEXT NOT NULL DEFAULT '',
+        issued_on TEXT NOT NULL DEFAULT '',
+        expires_on TEXT NOT NULL DEFAULT '',
+        notes TEXT NOT NULL DEFAULT '',
+        updated_by INTEGER,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_local_legal_documents_mou
+        ON legal_documents(mou_id, kind);
+      -- Arsip impor sheet (v2.7, PRD F-22), cache cloud.
+      CREATE TABLE IF NOT EXISTS imported_records (
+        id TEXT PRIMARY KEY,
+        kind TEXT NOT NULL,
+        client_id TEXT NOT NULL,
+        record_date TEXT NOT NULL DEFAULT '',
+        code TEXT NOT NULL DEFAULT '',
+        title TEXT NOT NULL,
+        amount_idr INTEGER,
+        notes TEXT NOT NULL DEFAULT '',
+        source_file TEXT NOT NULL DEFAULT '',
+        imported_by INTEGER,
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_local_imported_records_client
+        ON imported_records(client_id);
       -- Foto: data ringkas ditarik dari cloud; `data_base64` terisi untuk foto
       -- buatan perangkat ini dan foto yang pernah dibuka ('' = belum diambil).
       CREATE TABLE IF NOT EXISTS media_asset (
@@ -623,6 +659,8 @@ const CLOUD_MIRRORED_TABLES: &[&str] = &[
     "fund_allocations",
     "design_tickets",
     "production_mou",
+    "legal_documents",
+    "imported_records",
     "media_asset",
 ];
 
@@ -945,6 +983,8 @@ mod tests {
             "fund_allocations",
             "design_tickets",
             "production_mou",
+            "legal_documents",
+            "imported_records",
             "media_asset",
             "setting_gex_system",
             "desktop_sync_outbox",

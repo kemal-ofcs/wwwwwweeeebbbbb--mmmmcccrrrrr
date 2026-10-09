@@ -4,6 +4,10 @@ import type { Client, Transaction } from "@libsql/client";
 import { type AuditActor, writeAudit } from "@/lib/server/audit";
 import { loadBusinessSettings } from "@/lib/server/business-settings";
 import { ApiRequestError } from "@/lib/server/http/api-response";
+import {
+  CLIENT_EVIDENCE_REQUIRED,
+  isClientDecisionAction,
+} from "@/lib/validations/approval";
 import { DESIGN_ACTIVE_SQL } from "@/lib/validations/design";
 import {
   MEDIA_INSERT_SQL,
@@ -138,6 +142,52 @@ export async function uploadSampleMedia(
   } finally {
     transaction.close();
   }
+}
+
+export interface ClientEvidence {
+  data_base64: string;
+  byte_size: number;
+}
+
+/**
+ * Langkah jawaban klien yang dicatat staf WAJIB membawa tangkapan layar
+ * balasan klien (v2.5b, keputusan N). Jawaban lewat tautan tidak butuh.
+ * Padanan pemeriksaan `client_evidence` di `commands.rs`.
+ */
+export function clientEvidence(
+  action: unknown,
+  data: unknown,
+  viaLink: boolean,
+): ClientEvidence | null {
+  if (viaLink || !isClientDecisionAction(action)) return null;
+  if (typeof data !== "string" || !data) {
+    throw new ApiRequestError(CLIENT_EVIDENCE_REQUIRED, 400);
+  }
+  const checked = validateMediaUpload("CLIENT_RESPONSE", data);
+  if ("error" in checked) throw new ApiRequestError(checked.error, 400);
+  return { data_base64: data, byte_size: checked.byte_size };
+}
+
+/** Simpan tangkapan layar jawaban klien di transaksi langkahnya. */
+export async function insertClientEvidence(
+  transaction: Transaction,
+  sampleId: string,
+  evidence: ClientEvidence,
+  actorId: number | null,
+  now: string,
+) {
+  await transaction.execute({
+    sql: MEDIA_INSERT_SQL,
+    args: [
+      crypto.randomUUID(),
+      sampleId,
+      "CLIENT_RESPONSE",
+      evidence.byte_size,
+      evidence.data_base64,
+      actorId,
+      now,
+    ],
+  });
 }
 
 export async function getMediaData(client: Client, id: unknown) {

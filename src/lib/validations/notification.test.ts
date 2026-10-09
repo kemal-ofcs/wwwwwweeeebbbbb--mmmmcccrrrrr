@@ -246,6 +246,21 @@ describe("notifikasi divisi", () => {
     );
     expect(
       renderNotification(
+        "CLIENT_RESPONDED",
+        {
+          ...sample,
+          entity_type: "DUMMY",
+          decision: "REVISE",
+          responder: "Rina",
+        },
+        "2026-10-03 07:05:00",
+        "Asia/Jakarta",
+      ),
+    ).toBe(
+      "The client answered through the approval link: Aura Glow for Aura Beauty (KLN-20261003-WB01)\nPackaging dummy needs changes by Rina\nAnswered 2026-10-03 14:05 WIB",
+    );
+    expect(
+      renderNotification(
         "MOU_ACCEPTED",
         {
           ...sample,

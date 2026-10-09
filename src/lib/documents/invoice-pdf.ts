@@ -404,12 +404,10 @@ export interface MouPdfData {
  */
 export function buildMouPdf(data: MouPdfData): Uint8Array {
   const page = new Page();
-  let top = drawHeader(
-    page,
-    { ...data, stamp_note: "" },
-    "PRODUCTION MOU",
-    [data.mou_number, `Date ${data.issued_on}`],
-  );
+  let top = drawHeader(page, { ...data, stamp_note: "" }, "PRODUCTION MOU", [
+    data.mou_number,
+    `Date ${data.issued_on}`,
+  ]);
 
   page.text(MARGIN, top, "Client", 9, true);
   top -= 14;

@@ -12,7 +12,10 @@ import { REGULATORY_PATH_LABEL } from "./labels";
 /** Unduh MoU sebagai PDF satu halaman (v2.5a). Mengembalikan pesan untuk ditampilkan. */
 export async function downloadMouPdf(mou: MouRecord) {
   const company = await companyLetterhead();
-  return savePdf(`${mou.mou_number}.pdf`, buildMouPdf(mouPdfData(mou, company)));
+  return savePdf(
+    `${mou.mou_number}.pdf`,
+    buildMouPdf(mouPdfData(mou, company)),
+  );
 }
 
 export function mouPdfData(
@@ -52,12 +55,16 @@ export function mouPdfData(
       },
       {
         label: "Regulatory path",
-        value: REGULATORY_PATH_LABEL[mou.regulatory_path] ?? mou.regulatory_path,
+        value:
+          REGULATORY_PATH_LABEL[mou.regulatory_path] ?? mou.regulatory_path,
       },
     ],
     notes: mou.notes,
     footer:
       "Prices exclude taxes. The down payment is invoiced separately; production and product registration start after it is paid.",
-    signatures: [`For ${company.name}`, `For ${mou.client_name ?? "the client"}`],
+    signatures: [
+      `For ${company.name}`,
+      `For ${mou.client_name ?? "the client"}`,
+    ],
   };
 }

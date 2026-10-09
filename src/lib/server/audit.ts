@@ -21,7 +21,11 @@ export const DOMAIN_AUDIT_LIST_SQL =
   "SELECT a.id, a.actor_operator_id, o.nama_operator AS actor_name, a.on_behalf_of_division, a.action, a.entity_type, a.entity_id, a.summary_json, a.occurred_at FROM domain_audit_log a LEFT JOIN master_operator o ON o.id = a.actor_operator_id WHERE (?1 = '' OR a.entity_type = ?1) AND (?2 = 0 OR a.actor_operator_id = ?2) AND (?3 = '' OR a.occurred_at >= ?3) AND (?4 = '' OR a.occurred_at < ?4) ORDER BY a.occurred_at DESC, a.rowid DESC LIMIT 200;";
 
 /** Pelaku audit: id operator dan role-nya saat aksi terjadi (kolom "atas nama divisi"). */
-export type AuditActor = Pick<OperatorUser, "id" | "role">;
+/**
+ * Pelaku sebuah mutasi. `id` null = klien lewat tautan persetujuan (v2.5b),
+ * dicatat dengan peran `Client`.
+ */
+export type AuditActor = { id: number | null; role: OperatorUser["role"] };
 
 export interface AuditEntryRecord {
   id: string;

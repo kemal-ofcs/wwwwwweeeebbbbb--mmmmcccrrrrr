@@ -45,7 +45,10 @@ describe("isi MoU (isi_mou_dihitung_dan_divalidasi)", () => {
     });
     expect(
       "terms" in odd
-        ? [odd.terms.total_production_cost_idr, odd.terms.dp_amount_required_idr]
+        ? [
+            odd.terms.total_production_cost_idr,
+            odd.terms.dp_amount_required_idr,
+          ]
         : odd,
     ).toEqual([999, 333]);
     const { notes: _notes, ...bare } = terms;

@@ -12,6 +12,7 @@ import {
   type SampleRequestRecord,
 } from "@/lib/gateways/samples";
 import { requestSyncNow } from "@/lib/gateways/sync-status";
+import { isClientDecisionAction } from "@/lib/validations/approval";
 import {
   applyDesignAction,
   DESIGN_ACTIONS,
@@ -24,6 +25,8 @@ import {
   TRACKING_NO_MAX,
 } from "@/lib/validations/design";
 import { SAMPLE_NOTES_MAX } from "@/lib/validations/sample";
+import { ClientApproval } from "./ClientApproval";
+import { EvidencePicker } from "./EvidencePicker";
 import {
   DESIGN_ACTION_LABEL,
   DESIGN_STATUS_LABEL,
@@ -43,6 +46,8 @@ interface SampleDesignProps {
   maxRejections: number;
   /** `samples.manage`. */
   canManage: boolean;
+  /** Alamat Web persetujuan disetel (v2.5b). */
+  linkEnabled: boolean;
   onChanged: () => void;
 }
 
@@ -51,6 +56,7 @@ export function SampleDesign({
   design,
   maxRejections,
   canManage,
+  linkEnabled,
   onChanged,
 }: SampleDesignProps) {
   const { user } = useAuth();
@@ -59,6 +65,7 @@ export function SampleDesign({
   const [brief, setBrief] = useState("");
   const [action, setAction] = useState<DesignAction | null>(null);
   const [notes, setNotes] = useState("");
+  const [evidence, setEvidence] = useState("");
   const [tracking, setTracking] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -104,6 +111,7 @@ export function SampleDesign({
       setAction(null);
       setNotes("");
       setTracking("");
+      setEvidence("");
       onChanged();
       requestSyncNow();
     } catch (cause) {
@@ -128,6 +136,7 @@ export function SampleDesign({
         action,
         notes,
         tracking_no: action === "DUMMY_SENT" ? tracking : "",
+        evidence_base64: isClientDecisionAction(action) ? evidence : "",
       }),
     );
   };
@@ -228,6 +237,24 @@ export function SampleDesign({
         </form>
       ) : null}
 
+      {active?.status === "DUMMY_SENT" ? (
+        <ClientApproval
+          entityType="DUMMY"
+          entityId={active.id}
+          linkEnabled={linkEnabled}
+          canCreate={canManage}
+          title={`Packaging dummy for ${sample.brand_name}, round ${active.dummy_rejection_count + 1}`}
+          lines={[
+            `For ${sample.client_name ?? ""} (${sample.client_code ?? ""})`,
+            `Brief: ${active.brief}`,
+            ...(active.dummy_tracking_no
+              ? [`Tracking number: ${active.dummy_tracking_no}`]
+              : []),
+          ]}
+          decisions={["APPROVE", "REVISE"]}
+        />
+      ) : null}
+
       {available.length > 0 && !action ? (
         <div className="flex flex-wrap gap-2">
           {available.map((candidate) => (
@@ -261,6 +288,9 @@ export function SampleDesign({
                 className="app-input font-normal"
               />
             </>
+          ) : null}
+          {isClientDecisionAction(action) ? (
+            <EvidencePicker value={evidence} onChange={setEvidence} />
           ) : null}
           <label htmlFor="design-notes" className="app-label">
             {action === "DUMMY_REVISE"

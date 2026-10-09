@@ -329,4 +329,29 @@ export async function runDatabaseMigrations(client: Client) {
           VALUES (13, 'production-mou', ?);`,
     args: [new Date().toISOString()],
   });
+
+  // Versi 14: tautan persetujuan klien (v2.5b, PRD F-18): tabel cloud-only
+  // `approval_tokens` (DDL awal), setelan `approval_web_url` dan
+  // `approval_token_ttl_days`. Nomor dan nama WAJIB sama dengan `turso.rs`.
+  await client.execute({
+    sql: `INSERT OR IGNORE INTO schema_migration (version, name, applied_at)
+          VALUES (14, 'approval-tokens', ?);`,
+    args: [new Date().toISOString()],
+  });
+
+  // Versi 15: dokumen legal (v2.6, PRD F-21): tabel `legal_documents` (DDL
+  // awal) dan izin `legal.manage`. Nomor dan nama WAJIB sama dengan `turso.rs`.
+  await client.execute({
+    sql: `INSERT OR IGNORE INTO schema_migration (version, name, applied_at)
+          VALUES (15, 'legal-documents', ?);`,
+    args: [new Date().toISOString()],
+  });
+
+  // Versi 16: arsip impor sheet (v2.7, PRD F-22): tabel `imported_records`
+  // (DDL awal). Nomor dan nama WAJIB sama dengan `turso.rs`.
+  await client.execute({
+    sql: `INSERT OR IGNORE INTO schema_migration (version, name, applied_at)
+          VALUES (16, 'imported-records', ?);`,
+    args: [new Date().toISOString()],
+  });
 }

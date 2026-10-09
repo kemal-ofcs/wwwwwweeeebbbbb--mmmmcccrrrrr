@@ -23,7 +23,7 @@ use super::{
 /// `CURRENT_SCHEMA_VERSION` di `web-desktop/src/lib/db-schema.ts` setiap kali
 /// migrasi baru ditambahkan, karena keduanya membaca tabel `schema_migration`
 /// yang sama di Turso.
-pub const CLIENT_SCHEMA_VERSION: i64 = 13;
+pub const CLIENT_SCHEMA_VERSION: i64 = 16;
 
 /// Hanya `cloud > client` yang berbahaya; `cloud <= client` adalah kondisi normal.
 fn is_client_schema_outdated(cloud_version: i64) -> bool {
@@ -480,6 +480,56 @@ const SNAPSHOT_TABLES: &[SnapshotTable] = &[
         delete_missing: true,
         read_only: false,
     },
+    // Dokumen legal (v2.6, PRD F-21), satu baris per dokumen per MoU.
+    SnapshotTable {
+        payload_key: "legalDocuments",
+        domain: "legal",
+        table: "legal_documents",
+        columns: &[
+            "id",
+            "mou_id",
+            "sample_request_id",
+            "kind",
+            "status",
+            "reference_no",
+            "certificate_no",
+            "bpom_type",
+            "submitted_on",
+            "issued_on",
+            "expires_on",
+            "notes",
+            "updated_by",
+            "created_at",
+            "updated_at",
+        ],
+        conflict_column: "id",
+        entity_column: "id",
+        delete_missing: true,
+        read_only: false,
+    },
+    // Arsip impor Database Formulasi/Desain (v2.7, PRD F-22).
+    SnapshotTable {
+        payload_key: "importedRecords",
+        domain: "imported-record",
+        table: "imported_records",
+        columns: &[
+            "id",
+            "kind",
+            "client_id",
+            "record_date",
+            "code",
+            "title",
+            "amount_idr",
+            "notes",
+            "source_file",
+            "imported_by",
+            "created_at",
+        ],
+        conflict_column: "id",
+        entity_column: "id",
+        delete_missing: true,
+        read_only: false,
+    },
     // Direktori operator hanya-baca: tidak punya rute outbox, cloud
     // otoritatif penuh. Hanya empat kolom (lihat `SNAPSHOT_SOURCES`).
     SnapshotTable {
@@ -580,6 +630,10 @@ const CANONICAL_SYNC_ROUTES: &[(&str, &str)] = &[
     ("mou", "create"),
     ("mou", "update"),
     ("mou", "transition"),
+    // Dokumen legal (v2.6): catat atau perbarui satu dokumen.
+    ("legal", "record"),
+    // Arsip impor sheet (v2.7): hanya-tambah.
+    ("imported-record", "record"),
     ("media", "upload"),
     // Log audit hanya-dorong: tidak ada di `SNAPSHOT_TABLES` karena tumbuh
     // tanpa batas dan hanya dibaca dari cloud (layar Audit).

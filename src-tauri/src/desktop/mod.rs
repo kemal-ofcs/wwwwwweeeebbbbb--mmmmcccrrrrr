@@ -1,10 +1,13 @@
 pub mod app_identity;
+pub mod approval;
 pub mod clients;
 pub mod samples;
 pub mod commands;
 pub mod config;
 pub mod design;
 pub mod finance;
+pub mod legal;
+pub mod sheet_import;
 pub mod license;
 pub mod models;
 pub mod mou;

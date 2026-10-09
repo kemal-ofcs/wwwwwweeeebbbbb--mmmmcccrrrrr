@@ -5,6 +5,7 @@ import { type AuditActor, writeAudit } from "@/lib/server/audit";
 import { loadBusinessSettings } from "@/lib/server/business-settings";
 import { companyTimezone, getClientCodeSettings } from "@/lib/server/clients";
 import { ApiRequestError } from "@/lib/server/http/api-response";
+import { clientEvidence, insertClientEvidence } from "@/lib/server/media";
 import {
   companyDateStamp,
   formatClientCode,
@@ -38,6 +39,17 @@ import {
  */
 
 type Executor = Client | Transaction;
+
+/**
+ * Pencatat langkah: staf (transaksi sendiri, jawaban klien wajib membawa
+ * tangkapan layar) atau halaman tautan persetujuan (`viaLink`, memakai
+ * transaksi pemanggil supaya token dipakai di transaksi yang sama).
+ */
+interface StepOptions {
+  transaction?: Transaction;
+  viaLink?: boolean;
+}
+
 type Draft = Record<string, unknown>;
 
 function invalid(message: string): never {
@@ -279,12 +291,20 @@ export async function recordMouStep(
   client: Client,
   input: Draft,
   actor: AuditActor,
+  options: StepOptions = {},
 ) {
   const id = typeof input.id === "string" ? input.id.trim() : "";
   const action = typeof input.action === "string" ? input.action : "";
   const notes = normalizeSampleNotes(input.notes);
   if (!notes) invalid("Notes are required, up to 1000 characters.");
-  const transaction = await client.transaction("write");
+  const evidence = clientEvidence(
+    action,
+    input.evidence_base64,
+    options.viaLink === true,
+  );
+  const own = !options.transaction;
+  const transaction =
+    options.transaction ?? (await client.transaction("write"));
   try {
     const current = await findMou(transaction, id);
     const baseStatus = String(current.status);
@@ -308,6 +328,15 @@ export async function recordMouStep(
     });
     if (changed.rowsAffected === 0) {
       throw new ApiRequestError(MOU_CHANGED_ELSEWHERE, 409);
+    }
+    if (evidence) {
+      await insertClientEvidence(
+        transaction,
+        sampleId,
+        evidence,
+        actor.id,
+        stamp,
+      );
     }
     const logId = crypto.randomUUID();
     await transaction.execute({
@@ -335,9 +364,9 @@ export async function recordMouStep(
       to: status,
       notes,
     });
-    await transaction.commit();
+    if (own) await transaction.commit();
     return { status };
   } finally {
-    transaction.close();
+    if (own) transaction.close();
   }
 }

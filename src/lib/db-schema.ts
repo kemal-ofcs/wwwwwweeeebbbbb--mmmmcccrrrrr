@@ -14,7 +14,7 @@ import { runDatabaseMigrations } from "./db-migrations";
  * Rust DAN migrasi `ALTER TABLE` di `db-migrations.ts`, supaya klien mana pun
  * bisa menyembuhkan database buatan klien lain.
  */
-export const CURRENT_SCHEMA_VERSION = 13;
+export const CURRENT_SCHEMA_VERSION = 16;
 
 /** Tabel yang wajib ada sebelum database dianggap siap dipakai. */
 export const REQUIRED_TABLES = [
@@ -71,12 +71,18 @@ export const REQUIRED_TABLES = [
   "design_tickets",
   // MoU produksi (v2.5a, PRD F-20), ikut sinkronisasi.
   "production_mou",
+  // Dokumen legal per MoU (v2.6, PRD F-21), ikut sinkronisasi.
+  "legal_documents",
+  // Arsip impor Database Formulasi/Desain (v2.7, PRD F-22), ikut sinkronisasi.
+  "imported_records",
   // Foto (PRD F-07). Isi gambar tidak pernah ikut snapshot perangkat.
   "media_asset",
   // Notifikasi divisi (PRD FR-08). Ketiganya cloud-only.
   "notification_outbox",
   "telegram_config",
   "notification_seen",
+  // Tautan persetujuan klien (v2.5b, PRD F-18), cloud-only: hanya hash token.
+  "approval_tokens",
 ] as const;
 
 export const REQUIRED_TABLE_COUNT = REQUIRED_TABLES.length;
@@ -194,6 +200,15 @@ export const DESIGN_PERMISSION_SEED_SQL = [
 export const MOU_PERMISSION_SEED_SQL = [
   "INSERT OR IGNORE INTO role_permission (role_id, permission_key, is_allowed, updated_at, updated_by) SELECT r.id, p.permission_key, 1, datetime('now'), 'system' FROM app_role r JOIN app_permission p ON p.permission_key = 'mou.manage' WHERE r.role_key = 'cs' AND NOT EXISTS (SELECT 1 FROM setting_gex_system WHERE key = 'mou_permissions_seeded');",
   "INSERT OR IGNORE INTO setting_gex_system (key, value) VALUES ('mou_permissions_seeded', '1');",
+];
+
+/**
+ * Izin dokumen legal (v2.6, PRD F-21) untuk role divisi Legal, sekali saja.
+ * WAJIB identik dengan seed yang sama di `turso.rs` (dites per karakter).
+ */
+export const LEGAL_PERMISSION_SEED_SQL = [
+  "INSERT OR IGNORE INTO role_permission (role_id, permission_key, is_allowed, updated_at, updated_by) SELECT r.id, p.permission_key, 1, datetime('now'), 'system' FROM app_role r JOIN app_permission p ON p.permission_key IN ('legal.manage', 'samples.view', 'clients.view') WHERE r.role_key = 'legal' AND NOT EXISTS (SELECT 1 FROM setting_gex_system WHERE key = 'legal_permissions_seeded');",
+  "INSERT OR IGNORE INTO setting_gex_system (key, value) VALUES ('legal_permissions_seeded', '1');",
 ];
 
 export async function initDatabaseSchema(client: Client) {
@@ -663,6 +678,40 @@ export async function initDatabaseSchema(client: Client) {
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
       );`,
+    // Dokumen legal (v2.6, PRD F-21): satu baris per dokumen per MoU, tanpa
+    // UNIQUE (`LEGAL_EXISTING_SQL`); suntingan dijaga `updated_at`.
+    `CREATE TABLE IF NOT EXISTS legal_documents (
+      id TEXT PRIMARY KEY,
+      mou_id TEXT NOT NULL,
+      sample_request_id TEXT NOT NULL,
+      kind TEXT NOT NULL,
+      status TEXT NOT NULL,
+      reference_no TEXT NOT NULL DEFAULT '',
+      certificate_no TEXT NOT NULL DEFAULT '',
+      bpom_type TEXT NOT NULL DEFAULT '',
+      submitted_on TEXT NOT NULL DEFAULT '',
+      issued_on TEXT NOT NULL DEFAULT '',
+      expires_on TEXT NOT NULL DEFAULT '',
+      notes TEXT NOT NULL DEFAULT '',
+      updated_by INTEGER,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+      );`,
+    // Arsip impor (v2.7, PRD F-22): Database Formulasi dan Database Desain
+    // lama, hanya-tambah dan hanya-baca, terikat ke klien.
+    `CREATE TABLE IF NOT EXISTS imported_records (
+      id TEXT PRIMARY KEY,
+      kind TEXT NOT NULL,
+      client_id TEXT NOT NULL,
+      record_date TEXT NOT NULL DEFAULT '',
+      code TEXT NOT NULL DEFAULT '',
+      title TEXT NOT NULL,
+      amount_idr INTEGER,
+      notes TEXT NOT NULL DEFAULT '',
+      source_file TEXT NOT NULL DEFAULT '',
+      imported_by INTEGER,
+      created_at TEXT NOT NULL
+      );`,
     // Foto terkompresi (PRD FR-07), terpisah dari baris pemiliknya supaya query
     // daftar tidak membawa biner. Hanya-tambah (D-13). Perangkat menarik kolom
     // selain `data_base64`; isinya diambil satu per satu saat dibuka, lalu
@@ -715,6 +764,24 @@ export async function initDatabaseSchema(client: Client) {
       operator_id INTEGER PRIMARY KEY,
       seen_at TEXT NOT NULL
       );`,
+    // Tautan persetujuan klien (v2.5b, PRD F-18), cloud-only: tidak ada di
+    // `storage.rs` maupun snapshot. Hanya hash token yang disimpan; UNIQUE
+    // aman karena tabel ini tidak pernah didorong dari perangkat lewat outbox.
+    `CREATE TABLE IF NOT EXISTS approval_tokens (
+      id TEXT PRIMARY KEY,
+      token_hash TEXT NOT NULL UNIQUE,
+      entity_type TEXT NOT NULL,
+      entity_id TEXT NOT NULL,
+      sample_request_id TEXT NOT NULL,
+      base_status TEXT NOT NULL,
+      base_revision INTEGER NOT NULL DEFAULT 0,
+      expires_at TEXT NOT NULL,
+      used_at TEXT,
+      revoked_at TEXT,
+      response_json TEXT NOT NULL DEFAULT '',
+      created_by INTEGER,
+      created_at TEXT NOT NULL
+      );`,
     // =========================================
 
     `CREATE INDEX IF NOT EXISTS idx_operator_username ON master_operator(username);`,
@@ -736,6 +803,9 @@ export async function initDatabaseSchema(client: Client) {
     `CREATE INDEX IF NOT EXISTS idx_fund_allocations_fund ON fund_allocations(fund_id);`,
     `CREATE INDEX IF NOT EXISTS idx_design_tickets_sample ON design_tickets(sample_request_id);`,
     `CREATE INDEX IF NOT EXISTS idx_production_mou_sample ON production_mou(sample_request_id);`,
+    `CREATE INDEX IF NOT EXISTS idx_legal_documents_mou ON legal_documents(mou_id, kind);`,
+    `CREATE INDEX IF NOT EXISTS idx_imported_records_client ON imported_records(client_id);`,
+    `CREATE INDEX IF NOT EXISTS idx_approval_tokens_entity ON approval_tokens(entity_type, entity_id);`,
     `CREATE INDEX IF NOT EXISTS idx_media_asset_owner ON media_asset(owner_type, owner_id);`,
     `CREATE INDEX IF NOT EXISTS idx_notification_outbox_due ON notification_outbox(status, next_attempt_at);`,
     `CREATE INDEX IF NOT EXISTS idx_notification_outbox_created ON notification_outbox(created_at);`,
@@ -769,6 +839,7 @@ export async function initDatabaseSchema(client: Client) {
       ('payments.approve_exception', 'Approve payment exceptions', 'Finance', 'Accept a partial payment into installments, or keep an overpayment as a client deposit.', 1, 64),
       ('design.manage', 'Do design work', 'Design', 'Upload mockups, print dummies, and record dummies as sent.', 1, 65),
       ('mou.manage', 'Manage MoUs', 'Samples', 'Draft MoUs for approved samples, send them, and record the client''s answer.', 1, 60),
+      ('legal.manage', 'Record legal documents', 'Legal', 'Record BPOM, halal, and trademark (HKI) filings and certificates.', 1, 67),
       ('design.override_dummy_limit', 'Override the dummy rejection limit', 'Design', 'Print a dummy again after the client has rejected it as many times as the limit allows.', 1, 66),
       ('password_reset.view', 'View password reset history', 'Operators', 'Review who requested a password recovery, with their verification photo.', 1, 62),
       ('password_reset.delete', 'Delete password reset history', 'Operators', 'Delete password recovery records and their photos.', 1, 64),
@@ -836,6 +907,8 @@ export async function initDatabaseSchema(client: Client) {
     ...DESIGN_PERMISSION_SEED_SQL,
     // Izin MoU (v2.5a), sekali saja.
     ...MOU_PERMISSION_SEED_SQL,
+    // Izin dokumen legal (v2.6), sekali saja.
+    ...LEGAL_PERMISSION_SEED_SQL,
 
     // Angka 1 di sini disengaja dan TIDAK boleh diikatkan ke
     // `CURRENT_SCHEMA_VERSION`: baris ini menandai fondasi versi 1, sedangkan

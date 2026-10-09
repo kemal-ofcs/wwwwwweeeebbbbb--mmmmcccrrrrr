@@ -10,6 +10,10 @@ export const SAMPLE_MEDIA_PURPOSES = [
   "REFERENCE",
   "PAYMENT_PROOF",
   "MOCKUP",
+  // Tangkapan layar balasan klien di jalur manual (v2.5b, keputusan N).
+  "CLIENT_RESPONSE",
+  // Foto dokumen legal, opsional saat mencatatnya (v2.6, keputusan F).
+  "LEGAL_DOCUMENT",
 ] as const;
 export type SampleMediaPurpose = (typeof SAMPLE_MEDIA_PURPOSES)[number];
 

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-desktop-list-imported-records"
+description = "Enables the desktop_list_imported_records command without any pre-configured scope."
+commands.allow = ["desktop_list_imported_records"]
+
+[[permission]]
+identifier = "deny-desktop-list-imported-records"
+description = "Denies the desktop_list_imported_records command without any pre-configured scope."
+commands.deny = ["desktop_list_imported_records"]

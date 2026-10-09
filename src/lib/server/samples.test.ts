@@ -7,6 +7,8 @@ import {
   DESIGN_PERMISSION_SEED_SQL,
   FINANCE_PERMISSION_SEED_SQL,
   initDatabaseSchema,
+  LEGAL_PERMISSION_SEED_SQL,
+  MOU_PERMISSION_SEED_SQL,
   RND_PERMISSION_SEED_SQL,
   SAMPLE_PERMISSION_SEED_SQL,
 } from "@/lib/db-schema";
@@ -23,6 +25,9 @@ const business = await import("@/lib/server/business-settings");
 const finance = await import("@/lib/server/finance");
 const media = await import("@/lib/server/media");
 const design = await import("@/lib/validations/design");
+const mou = await import("@/lib/server/mou");
+const approval = await import("@/lib/server/approval");
+const legal = await import("@/lib/server/legal");
 
 let client: Client;
 let directory: string;
@@ -89,12 +94,21 @@ function rndFor(action: string) {
 async function step(id: string, action: string, extra = {}) {
   return samples.recordSampleStep(
     client,
-    { id, action, notes: `Step ${action}`, rnd: rndFor(action), ...extra },
+    {
+      id,
+      action,
+      notes: `Step ${action}`,
+      rnd: rndFor(action),
+      evidence_base64: EVIDENCE,
+      ...extra,
+    },
     CS,
   );
 }
 
 const FINANCE = { id: 1, role: "Finance" };
+// Tangkapan layar balasan klien (v2.5b, keputusan N); diabaikan di langkah lain.
+const EVIDENCE = "UklGRgwAAABXRUJQVlA4TA==";
 const COSTS = {
   raw_material_cost_idr: 8420,
   packaging_cost_idr: 7850,
@@ -213,6 +227,8 @@ describe("tiket sampel, jalur Web", () => {
       ...RND_PERMISSION_SEED_SQL,
       ...FINANCE_PERMISSION_SEED_SQL,
       ...DESIGN_PERMISSION_SEED_SQL,
+      ...MOU_PERMISSION_SEED_SQL,
+      ...LEGAL_PERMISSION_SEED_SQL,
     ]) {
       expect(tursoRs).toContain(`"${sql}"`);
     }
@@ -243,6 +259,8 @@ describe("tiket sampel, jalur Web", () => {
         default_dummy_fee_idr: 0,
         max_dummy_rejections: 0,
         dp_percentage_bp: 5000,
+        approval_web_url: "",
+        approval_token_ttl_days: 3,
       },
       ADMIN,
     );
@@ -727,7 +745,13 @@ describe("tiket sampel, jalur Web", () => {
     ) =>
       samples.recordDesignStep(
         client,
-        { id: ticket.id, action, notes: `Design ${action}`, ...extra },
+        {
+          id: ticket.id,
+          action,
+          notes: `Design ${action}`,
+          evidence_base64: EVIDENCE,
+          ...extra,
+        },
         action === "PRINT_DUMMY" || action === "DUMMY_SENT" ? DESIGNER : CS,
         canOverride,
       );
@@ -856,6 +880,462 @@ describe("tiket sampel, jalur Web", () => {
     expect(override.rows.map((item) => String(item.role_key))).toEqual([
       "superadmin",
       "admin",
+    ]);
+  });
+
+  test("MoU: hanya sesudah klien ACC, harga dari sampel, dummy menahan kirim, DP lunas", async () => {
+    const owner = await newClient("081200000091");
+    const sample = await samples.createSampleRequest(
+      client,
+      draft(owner.id, { is_dummy_required: true, brand_name: "Aura MoU" }),
+      CS,
+    );
+    for (const action of [
+      "SUBMIT_TO_RND",
+      "RND_ACCEPT",
+      "PROCEED",
+      "SAMPLE_READY",
+    ]) {
+      await step(sample.id, action, { lead_time_days: 14 });
+    }
+    await price(sample.id);
+    const terms = {
+      total_units: 10_000,
+      unit_price_idr: 1,
+      production_lead_time_days: 45,
+      regulatory_path: "WITH_BPOM",
+      dp_bp: 9000,
+      notes: "Box 30 ml",
+    };
+    // MoU menunggu klien ACC sampel (keputusan C).
+    await expect(
+      mou.createMou(client, { sample_id: sample.id, terms }, CS, false),
+    ).rejects.toThrow("The client has not approved the sample yet.");
+
+    const ticket = await samples.createDesignTicket(
+      client,
+      { sample_id: sample.id, brief: "Box" },
+      CS,
+    );
+    await media.uploadSampleMedia(
+      client,
+      {
+        sample_id: sample.id,
+        purpose: "MOCKUP",
+        data_base64: "UklGRgwAAABXRUJQVlA4TA==",
+      },
+      { id: 9, role: "Design" },
+    );
+    await step(sample.id, "SAMPLE_SENT");
+    await step(sample.id, "CLIENT_ACC");
+
+    // CS tanpa `finance.manage`: harga dari harga sampel (19.500 / 60% =
+    // 32.500), persen DP dari setelan (50%), bukan dari form (keputusan D).
+    const created = await mou.createMou(
+      client,
+      { sample_id: sample.id, terms },
+      CS,
+      false,
+    );
+    expect(created.mou_number).toMatch(/^MOU-\d{8}-/);
+    const row = async () =>
+      (
+        await client.execute({
+          sql: "SELECT unit_price_idr, total_production_cost_idr, dp_bp, dp_amount_required_idr, status FROM production_mou WHERE id = ?;",
+          args: [created.id],
+        })
+      ).rows[0];
+    const first = await row();
+    expect([
+      first?.unit_price_idr,
+      first?.total_production_cost_idr,
+      first?.dp_bp,
+      first?.dp_amount_required_idr,
+    ]).toEqual([32_500, 325_000_000, 5000, 162_500_000]);
+    await expect(
+      mou.createMou(client, { sample_id: sample.id, terms }, CS, false),
+    ).rejects.toThrow("This sample request already has a MoU.");
+
+    // Finance mengubah harga dan DP; CS tidak bisa mengubah keduanya.
+    await mou.updateMou(
+      client,
+      { id: created.id, terms: { ...terms, unit_price_idr: 30_000 } },
+      FINANCE,
+      false,
+      true,
+    );
+    const priced = await row();
+    expect([priced?.unit_price_idr, priced?.dp_bp]).toEqual([30_000, 9000]);
+
+    // Dummy belum di-ACC: MoU belum boleh dikirim (E-20).
+    const mouStep = (action: string) =>
+      mou.recordMouStep(
+        client,
+        {
+          id: created.id,
+          action,
+          notes: `MoU ${action}`,
+          evidence_base64: EVIDENCE,
+        },
+        CS,
+      );
+    await expect(mouStep("SEND_MOU")).rejects.toThrow(
+      "The client has not approved the packaging dummy yet.",
+    );
+    await settle(sample.id, "DUMMY_FEE", 75_000);
+    for (const action of ["PRINT_DUMMY", "DUMMY_SENT", "DUMMY_ACC"]) {
+      await samples.recordDesignStep(
+        client,
+        { id: ticket.id, action, notes: action, evidence_base64: EVIDENCE },
+        CS,
+        false,
+      );
+    }
+    expect(await mouStep("SEND_MOU")).toEqual({ status: "SENT" });
+    await expect(
+      mou.updateMou(client, { id: created.id, terms }, CS, true, false),
+    ).rejects.toThrow("Only a draft MoU can be changed.");
+    // Jawaban klien yang dicatat staf wajib membawa tangkapan layar (N).
+    await expect(
+      mou.recordMouStep(
+        client,
+        { id: created.id, action: "MOU_REVISE", notes: "Bigger box" },
+        CS,
+      ),
+    ).rejects.toThrow("Attach a screenshot of the client's reply.");
+    expect(await mouStep("MOU_REVISE")).toEqual({ status: "DRAFT" });
+    await mouStep("SEND_MOU");
+    expect(await mouStep("MOU_ACCEPT")).toEqual({ status: "ACCEPTED" });
+
+    // DP dari MoU yang disetujui; lunas = `dp_cleared`.
+    const dp = await finance.createInvoice(
+      client,
+      {
+        ref_type: "DP_PRODUCTION_LEGAL",
+        sample_request_id: sample.id,
+        subtotal_idr: 270_000_000,
+        tax_option_ids: [],
+      },
+      FINANCE,
+    );
+    const fund = await finance.recordIncomingFund(
+      client,
+      { received_on: "2026-10-09", amount_idr: dp.total_idr },
+      FINANCE,
+    );
+    await finance.allocateFund(
+      client,
+      { fund_id: fund.id, invoice_id: dp.id, amount_idr: dp.total_idr },
+      FINANCE,
+    );
+    const detail = await samples.getSampleRequest(client, sample.id, false);
+    expect([detail.mou?.status, detail.mou?.dp_cleared]).toEqual([
+      "ACCEPTED",
+      1,
+    ]);
+    expect(detail.request.dp_paid).toBe(1);
+    const log = detail.status_log
+      .map((entry) => String(entry.action))
+      .filter((action) => action.includes("MOU"))
+      .reverse();
+    expect(log).toEqual([
+      "CREATE_MOU",
+      "SEND_MOU",
+      "MOU_REVISE",
+      "SEND_MOU",
+      "MOU_ACCEPT",
+    ]);
+    // Grup Finance diberi tahu sekali, saat MoU disetujui.
+    const notified = await client.execute(
+      "SELECT event_type FROM notification_outbox WHERE event_type = 'MOU_ACCEPTED';",
+    );
+    expect(notified.rows.length).toBe(1);
+  });
+
+  test("izin MoU untuk role CS dan Operator, sekali saja", async () => {
+    const granted = await client.execute(
+      "SELECT r.role_key FROM app_role r JOIN role_permission rp ON rp.role_id = r.id WHERE rp.permission_key = 'mou.manage' AND rp.is_allowed = 1 ORDER BY r.id;",
+    );
+    expect(granted.rows.map((item) => String(item.role_key))).toEqual([
+      "superadmin",
+      "admin",
+      "operator",
+      "cs",
+    ]);
+  });
+
+  test("tautan persetujuan: sekali pakai, menggantikan tautan lama, gugur bila dicatat manual", async () => {
+    const owner = await newClient("081200000092");
+    const sentSample = async (brand: string) => {
+      const created = await samples.createSampleRequest(
+        client,
+        draft(owner.id, { brand_name: brand }),
+        CS,
+      );
+      for (const action of [
+        "SUBMIT_TO_RND",
+        "RND_ACCEPT",
+        "PROCEED",
+        "SAMPLE_READY",
+      ]) {
+        await step(created.id, action, { lead_time_days: 14 });
+      }
+      await price(created.id);
+      await step(created.id, "SAMPLE_SENT");
+      return created.id;
+    };
+    const tokenOf = (url: string) => new URL(url).searchParams.get("t") ?? "";
+    const link = (id: string) =>
+      approval.createApprovalLink(
+        client,
+        { entity_type: "SAMPLE", entity_id: id },
+        CS,
+      );
+
+    // Tanpa alamat Web: tautan dimatikan (keputusan K).
+    const first = await sentSample("Aura Link");
+    await expect(link(first)).rejects.toThrow(
+      "Set the approval web address in Business settings first.",
+    );
+    await client.execute(
+      "INSERT INTO setting_gex_system (key, value) VALUES ('approval_web_url', 'https://crm.company.id') ON CONFLICT(key) DO UPDATE SET value = excluded.value;",
+    );
+    const old = await link(first);
+    const fresh = await link(first);
+    expect(fresh.url.startsWith("https://crm.company.id/approve?t=")).toBe(
+      true,
+    );
+    // Tautan baru membatalkan tautan lama (keputusan L).
+    expect((await approval.readApproval(client, tokenOf(old.url))).valid).toBe(
+      false,
+    );
+    const view = await approval.readApproval(client, tokenOf(fresh.url));
+    expect(view.valid && view.decisions).toEqual([
+      "APPROVE",
+      "REVISE",
+      "REJECT",
+    ]);
+    expect(view.valid && view.brand_name).toBe("Aura Link");
+
+    await expect(
+      approval.respondApproval(client, tokenOf(fresh.url), {
+        decision: "REVISE",
+        responder_name: "Rina",
+        notes: "",
+      }),
+    ).rejects.toThrow("Tell us what to change.");
+    expect(
+      await approval.respondApproval(client, tokenOf(fresh.url), {
+        decision: "APPROVE",
+        responder_name: "Rina",
+        notes: "",
+      }),
+    ).toEqual({ decision: "APPROVE" });
+    // Sekali pakai.
+    await expect(
+      approval.respondApproval(client, tokenOf(fresh.url), {
+        decision: "APPROVE",
+        responder_name: "Rina",
+        notes: "",
+      }),
+    ).rejects.toThrow("This approval link is not valid or has expired.");
+
+    const detail = await samples.getSampleRequest(client, first, false);
+    expect(detail.request.status).toBe("CLIENT_ACC");
+    const answered = detail.status_log[0];
+    expect([
+      answered?.action,
+      answered?.recorded_by,
+      answered?.on_behalf_of_division,
+      answered?.notes,
+    ]).toEqual([
+      "CLIENT_ACC",
+      null,
+      "Client",
+      "Rina (approval link): Approved",
+    ]);
+    // Jawaban lewat tautan tidak butuh tangkapan layar.
+    const shots = await client.execute({
+      sql: "SELECT COUNT(*) AS total FROM media_asset WHERE owner_id = ? AND purpose = 'CLIENT_RESPONSE';",
+      args: [first],
+    });
+    expect(Number(shots.rows[0]?.total)).toBe(0);
+    const notified = await client.execute(
+      "SELECT COUNT(*) AS total FROM notification_outbox WHERE event_type = 'CLIENT_RESPONDED' AND target_division = 'CS';",
+    );
+    expect(Number(notified.rows[0]?.total)).toBe(1);
+
+    // Tiket yang tidak sedang menunggu klien tidak bisa dibuatkan tautan.
+    await expect(link(first)).rejects.toThrow(
+      "The client cannot answer this yet.",
+    );
+
+    // Jawaban yang dicatat manual (dengan tangkapan layar) menggugurkan tautan.
+    const second = await sentSample("Aura Manual");
+    const pending = await link(second);
+    await step(second, "CLIENT_REVISE");
+    expect(
+      (await approval.readApproval(client, tokenOf(pending.url))).valid,
+    ).toBe(false);
+    const evidence = await client.execute({
+      sql: "SELECT COUNT(*) AS total FROM media_asset WHERE owner_id = ? AND purpose = 'CLIENT_RESPONSE';",
+      args: [second],
+    });
+    expect(Number(evidence.rows[0]?.total)).toBe(1);
+    await client.execute(
+      "UPDATE setting_gex_system SET value = '' WHERE key = 'approval_web_url';",
+    );
+  });
+
+  test("dokumen legal: terkunci sampai DP lunas, SIG sebelum BPOM, satu baris per jenis", async () => {
+    const RND = { id: 3, role: "RnD" };
+    const LEGAL = { id: 4, role: "Legal" };
+    const owner = await newClient("081200000093");
+    const sample = await samples.createSampleRequest(
+      client,
+      draft(owner.id, { brand_name: "Aura Legal" }),
+      CS,
+    );
+    for (const action of [
+      "SUBMIT_TO_RND",
+      "RND_ACCEPT",
+      "PROCEED",
+      "SAMPLE_READY",
+    ]) {
+      await step(sample.id, action, { lead_time_days: 14 });
+    }
+    await price(sample.id);
+    await step(sample.id, "SAMPLE_SENT");
+    await step(sample.id, "CLIENT_ACC");
+    const created = await mou.createMou(
+      client,
+      {
+        sample_id: sample.id,
+        terms: {
+          total_units: 1000,
+          unit_price_idr: 1,
+          production_lead_time_days: 30,
+          regulatory_path: "WITH_BPOM",
+          dp_bp: 5000,
+          notes: "",
+        },
+      },
+      CS,
+      false,
+    );
+    for (const action of ["SEND_MOU", "MOU_ACCEPT"]) {
+      await mou.recordMouStep(
+        client,
+        { id: created.id, action, notes: action, evidence_base64: EVIDENCE },
+        CS,
+      );
+    }
+    const record = (
+      document: Record<string, unknown>,
+      actor = LEGAL,
+      evidence = "",
+    ) =>
+      legal.recordLegalDocument(
+        client,
+        { mou_id: created.id, document, evidence_base64: evidence },
+        actor,
+      );
+    const submitted = {
+      kind: "BPOM",
+      status: "SUBMITTED",
+      reference_no: "REG-1",
+      bpom_type: "MD",
+      submitted_on: "2026-10-01",
+    };
+    // E-21: terkunci sampai DP Produksi & Legal lunas.
+    await expect(
+      record({ kind: "SIG", status: "NOT_REQUIRED", notes: "Cosmetic" }, RND),
+    ).rejects.toThrow(
+      "Waiting for Finance to verify the production & legal down payment.",
+    );
+    await settle(sample.id, "DP_PRODUCTION_LEGAL", 16_250_000);
+    await expect(record(submitted)).rejects.toThrow(
+      "Record the SIG nutrition test first.",
+    );
+    await record(
+      { kind: "SIG", status: "NOT_REQUIRED", notes: "Cosmetic" },
+      RND,
+    );
+    await record(submitted);
+    // Koreksi selama belum terbit memperbarui baris yang sama.
+    await record({ ...submitted, reference_no: "REG-2" });
+    await record(
+      {
+        ...submitted,
+        reference_no: "REG-2",
+        status: "ISSUED",
+        certificate_no: "MD 123",
+        issued_on: "2026-11-01",
+      },
+      LEGAL,
+      EVIDENCE,
+    );
+    await expect(record(submitted)).rejects.toThrow(
+      "This document is already final.",
+    );
+    const rows = await client.execute({
+      sql: "SELECT reference_no, certificate_no, status FROM legal_documents WHERE mou_id = ? AND kind = 'BPOM';",
+      args: [created.id],
+    });
+    expect(
+      rows.rows.map((row) => [
+        row.reference_no,
+        row.certificate_no,
+        row.status,
+      ]),
+    ).toEqual([["REG-2", "MD 123", "ISSUED"]]);
+
+    let detail = await samples.getSampleRequest(client, sample.id, false);
+    expect(detail.request.legal_open).toBe(2);
+    expect(detail.legal_documents.length).toBe(2);
+    await record({
+      kind: "HKI",
+      status: "NOT_REQUIRED",
+      notes: "Client brand",
+    });
+    await record({
+      kind: "HALAL",
+      status: "ISSUED",
+      reference_no: "HL-1",
+      submitted_on: "2026-10-02",
+      certificate_no: "ID-HALAL-1",
+      issued_on: "2026-10-20",
+      expires_on: "2030-10-20",
+    });
+    detail = await samples.getSampleRequest(client, sample.id, false);
+    expect(detail.request.legal_open).toBe(0);
+    expect(
+      detail.status_log
+        .map((entry) => String(entry.action))
+        .filter((action) => action.startsWith("LEGAL_")),
+    ).toEqual([
+      "LEGAL_HALAL",
+      "LEGAL_HKI",
+      "LEGAL_BPOM",
+      "LEGAL_BPOM",
+      "LEGAL_BPOM",
+      "LEGAL_SIG",
+    ]);
+    const photos = await client.execute({
+      sql: "SELECT COUNT(*) AS total FROM media_asset WHERE owner_id = ? AND purpose = 'LEGAL_DOCUMENT';",
+      args: [sample.id],
+    });
+    expect(Number(photos.rows[0]?.total)).toBe(1);
+  });
+
+  test("izin dokumen legal untuk role Legal, sekali saja", async () => {
+    const granted = await client.execute(
+      "SELECT rp.permission_key FROM app_role r JOIN role_permission rp ON rp.role_id = r.id WHERE r.role_key = 'legal' AND rp.is_allowed = 1 AND rp.permission_key NOT IN ('home.view', 'dashboard.view', 'sync.view') ORDER BY rp.permission_key;",
+    );
+    expect(granted.rows.map((row) => String(row.permission_key))).toEqual([
+      "clients.view",
+      "legal.manage",
+      "samples.view",
     ]);
   });
 });

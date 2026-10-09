@@ -12,12 +12,15 @@ use sha2::{Digest, Sha256};
 use url::Url;
 use zeroize::Zeroizing;
 
+use super::approval;
 use super::clients;
 use super::design;
 use super::finance;
+use super::legal;
 use super::mou;
 use super::notifications;
 use super::samples;
+use super::sheet_import;
 use super::models::{CommandError, OperatorUser};
 // Seam transport: dekoder sel Hrana dan jalur SQLite lokal. SQL-nya sama,
 // yang berbeda hanya ke mana ia dikirim.
@@ -690,6 +693,16 @@ const SNAPSHOT_SOURCES: &[SnapshotSource] = &[
         payload_key: "productionMou",
         table: "production_mou",
         sql: "SELECT * FROM production_mou ORDER BY created_at, id;",
+    },
+    SnapshotSource {
+        payload_key: "legalDocuments",
+        table: "legal_documents",
+        sql: "SELECT * FROM legal_documents ORDER BY created_at, id;",
+    },
+    SnapshotSource {
+        payload_key: "importedRecords",
+        table: "imported_records",
+        sql: "SELECT * FROM imported_records ORDER BY created_at, id;",
     },
     // Direktori operator hanya-baca untuk nama PIC dan pilihan pindah PIC saat
     // offline. SENGAJA hanya empat kolom: hash password, email, nomor HP, dan
@@ -1448,6 +1461,7 @@ impl TursoClient {
                 ('payments.approve_exception', 'Approve payment exceptions', 'Finance', 'Accept a partial payment into installments, or keep an overpayment as a client deposit.', 1, 64),
                 ('design.manage', 'Do design work', 'Design', 'Upload mockups, print dummies, and record dummies as sent.', 1, 65),
                 ('mou.manage', 'Manage MoUs', 'Samples', 'Draft MoUs for approved samples, send them, and record the client''s answer.', 1, 60),
+                ('legal.manage', 'Record legal documents', 'Legal', 'Record BPOM, halal, and trademark (HKI) filings and certificates.', 1, 67),
                 ('design.override_dummy_limit', 'Override the dummy rejection limit', 'Design', 'Print a dummy again after the client has rejected it as many times as the limit allows.', 1, 66),
                 ('password_reset.view', 'View password reset history', 'Operators', 'Review who requested a password recovery, with their verification photo.', 1, 62),
                 ('password_reset.delete', 'Delete password reset history', 'Operators', 'Delete password recovery records and their photos.', 1, 64),
@@ -1576,6 +1590,16 @@ impl TursoClient {
                 "INSERT OR IGNORE INTO setting_gex_system (key, value) VALUES ('invoice_permissions_seeded', '1');",
                 vec![],
             ),
+            // Izin dokumen legal (v2.6, PRD F-21), sekali saja. WAJIB identik
+            // dengan `LEGAL_PERMISSION_SEED_SQL` di `db-schema.ts`.
+            Statement::new(
+                "INSERT OR IGNORE INTO role_permission (role_id, permission_key, is_allowed, updated_at, updated_by) SELECT r.id, p.permission_key, 1, datetime('now'), 'system' FROM app_role r JOIN app_permission p ON p.permission_key IN ('legal.manage', 'samples.view', 'clients.view') WHERE r.role_key = 'legal' AND NOT EXISTS (SELECT 1 FROM setting_gex_system WHERE key = 'legal_permissions_seeded');",
+                vec![],
+            ),
+            Statement::new(
+                "INSERT OR IGNORE INTO setting_gex_system (key, value) VALUES ('legal_permissions_seeded', '1');",
+                vec![],
+            ),
             // Izin MoU (v2.5a, PRD F-20), sekali saja. WAJIB identik dengan
             // `MOU_PERMISSION_SEED_SQL` di `db-schema.ts`.
             Statement::new(
@@ -1622,7 +1646,10 @@ impl TursoClient {
                 (10, 'rnd-and-pricing', datetime('now')),
                 (11, 'invoices-and-funds', datetime('now')),
                 (12, 'design-tickets', datetime('now')),
-                (13, 'production-mou', datetime('now'));"#,
+                (13, 'production-mou', datetime('now')),
+                (14, 'approval-tokens', datetime('now')),
+                (15, 'legal-documents', datetime('now')),
+                (16, 'imported-records', datetime('now'));"#,
                 vec![],
             ),
             // ============ DOMAIN MAKLONOS ============
@@ -1883,6 +1910,64 @@ impl TursoClient {
                 );"#,
                 vec![],
             ),
+            // Tautan persetujuan klien (v2.5b, PRD F-18), cloud-only. WAJIB
+            // identik dengan `db-schema.ts`.
+            Statement::new(
+                r#"CREATE TABLE IF NOT EXISTS approval_tokens (
+                    id TEXT PRIMARY KEY,
+                    token_hash TEXT NOT NULL UNIQUE,
+                    entity_type TEXT NOT NULL,
+                    entity_id TEXT NOT NULL,
+                    sample_request_id TEXT NOT NULL,
+                    base_status TEXT NOT NULL,
+                    base_revision INTEGER NOT NULL DEFAULT 0,
+                    expires_at TEXT NOT NULL,
+                    used_at TEXT,
+                    revoked_at TEXT,
+                    response_json TEXT NOT NULL DEFAULT '',
+                    created_by INTEGER,
+                    created_at TEXT NOT NULL
+                );"#,
+                vec![],
+            ),
+            // Arsip impor sheet (v2.7, PRD F-22). WAJIB identik dengan `db-schema.ts`.
+            Statement::new(
+                r#"CREATE TABLE IF NOT EXISTS imported_records (
+                    id TEXT PRIMARY KEY,
+                    kind TEXT NOT NULL,
+                    client_id TEXT NOT NULL,
+                    record_date TEXT NOT NULL DEFAULT '',
+                    code TEXT NOT NULL DEFAULT '',
+                    title TEXT NOT NULL,
+                    amount_idr INTEGER,
+                    notes TEXT NOT NULL DEFAULT '',
+                    source_file TEXT NOT NULL DEFAULT '',
+                    imported_by INTEGER,
+                    created_at TEXT NOT NULL
+                );"#,
+                vec![],
+            ),
+            // Dokumen legal (v2.6, PRD F-21). WAJIB identik dengan `db-schema.ts`.
+            Statement::new(
+                r#"CREATE TABLE IF NOT EXISTS legal_documents (
+                    id TEXT PRIMARY KEY,
+                    mou_id TEXT NOT NULL,
+                    sample_request_id TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    reference_no TEXT NOT NULL DEFAULT '',
+                    certificate_no TEXT NOT NULL DEFAULT '',
+                    bpom_type TEXT NOT NULL DEFAULT '',
+                    submitted_on TEXT NOT NULL DEFAULT '',
+                    issued_on TEXT NOT NULL DEFAULT '',
+                    expires_on TEXT NOT NULL DEFAULT '',
+                    notes TEXT NOT NULL DEFAULT '',
+                    updated_by INTEGER,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );"#,
+                vec![],
+            ),
             // MoU produksi (v2.5a, PRD F-20). WAJIB identik dengan `db-schema.ts`.
             Statement::new(
                 r#"CREATE TABLE IF NOT EXISTS production_mou (
@@ -2056,6 +2141,18 @@ impl TursoClient {
             ),
             Statement::new(
                 "CREATE INDEX IF NOT EXISTS idx_production_mou_sample ON production_mou(sample_request_id);",
+                vec![],
+            ),
+            Statement::new(
+                "CREATE INDEX IF NOT EXISTS idx_approval_tokens_entity ON approval_tokens(entity_type, entity_id);",
+                vec![],
+            ),
+            Statement::new(
+                "CREATE INDEX IF NOT EXISTS idx_legal_documents_mou ON legal_documents(mou_id, kind);",
+                vec![],
+            ),
+            Statement::new(
+                "CREATE INDEX IF NOT EXISTS idx_imported_records_client ON imported_records(client_id);",
                 vec![],
             ),
             Statement::new(
@@ -2286,6 +2383,21 @@ impl TursoClient {
             vec![],
         )
         .await?;
+        self.query_one(
+            "INSERT OR IGNORE INTO schema_migration (version, name, applied_at) VALUES (-2022, 'approval-tokens-v1', datetime('now'));",
+            vec![],
+        )
+        .await?;
+        self.query_one(
+            "INSERT OR IGNORE INTO schema_migration (version, name, applied_at) VALUES (-2023, 'legal-documents-v1', datetime('now'));",
+            vec![],
+        )
+        .await?;
+        self.query_one(
+            "INSERT OR IGNORE INTO schema_migration (version, name, applied_at) VALUES (-2024, 'imported-records-v1', datetime('now'));",
+            vec![],
+        )
+        .await?;
 
         Ok(())
     }
@@ -2454,7 +2566,7 @@ impl TursoClient {
             .query_one(
                 // Sentinel WAJIB dinaikkan setiap kali ensure_schema menambah
                 // tabel atau kolom — nilainya di sini dan pada INSERT harus sama.
-                "SELECT COUNT(*) AS total FROM schema_migration WHERE version = -2021;",
+                "SELECT COUNT(*) AS total FROM schema_migration WHERE version = -2024;",
                 vec![],
             )
             .await
@@ -3209,6 +3321,119 @@ impl TursoClient {
                 Some("The MoU step does not match the company rules in the database.".to_owned())
             }
             Ok(_) => None,
+        })
+    }
+
+    /// Tautan persetujuan klien baru (v2.5b, keputusan J): ditulis langsung di
+    /// cloud, hanya bila hal itu di cloud sedang menunggu jawaban klien, lalu
+    /// tautan lamanya dicabut (keputusan L). Mengembalikan token asli dan
+    /// kedaluwarsanya; database hanya memegang hash-nya. `None` = belum bisa.
+    pub async fn create_approval_link(
+        &self,
+        entity_type: &str,
+        entity_id: &str,
+        ttl_days: i64,
+        created_by: i64,
+    ) -> Result<Option<(String, String)>, CommandError> {
+        self.ensure_schema_current().await?;
+        let token = random_reset_token();
+        let id = random_request_id();
+        let inserted = self
+            .query_one(
+                approval::APPROVAL_INSERT_SQL,
+                vec![
+                    json!(entity_type),
+                    json!(entity_id),
+                    json!(id),
+                    json!(sha256_hex(&token)),
+                    json!(ttl_days),
+                    json!(created_by),
+                ],
+            )
+            .await?
+            .rows_affected;
+        if inserted == 0 {
+            return Ok(None);
+        }
+        self.query_one(
+            approval::APPROVAL_REVOKE_OTHERS_SQL,
+            vec![json!(entity_type), json!(entity_id), json!(id)],
+        )
+        .await?;
+        let expires_at = self
+            .query_one("SELECT expires_at FROM approval_tokens WHERE id = ?;", vec![json!(id)])
+            .await?
+            .to_objects()
+            .into_iter()
+            .next()
+            .and_then(|row| row.get("expires_at").and_then(Value::as_str).map(str::to_owned))
+            .unwrap_or_default();
+        Ok(Some((token, expires_at)))
+    }
+
+    /// Pemeriksaan cloud untuk dokumen legal (v2.6). `Some(pesan)` = konflik:
+    /// gerbang dihitung ulang dengan MoU dan DP di cloud, dua perangkat yang
+    /// mencatat jenis yang sama menjadi konflik, suntingan basi ditolak.
+    async fn legal_guard(&self, entity_key: &str, payload: &Value) -> Result<Option<String>, CommandError> {
+        let payload_text = |key: &str| payload.get(key).and_then(Value::as_str).unwrap_or_default().to_owned();
+        let mou_id = payload_text("mou_id");
+        let kind = payload
+            .get("record")
+            .and_then(|record| record.get("kind"))
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        let mou = self
+            .query_one(format!("{} WHERE m.id = ?;", mou::MOU_LIST_SQL), vec![json!(mou_id)])
+            .await?
+            .to_objects()
+            .into_iter()
+            .next();
+        let Some(mou) = mou else {
+            return Ok(Some("This MoU does not exist in the database.".into()));
+        };
+        let mut statuses = HashMap::new();
+        for row in self
+            .query_one(
+                "SELECT kind, status FROM legal_documents WHERE mou_id = ? ORDER BY created_at DESC, rowid DESC;",
+                vec![json!(mou_id)],
+            )
+            .await?
+            .to_objects()
+        {
+            statuses.insert(
+                row.get("kind").and_then(Value::as_str).unwrap_or_default().to_owned(),
+                row.get("status").and_then(Value::as_str).unwrap_or_default().to_owned(),
+            );
+        }
+        let mou_text = |key: &str| mou.get(key).and_then(Value::as_str).unwrap_or_default().to_owned();
+        let mou_status = mou_text("status");
+        let path = mou_text("regulatory_path");
+        let gate = legal::LegalGateState {
+            mou_status: &mou_status,
+            regulatory_path: &path,
+            dp_cleared: mou.get("dp_cleared").and_then(lenient_i64).unwrap_or(0) != 0,
+            statuses: &statuses,
+        };
+        if let Some(message) = legal::legal_gate_error(&gate, &kind) {
+            return Ok(Some(message.to_owned()));
+        }
+        let existing = self
+            .query_one(legal::LEGAL_EXISTING_SQL, vec![json!(mou_id), json!(kind)])
+            .await?
+            .to_objects()
+            .into_iter()
+            .next();
+        let base = payload_text("base_updated_at");
+        Ok(match existing {
+            Some(row) if row.get("id").and_then(Value::as_str) != Some(entity_key) => {
+                Some("This document was already recorded on another device.".to_owned())
+            }
+            Some(row) if row.get("updated_at").and_then(Value::as_str).unwrap_or_default() != base => {
+                Some(legal::LEGAL_CHANGED_ELSEWHERE.to_owned())
+            }
+            None if !base.is_empty() => Some(legal::LEGAL_CHANGED_ELSEWHERE.to_owned()),
+            _ => None,
         })
     }
 
@@ -4264,6 +4489,21 @@ impl TursoClient {
                 }
             }
 
+            // Dokumen legal (v2.6): gerbang DP dan urutan SIG dihitung ulang
+            // dengan data cloud; jenis yang sama dari dua perangkat = konflik.
+            if domain == "legal" {
+                if let Some(message) = self.legal_guard(entity_key, &parsed_payload).await? {
+                    push_results.push(json!({
+                        "eventId": event_id,
+                        "status": "conflict",
+                        "reason": message.clone(),
+                        "message": message,
+                        "serverRevision": 0
+                    }));
+                    continue;
+                }
+            }
+
             // Foto hanya untuk tiket yang ada di cloud. Event `sample/create`
             // tiba lebih dulu di antrean yang sama, jadi urutannya terjaga.
             if domain == "media" {
@@ -5027,6 +5267,8 @@ fn canonical_sync_route(domain: &str, operation: &str) -> Option<(&'static str, 
         "fund" | "incoming_funds" => "fund",
         "design" | "design_tickets" => "design",
         "mou" | "production_mou" => "mou",
+        "legal" | "legal_documents" => "legal",
+        "imported-record" | "imported_records" => "imported-record",
         _ => return None,
     };
     let canonical_operation = match (canonical_domain, operation) {
@@ -5055,11 +5297,43 @@ fn canonical_sync_route(domain: &str, operation: &str) -> Option<(&'static str, 
         ("mou", "create") => "create",
         ("mou", "update") => "update",
         ("mou", "transition") => "transition",
+        ("legal", "record") => "record",
+        ("imported-record", "record") => "record",
         ("media", "upload") => "upload",
         ("audit", "record") => "record",
         _ => return None,
     };
     Some((canonical_domain, canonical_operation))
+}
+
+/// Tangkapan layar jawaban klien di payload langkah (v2.5b, keputusan N).
+/// Absen = event build lama atau langkah tanpa jawaban klien: diterima,
+/// karena kewajibannya ditegakkan perangkat dan Web saat mencatat.
+async fn insert_client_evidence(
+    turso: &StatementCollector,
+    purpose: &str,
+    payload: &Value,
+    sample_id: &str,
+    recorded_by: Value,
+    at: &str,
+) -> Result<(), CommandError> {
+    let Some(evidence) = payload.get("evidence").filter(|value| value.is_object()) else {
+        return Ok(());
+    };
+    let id = evidence.get("id").and_then(Value::as_str).unwrap_or_default();
+    let data = evidence.get("data_base64").and_then(Value::as_str).unwrap_or_default();
+    let size = samples::validate_media_upload(purpose, data)
+        .map_err(|message| CommandError::new("TURSO_SYNC_PAYLOAD_INVALID", message))?;
+    if id.is_empty() {
+        return Err(CommandError::new("TURSO_SYNC_PAYLOAD_INVALID", "The client reply screenshot is invalid."));
+    }
+    turso
+        .query_one(
+            samples::MEDIA_INSERT_SQL,
+            vec![json!(id), json!(sample_id), json!(purpose), json!(size as i64), json!(data), recorded_by, json!(at)],
+        )
+        .await?;
+    Ok(())
 }
 
 /// Terjemahkan satu event outbox menjadi statement mutasi cloud.
@@ -5504,6 +5778,15 @@ async fn apply_event_to_turso(
                     ],
                 )
                 .await?;
+            insert_client_evidence(
+                turso,
+                "CLIENT_RESPONSE",
+                payload,
+                entity_key,
+                optional_int(log.get("recorded_by")),
+                &changed_at,
+            )
+            .await?;
             // Tiket masuk antrean RnD/Finance (PRD FR-08); status lain tidak
             // menulis apa pun.
             turso
@@ -5700,6 +5983,7 @@ async fn apply_event_to_turso(
                 .filter(|value| value.is_i64())
                 .cloned()
                 .unwrap_or(Value::Null);
+            let recorded_by_evidence = recorded_by.clone();
             turso
                 .query_one(
                     design::DESIGN_TRANSITION_SQL,
@@ -5731,6 +6015,7 @@ async fn apply_event_to_turso(
                     ],
                 )
                 .await?;
+            insert_client_evidence(turso, "CLIENT_RESPONSE", payload, &sample_id, recorded_by_evidence, &changed_at).await?;
             turso
                 .query_one(notifications::NOTIFY_DESIGN_SQL, vec![json!(log_id), json!(entity_key)])
                 .await?;
@@ -5822,6 +6107,98 @@ async fn apply_event_to_turso(
                 )
                 .await?;
         }
+        ("imported-record", "record") => {
+            // Arsip impor (v2.7): hanya-tambah, kiriman ulang diabaikan.
+            if entity_key.is_empty() {
+                return Err(CommandError::new("TURSO_SYNC_PAYLOAD_INVALID", "The imported record is incomplete or invalid."));
+            }
+            if let Some(message) = sheet_import::archive_payload_error(payload) {
+                return Err(CommandError::new("TURSO_SYNC_PAYLOAD_INVALID", message));
+            }
+            let imported_by = payload.get("imported_by").filter(|value| value.is_i64()).cloned().unwrap_or(Value::Null);
+            let amount = payload.get("amount_idr").filter(|value| value.is_i64()).cloned().unwrap_or(Value::Null);
+            turso
+                .query_one(
+                    sheet_import::IMPORTED_RECORD_INSERT_SQL,
+                    vec![
+                        json!(entity_key),
+                        json!(text("kind")),
+                        json!(text("client_id")),
+                        json!(text("record_date")),
+                        json!(text("code")),
+                        json!(text("title")),
+                        amount,
+                        json!(text("notes")),
+                        json!(text("source_file")),
+                        imported_by,
+                        json!(text("created_at")),
+                    ],
+                )
+                .await?;
+        }
+        ("legal", "record") => {
+            // Gerbang dan kecocokan diperiksa `legal_guard`; isiannya
+            // divalidasi ulang dengan aturan yang sama.
+            let record = legal::validate_legal_record(payload.get("record").unwrap_or(&Value::Null))
+                .map_err(|message| CommandError::new("TURSO_SYNC_PAYLOAD_INVALID", message))?;
+            let updated_at = text("updated_at");
+            let sample_id = text("sample_request_id");
+            let mou_id = text("mou_id");
+            let log_id = payload
+                .get("log")
+                .and_then(|log| log.get("id"))
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned();
+            let valid = !entity_key.is_empty()
+                && !sample_id.is_empty()
+                && !mou_id.is_empty()
+                && !log_id.is_empty()
+                && clients::parse_stored_timestamp(&updated_at).is_some();
+            if !valid {
+                return Err(CommandError::new("TURSO_SYNC_PAYLOAD_INVALID", "The legal document is incomplete or invalid."));
+            }
+            let recorded_by = payload.get("recorded_by").filter(|value| value.is_i64()).cloned().unwrap_or(Value::Null);
+            turso
+                .query_one(
+                    legal::LEGAL_UPSERT_SQL,
+                    vec![
+                        json!(entity_key),
+                        json!(mou_id),
+                        json!(sample_id),
+                        json!(record.kind),
+                        json!(record.status),
+                        json!(record.reference_no),
+                        json!(record.certificate_no),
+                        json!(record.bpom_type),
+                        json!(record.submitted_on),
+                        json!(record.issued_on),
+                        json!(record.expires_on),
+                        json!(record.notes),
+                        recorded_by.clone(),
+                        json!(updated_at),
+                        json!(text("base_updated_at")),
+                    ],
+                )
+                .await?;
+            insert_client_evidence(turso, "LEGAL_DOCUMENT", payload, &sample_id, recorded_by.clone(), &updated_at).await?;
+            turso
+                .query_one(
+                    samples::SAMPLE_STATUS_LOG_INSERT_SQL,
+                    vec![
+                        json!(log_id),
+                        json!(sample_id),
+                        json!(text("base_status")),
+                        json!(record.status),
+                        json!(format!("LEGAL_{}", record.kind)),
+                        json!(legal::legal_log_notes(&record)),
+                        json!(""),
+                        recorded_by,
+                        json!(updated_at),
+                    ],
+                )
+                .await?;
+        }
         ("mou", "transition") => {
             let status = text("status");
             let base_status = text("base_status");
@@ -5854,6 +6231,7 @@ async fn apply_event_to_turso(
                 .filter(|value| value.is_i64())
                 .cloned()
                 .unwrap_or(Value::Null);
+            let recorded_by_evidence = recorded_by.clone();
             turso
                 .query_one(
                     mou::MOU_TRANSITION_SQL,
@@ -5876,6 +6254,7 @@ async fn apply_event_to_turso(
                     ],
                 )
                 .await?;
+            insert_client_evidence(turso, "CLIENT_RESPONSE", payload, &sample_id, recorded_by_evidence, &changed_at).await?;
             // MoU disetujui klien: Finance menerbitkan tagihan DP (FR-08).
             turso
                 .query_one(notifications::NOTIFY_MOU_SQL, vec![json!(log_id), json!(entity_key)])
@@ -8733,10 +9112,13 @@ mod tests {
                 "fund_allocations",
                 "design_tickets",
                 "production_mou",
+                "legal_documents",
+                "imported_records",
                 "media_asset",
                 "notification_outbox",
                 "telegram_config",
                 "notification_seen",
+                "approval_tokens",
             ] {
                 let ada: i64 = connection
                     .query_row(
@@ -8988,6 +9370,345 @@ mod tests {
                 .query_row("SELECT COALESCE(SUM(amount_idr), 0) FROM fund_allocations;", [], |row| row.get(0))
                 .expect("alokasi");
             assert_eq!(allocated, 888_000);
+        });
+    }
+
+    /// Impor sheet (v2.7): arsip hanya-tambah diperiksa ulang di cloud, dan
+    /// uang masuk hasil impor memakai rute `fund/record` yang sudah ada.
+    #[test]
+    fn push_impor_sheet_diterima_cloud() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("runtime uji");
+        runtime.block_on(async {
+            let dir = tempfile::tempdir().expect("direktori sementara");
+            let hub = dir.path().join("app-hub.db");
+            let client = TursoClient::local_file(
+                Url::parse(LOCAL_FILE_ORIGIN).expect("origin lokal"),
+                &hub,
+                Client::new(),
+            );
+            client.ensure_schema().await.expect("provisioning lokal");
+            let event = |n: u32, domain: &str, key: &str, payload: Value| {
+                json!({
+                    "eventId": format!("evt-{n:064x}"),
+                    "clientId": format!("desktop-{:064x}", 1),
+                    "domain": domain,
+                    "operation": "record",
+                    "entityKey": key,
+                    "payload": payload,
+                })
+            };
+            let record = json!({
+                "id": "r1",
+                "kind": "FORMULA",
+                "client_id": "c1",
+                "record_date": "2026-09-01",
+                "code": "F-01",
+                "title": "Brightening serum",
+                "amount_idr": 32500,
+                "notes": "",
+                "source_file": "formulasi.csv",
+                "imported_by": 1,
+                "created_at": "2026-10-10 01:00:00",
+            });
+            let mut broken = record.clone();
+            broken["client_id"] = json!("");
+            let events = vec![
+                event(1, "imported-record", "r1", record.clone()),
+                // Kiriman ulang tidak menggandakan baris.
+                event(2, "imported-record", "r1", record),
+                event(3, "imported-record", "r2", broken),
+                event(
+                    4,
+                    "fund",
+                    "f1",
+                    json!({
+                        "id": "f1",
+                        "client_id": "",
+                        "received_on": "2026-10-05",
+                        "amount_idr": 2000000,
+                        "description": "BCA",
+                        "proof": null,
+                        "recorded_by": 1,
+                        "created_at": "2026-10-10 01:00:00",
+                        "imported": true,
+                    }),
+                ),
+            ];
+            let results = client.push_events(&events).await.expect("push");
+            let statuses: Vec<&str> = results
+                .iter()
+                .map(|result| result["status"].as_str().unwrap_or_default())
+                .collect();
+            assert_eq!(statuses, vec!["applied", "applied", "conflict", "applied"]);
+            assert_eq!(results[2]["message"], json!("The imported record is incomplete or invalid."));
+            let connection = rusqlite::Connection::open(&hub).expect("buka hub");
+            let count = |sql: &str| -> i64 { connection.query_row(sql, [], |row| row.get(0)).expect("hitung") };
+            assert_eq!(count("SELECT COUNT(*) FROM imported_records WHERE amount_idr = 32500;"), 1);
+            assert_eq!(count("SELECT COUNT(*) FROM incoming_funds WHERE status = 'ACTIVE';"), 1);
+        });
+    }
+
+    /// Dokumen legal (v2.6): gerbang dihitung ulang di cloud, jenis yang sama
+    /// dari dua perangkat dan suntingan basi menjadi konflik.
+    #[test]
+    fn push_dokumen_legal_dijaga_cloud() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("runtime uji");
+        runtime.block_on(async {
+            let dir = tempfile::tempdir().expect("direktori sementara");
+            let hub = dir.path().join("app-hub.db");
+            let client = TursoClient::local_file(
+                Url::parse(LOCAL_FILE_ORIGIN).expect("origin lokal"),
+                &hub,
+                Client::new(),
+            );
+            client.ensure_schema().await.expect("provisioning lokal");
+            rusqlite::Connection::open(&hub)
+                .expect("buka hub")
+                .execute_batch(
+                    "INSERT INTO sample_requests (id, client_id, product_category_option_id, sample_qty, brand_name, packaging, deadline_at, ship_to_address, status, status_changed_at, created_at, updated_at) VALUES ('s1', 'c1', 'cat', 1, 'Aura', 'Box', '2026-10-31', 'Jl. A', 'CLIENT_ACC', '2026-10-09 01:00:00', '2026-10-09 01:00:00', '2026-10-09 01:00:00');
+                     INSERT INTO production_mou (id, mou_number, sample_request_id, client_id, total_units, unit_price_idr, total_production_cost_idr, production_lead_time_days, regulatory_path, dp_bp, dp_amount_required_idr, status, status_changed_at, created_at, updated_at) VALUES ('m1', 'MOU-1', 's1', 'c1', 10, 1000, 10000, 30, 'WITH_BPOM', 5000, 5000, 'ACCEPTED', '2026-10-09 01:00:00', '2026-10-09 01:00:00', '2026-10-09 01:00:00');
+                     INSERT INTO invoices (id, invoice_number, client_id, sample_request_id, ref_type, subtotal_idr, total_idr, issued_on, due_on, created_at, updated_at) VALUES ('i1', 'INV-1', 'c1', 's1', 'DP_PRODUCTION_LEGAL', 5000, 5000, '2026-10-09', '2026-10-16', '2026-10-09 01:00:00', '2026-10-09 01:00:00');
+                     INSERT INTO incoming_funds (id, received_on, amount_idr, created_at, updated_at) VALUES ('f1', '2026-10-09', 5000, '2026-10-09 01:00:00', '2026-10-09 01:00:00');
+                     INSERT INTO fund_allocations (id, fund_id, invoice_id, amount_idr, recorded_at) VALUES ('a1', 'f1', 'i1', 5000, '2026-10-09 01:00:00');",
+                )
+                .expect("seed");
+            let mut counter = 0u32;
+            let mut event = |key: &str, record: Value, base: &str| {
+                counter += 1;
+                json!({
+                    "eventId": format!("evt-{counter:064x}"),
+                    "clientId": format!("desktop-{:064x}", 1),
+                    "domain": "legal",
+                    "operation": "record",
+                    "entityKey": key,
+                    "payload": {
+                        "id": key,
+                        "mou_id": "m1",
+                        "sample_request_id": "s1",
+                        "record": record,
+                        "base_status": "",
+                        "base_updated_at": base,
+                        "updated_at": format!("2026-10-09 02:0{counter}:00"),
+                        "recorded_by": 4,
+                        "log": { "id": format!("log-{counter}") },
+                    },
+                })
+            };
+            let sig = json!({ "kind": "SIG", "status": "NOT_REQUIRED", "notes": "Cosmetic" });
+            let bpom = json!({ "kind": "BPOM", "status": "SUBMITTED", "reference_no": "REG-1", "bpom_type": "NA", "submitted_on": "2026-10-01" });
+            let events = vec![
+                event("b0", bpom.clone(), ""),
+                event("g1", sig.clone(), ""),
+                // Perangkat kedua mencatat SIG yang sama saat offline.
+                event("g2", sig, ""),
+                event("b1", bpom.clone(), ""),
+                // Suntingan dari perangkat yang masih melihat versi sebelum b1.
+                event("b1", bpom.clone(), ""),
+                event("b2", bpom, ""),
+            ];
+            let results = client.push_events(&events).await.expect("push");
+            let statuses: Vec<&str> = results
+                .iter()
+                .map(|result| result["status"].as_str().unwrap_or_default())
+                .collect();
+            assert_eq!(
+                statuses,
+                vec!["conflict", "applied", "conflict", "applied", "conflict", "conflict"]
+            );
+            assert_eq!(results[0]["message"], json!("Record the SIG nutrition test first."));
+            assert_eq!(results[2]["message"], json!("This document is already final."));
+            assert_eq!(results[4]["message"], json!(legal::LEGAL_CHANGED_ELSEWHERE));
+            assert_eq!(results[5]["message"], json!("This document was already recorded on another device."));
+            let connection = rusqlite::Connection::open(&hub).expect("buka hub");
+            let rows: i64 = connection
+                .query_row("SELECT COUNT(*) FROM legal_documents WHERE mou_id = 'm1';", [], |row| row.get(0))
+                .expect("dokumen");
+            assert_eq!(rows, 2);
+        });
+    }
+
+    /// Tautan persetujuan (v2.5b): hanya untuk hal yang sedang menunggu klien
+    /// di cloud, tautan baru mencabut yang lama, database hanya memegang hash;
+    /// tangkapan layar jawaban klien di payload langkah ikut tersimpan.
+    #[test]
+    fn tautan_persetujuan_dan_bukti_jawaban_di_cloud() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("runtime uji");
+        runtime.block_on(async {
+            let dir = tempfile::tempdir().expect("direktori sementara");
+            let hub = dir.path().join("app-hub.db");
+            let client = TursoClient::local_file(
+                Url::parse(LOCAL_FILE_ORIGIN).expect("origin lokal"),
+                &hub,
+                Client::new(),
+            );
+            client.ensure_schema().await.expect("provisioning lokal");
+            rusqlite::Connection::open(&hub)
+                .expect("buka hub")
+                .execute_batch(
+                    "INSERT INTO sample_requests (id, client_id, product_category_option_id, sample_qty, brand_name, packaging, deadline_at, ship_to_address, status, status_changed_at, created_at, updated_at) VALUES ('s1', 'c1', 'cat', 1, 'Aura', 'Box', '2026-10-31', 'Jl. A', 'SAMPLE_SENT', '2026-10-09 01:00:00', '2026-10-09 01:00:00', '2026-10-09 01:00:00'), ('s2', 'c1', 'cat', 1, 'Bina', 'Box', '2026-10-31', 'Jl. A', 'IN_RND', '2026-10-09 01:00:00', '2026-10-09 01:00:00', '2026-10-09 01:00:00');
+                     INSERT INTO design_tickets (id, sample_request_id, brief, status, status_changed_at, created_at, updated_at) VALUES ('d1', 's1', 'Box', 'DUMMY_SENT', '2026-10-09 01:00:00', '2026-10-09 01:00:00', '2026-10-09 01:00:00');",
+                )
+                .expect("seed");
+
+            let (old, _) = client
+                .create_approval_link("SAMPLE", "s1", 3, 2)
+                .await
+                .expect("tautan")
+                .expect("tiket menunggu klien");
+            let (fresh, expires_at) = client
+                .create_approval_link("SAMPLE", "s1", 3, 2)
+                .await
+                .expect("tautan")
+                .expect("tiket menunggu klien");
+            assert_ne!(old, fresh);
+            assert!(!expires_at.is_empty());
+            assert!(client
+                .create_approval_link("SAMPLE", "s2", 3, 2)
+                .await
+                .expect("tautan")
+                .is_none());
+
+            let connection = rusqlite::Connection::open(&hub).expect("buka hub");
+            let (total, active_hash): (i64, String) = connection
+                .query_row(
+                    "SELECT (SELECT COUNT(*) FROM approval_tokens), token_hash FROM approval_tokens WHERE revoked_at IS NULL;",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .expect("token");
+            assert_eq!(total, 2);
+            assert_eq!(active_hash, sha256_hex(&fresh));
+
+            let event = json!({
+                "eventId": format!("evt-{:064x}", 1),
+                "clientId": format!("desktop-{:064x}", 1),
+                "domain": "design",
+                "operation": "transition",
+                "entityKey": "d1",
+                "payload": {
+                    "id": "d1",
+                    "sample_request_id": "s1",
+                    "action": "DUMMY_REVISE",
+                    "base_status": "DUMMY_SENT",
+                    "base_rejection_count": 0,
+                    "status": "DUMMY_REVISION",
+                    "rejection_count": 1,
+                    "tracking_no": null,
+                    "override_limit": false,
+                    "changed_at": "2026-10-09 03:00:00",
+                    "log": { "id": "l1", "notes": "Logo bigger", "recorded_by": 2 },
+                    "evidence": { "id": "e1", "data_base64": "UklGRgwAAABXRUJQVlA4TA==" },
+                },
+            });
+            let results = client.push_events(&[event]).await.expect("push");
+            assert_eq!(results[0]["status"], json!("applied"));
+            let purpose: String = connection
+                .query_row("SELECT purpose FROM media_asset WHERE id = 'e1' AND owner_id = 's1';", [], |row| row.get(0))
+                .expect("bukti");
+            assert_eq!(purpose, "CLIENT_RESPONSE");
+        });
+    }
+
+    /// MoU (v2.5a): satu MoU aktif per tiket sampel, suntingan draf yang
+    /// basi dan langkah ganda menjadi konflik, total dan DP dihitung cloud.
+    #[test]
+    fn push_mou_dijaga_cloud() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("runtime uji");
+        runtime.block_on(async {
+            let dir = tempfile::tempdir().expect("direktori sementara");
+            let hub = dir.path().join("app-hub.db");
+            let client = TursoClient::local_file(
+                Url::parse(LOCAL_FILE_ORIGIN).expect("origin lokal"),
+                &hub,
+                Client::new(),
+            );
+            client.ensure_schema().await.expect("provisioning lokal");
+            rusqlite::Connection::open(&hub)
+                .expect("buka hub")
+                .execute_batch(
+                    "INSERT INTO sample_requests (id, client_id, product_category_option_id, sample_qty, brand_name, packaging, deadline_at, ship_to_address, status, status_changed_at, created_at, updated_at) VALUES ('s1', 'c1', 'cat', 1, 'Aura', 'Box', '2026-10-31', 'Jl. A', 'CLIENT_ACC', '2026-10-09 01:00:00', '2026-10-09 01:00:00', '2026-10-09 01:00:00');",
+                )
+                .expect("seed tiket");
+            let mut counter = 0u32;
+            let mut event = |domain: &str, operation: &str, key: &str, payload: Value| {
+                counter += 1;
+                json!({
+                    "eventId": format!("evt-{counter:064x}"),
+                    "clientId": format!("desktop-{:064x}", 1),
+                    "domain": domain,
+                    "operation": operation,
+                    "entityKey": key,
+                    "payload": payload,
+                })
+            };
+            let terms = |units: i64| {
+                json!({ "total_units": units, "unit_price_idr": 30_000, "production_lead_time_days": 45, "regulatory_path": "WITH_BPOM", "dp_bp": 5000, "notes": "" })
+            };
+            let create = |key: &str| {
+                json!({ "id": key, "mou_number": format!("MOU-20261009-A1{key}"), "sample_request_id": "s1", "client_id": "c1", "terms": terms(1000), "created_by": 2, "created_at": "2026-10-09 02:00:00", "log": { "id": format!("log-{key}") } })
+            };
+            let update = |base: &str, updated: &str| {
+                // Total palsu di payload diabaikan; cloud menghitungnya sendiri.
+                let mut changed = terms(2000);
+                changed["total_production_cost_idr"] = json!(1);
+                json!({ "id": "m1", "sample_request_id": "s1", "terms": changed, "base_updated_at": base, "updated_at": updated })
+            };
+            let step = |action: &str, base: &str, status: &str, log: &str| {
+                json!({ "id": "m1", "sample_request_id": "s1", "action": action, "base_status": base, "status": status, "changed_at": "2026-10-09 03:00:00", "log": { "id": log, "notes": format!("Step {action}"), "recorded_by": 2 } })
+            };
+            let events = vec![
+                event("mou", "create", "m1", create("m1")),
+                // Perangkat kedua membuat MoU untuk tiket yang sama saat offline.
+                event("mou", "create", "m2", create("m2")),
+                event("mou", "update", "m1", update("2026-10-09 02:00:00", "2026-10-09 02:05:00")),
+                // Suntingan dari perangkat yang masih melihat versi lama.
+                event("mou", "update", "m1", update("2026-10-09 02:00:00", "2026-10-09 02:06:00")),
+                event("mou", "transition", "m1", step("SEND_MOU", "DRAFT", "SENT", "l1")),
+                event("mou", "transition", "m1", step("MOU_ACCEPT", "DRAFT", "ACCEPTED", "l2")),
+                event("mou", "transition", "m1", step("MOU_ACCEPT", "SENT", "ACCEPTED", "l3")),
+            ];
+            let results = client.push_events(&events).await.expect("push");
+            let statuses: Vec<&str> = results
+                .iter()
+                .map(|result| result["status"].as_str().unwrap_or_default())
+                .collect();
+            assert_eq!(
+                statuses,
+                vec!["applied", "conflict", "applied", "conflict", "applied", "conflict", "applied"]
+            );
+            assert_eq!(results[1]["message"], json!("This sample request already has a MoU."));
+            assert_eq!(results[3]["message"], json!(mou::MOU_CHANGED_ELSEWHERE));
+            assert_eq!(results[5]["message"], json!(mou::MOU_CHANGED_ELSEWHERE));
+
+            let connection = rusqlite::Connection::open(&hub).expect("buka hub");
+            let row: (String, i64, i64) = connection
+                .query_row(
+                    "SELECT status, total_production_cost_idr, dp_amount_required_idr FROM production_mou WHERE id = 'm1';",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .expect("MoU");
+            assert_eq!(row, ("ACCEPTED".into(), 60_000_000, 30_000_000));
+            let logs: i64 = connection
+                .query_row("SELECT COUNT(*) FROM sample_status_log WHERE sample_request_id = 's1';", [], |row| row.get(0))
+                .expect("linimasa");
+            assert_eq!(logs, 3);
+            let notified: i64 = connection
+                .query_row(
+                    "SELECT COUNT(*) FROM notification_outbox WHERE event_type = 'MOU_ACCEPTED' AND target_division = 'FINANCE';",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("notifikasi");
+            assert_eq!(notified, 1);
         });
     }
 

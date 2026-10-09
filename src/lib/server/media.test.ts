@@ -188,6 +188,8 @@ describe("foto tiket, jalur Web", () => {
         default_dummy_fee_idr: 0,
         max_dummy_rejections: 0,
         dp_percentage_bp: 5000,
+        approval_web_url: "",
+        approval_token_ttl_days: 3,
       },
       ADMIN,
     );

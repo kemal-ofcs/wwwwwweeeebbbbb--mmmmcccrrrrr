@@ -21,12 +21,17 @@ import {
   reassignLead,
   recordLeadInteraction,
 } from "@/lib/gateways/clients";
+import {
+  type ImportedRecord,
+  listImportedRecords,
+} from "@/lib/gateways/sheet-import";
 import { formatDateTime } from "@/lib/utils/format";
 import {
   INTERACTION_NOTES_MAX,
   type LeadInteractionDirection,
   type LeadInteractionKind,
 } from "@/lib/validations/client";
+import { formatRupiah } from "@/lib/validations/sample";
 
 /**
  * Panel satu lead: ringkasan, catat interaksi, riwayat, dan pindah PIC
@@ -79,6 +84,7 @@ export function LeadDetail({
   const { user } = useAuth();
   const canRequestSample = hasPermission(user, "samples.manage");
   const [history, setHistory] = useState<LeadInteractionRecord[]>([]);
+  const [imported, setImported] = useState<ImportedRecord[]>([]);
   const [operators, setOperators] = useState<OperatorDirectoryEntry[]>([]);
   const [loading, setLoading] = useState(true);
   const [direction, setDirection] =
@@ -109,6 +115,13 @@ export function LeadDetail({
   useEffect(() => {
     void loadHistory();
   }, [loadHistory]);
+
+  // Arsip Database Formulasi/Desain lama (v2.7); kosong = tidak ada.
+  useEffect(() => {
+    void listImportedRecords(client.id)
+      .then(setImported)
+      .catch(() => setImported([]));
+  }, [client.id]);
 
   useEffect(() => {
     if (!canReassign) return;
@@ -384,6 +397,40 @@ export function LeadDetail({
             </ol>
           )}
         </section>
+
+        {imported.length > 0 ? (
+          <section className="border-t border-surface-container pt-4">
+            <h3 className="text-body-md font-semibold text-on-surface">
+              Imported history
+            </h3>
+            <p className="mt-1 text-body-sm text-on-surface-variant">
+              Formulas and designs brought in from the old sheets. Read only.
+            </p>
+            <ol className="mt-2 space-y-3">
+              {imported.map((item) => (
+                <li key={item.id} className="text-body-sm">
+                  <p className="font-semibold text-on-surface">
+                    {item.title}
+                    <span className="font-normal text-on-surface-variant">
+                      {" "}
+                      · {item.kind === "FORMULA" ? "Formula" : "Design"}
+                      {item.code ? ` ${item.code}` : ""}
+                      {item.record_date ? ` · ${item.record_date}` : ""}
+                      {item.amount_idr !== null
+                        ? ` · ${formatRupiah(item.amount_idr)}`
+                        : ""}
+                    </span>
+                  </p>
+                  {item.notes ? (
+                    <p className="whitespace-pre-line text-on-surface">
+                      {item.notes}
+                    </p>
+                  ) : null}
+                </li>
+              ))}
+            </ol>
+          </section>
+        ) : null}
       </div>
     </Modal>
   );

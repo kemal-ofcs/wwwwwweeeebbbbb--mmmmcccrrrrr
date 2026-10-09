@@ -122,10 +122,18 @@ function editDistance(a: string, b: string) {
 export function suggestHeaderMapping(
   headers: readonly string[],
 ): Record<ImportFieldKey, number> {
+  return matchHeaders(headers, IMPORT_FIELDS);
+}
+
+/** Aturan `suggestHeaderMapping` untuk daftar kolom lain (impor sheet v2.7). */
+export function matchHeaders<K extends string>(
+  headers: readonly string[],
+  fields: readonly { key: K; header: string }[],
+): Record<K, number> {
   const keys = headers.map(headerKey);
   const used = new Set<number>();
-  const mapping = {} as Record<ImportFieldKey, number>;
-  for (const field of IMPORT_FIELDS) {
+  const mapping = {} as Record<K, number>;
+  for (const field of fields) {
     const target = headerKey(field.header);
     let best = -1;
     let bestDistance = 3;

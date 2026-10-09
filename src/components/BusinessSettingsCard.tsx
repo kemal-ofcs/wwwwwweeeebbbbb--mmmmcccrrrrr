@@ -9,6 +9,7 @@ import {
   saveBusinessSettings,
 } from "@/lib/gateways/samples";
 import {
+  APPROVAL_TTL_DAYS_LIMIT,
   DEFAULT_BUSINESS_SETTINGS,
   FREE_REVISION_LIMIT_MAX,
   INVOICE_DUE_DAYS_LIMIT,
@@ -250,6 +251,67 @@ export function BusinessSettingsCard({ canManage }: { canManage: boolean }) {
               <span className="text-body-sm font-normal text-on-surface-variant">
                 0 means no limit.
               </span>
+            </label>
+            <label className="app-label grid gap-1.5">
+              MoU down payment (%)
+              <input
+                required
+                type="number"
+                min={0.01}
+                max={100}
+                step={0.01}
+                value={settings.dp_percentage_bp / 100}
+                onChange={(event) =>
+                  setSettings({
+                    ...settings,
+                    dp_percentage_bp: Math.round(
+                      Number(event.target.value) * 100,
+                    ),
+                  })
+                }
+                className="app-input font-normal"
+              />
+              <span className="text-body-sm font-normal text-on-surface-variant">
+                Copied into each new MoU. Finance can change it per MoU.
+              </span>
+            </label>
+            <label className="app-label grid gap-1.5 sm:col-span-2">
+              Approval web address
+              <input
+                type="url"
+                inputMode="url"
+                value={settings.approval_web_url}
+                placeholder="https://crm.your-company.id"
+                onChange={(event) =>
+                  setSettings({
+                    ...settings,
+                    approval_web_url: event.target.value,
+                  })
+                }
+                className="app-input font-normal"
+              />
+              <span className="text-body-sm font-normal text-on-surface-variant">
+                The Web app clients open to approve samples, dummies, and MoUs.
+                Leave it empty to use WhatsApp messages only.
+              </span>
+            </label>
+            <label className="app-label grid gap-1.5">
+              Approval links last (days)
+              <input
+                required
+                type="number"
+                min={1}
+                max={APPROVAL_TTL_DAYS_LIMIT}
+                step={1}
+                value={settings.approval_token_ttl_days}
+                onChange={(event) =>
+                  setSettings({
+                    ...settings,
+                    approval_token_ttl_days: wholeNumber(event.target.value),
+                  })
+                }
+                className="app-input font-normal"
+              />
             </label>
             <label className="app-label grid gap-1.5">
               Offline sign-in period (days)

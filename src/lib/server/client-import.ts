@@ -233,7 +233,8 @@ async function planImport(
 export async function importClients(
   client: Client,
   body: Record<string, unknown>,
-  actor: AuditActor,
+  // Selalu staf: `id` dipakai sebagai PIC bawaan baris tanpa PIC.
+  actor: AuditActor & { id: number },
 ): Promise<ImportReport> {
   const invalid = (message: string) => new ApiRequestError(message, 400);
   const dryRun = body.dry_run !== false;

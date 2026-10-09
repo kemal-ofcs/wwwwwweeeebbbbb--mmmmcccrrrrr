@@ -50,6 +50,8 @@ export const NOTIFICATION_EVENT_TYPES = [
   "DUMMY_REVISED",
   // MoU disetujui klien: Finance menerbitkan tagihan DP (v2.5a).
   "MOU_ACCEPTED",
+  // Klien menjawab lewat tautan persetujuan, ke grup CS (v2.5b).
+  "CLIENT_RESPONDED",
 ] as const;
 export type NotificationEventType = (typeof NOTIFICATION_EVENT_TYPES)[number];
 
@@ -158,6 +160,17 @@ function orDash(value: string) {
   return value.trim() === "" ? "-" : value;
 }
 
+const APPROVAL_KIND_LABEL: Record<string, string> = {
+  SAMPLE: "Sample",
+  DUMMY: "Packaging dummy",
+  MOU: "MoU",
+};
+const APPROVAL_DECISION_LABEL: Record<string, string> = {
+  APPROVE: "approved",
+  REVISE: "needs changes",
+  REJECT: "rejected",
+};
+
 export function renderNotification(
   eventType: string,
   payload: Payload,
@@ -232,6 +245,12 @@ export function renderNotification(
         `Notes: ${orDash(text(payload, "revision_notes"))}`,
         `Since ${when}`,
       ].join("\n");
+    case "CLIENT_RESPONDED":
+      return [
+        `The client answered through the approval link: ${sample}`,
+        `${APPROVAL_KIND_LABEL[text(payload, "entity_type")] ?? text(payload, "entity_type")} ${APPROVAL_DECISION_LABEL[text(payload, "decision")] ?? text(payload, "decision")} by ${orDash(text(payload, "responder"))}`,
+        `Answered ${when}`,
+      ].join("\n");
     case "MOU_ACCEPTED":
       return [
         `MoU accepted, issue the down payment invoice: ${sample}`,
@@ -296,6 +315,13 @@ export const NOTIFY_SAMPLE_PRICED_SQL =
  */
 export const NOTIFY_DESIGN_SQL =
   "INSERT INTO notification_outbox (id, event_type, target_division, payload_json, occurred_at, status, attempts, next_attempt_at, created_at) SELECT 'design:' || ?1, CASE d.status WHEN 'MOCKUP' THEN 'DESIGN_REQUESTED' ELSE 'DUMMY_REVISED' END, 'DESIGN', json_object('sample_id', s.id, 'client_code', COALESCE(c.client_code, ''), 'client_name', COALESCE(c.name, ''), 'brand_name', s.brand_name, 'brief', d.brief, 'revision_notes', d.revision_notes, 'rejection_count', d.dummy_rejection_count), d.status_changed_at, CASE WHEN EXISTS (SELECT 1 FROM telegram_config t WHERE t.id = 'default' AND t.is_active = 1 AND TRIM(COALESCE(t.bot_token, '')) <> '') AND TRIM(COALESCE((SELECT g.value FROM setting_gex_system g WHERE g.key = 'telegram_chat_id_design'), '')) <> '' THEN 'PENDING' ELSE 'SKIPPED' END, 0, datetime('now'), datetime('now') FROM design_tickets d JOIN sample_requests s ON s.id = d.sample_request_id LEFT JOIN clients c ON c.id = s.client_id WHERE d.id = ?2 AND d.status IN ('MOCKUP', 'DUMMY_REVISION') LIMIT 1 ON CONFLICT(id) DO NOTHING;";
+
+/**
+ * Klien menjawab lewat tautan persetujuan, ke grup CS (v2.5b). ?1 = id token,
+ * ditulis Web di transaksi yang sama dengan jawabannya.
+ */
+export const NOTIFY_CLIENT_RESPONSE_SQL =
+  "INSERT INTO notification_outbox (id, event_type, target_division, payload_json, occurred_at, status, attempts, next_attempt_at, created_at) SELECT 'approval:' || a.id, 'CLIENT_RESPONDED', 'CS', json_object('sample_id', s.id, 'client_code', COALESCE(c.client_code, ''), 'client_name', COALESCE(c.name, ''), 'brand_name', s.brand_name, 'entity_type', a.entity_type, 'decision', json_extract(a.response_json, '$.decision'), 'responder', json_extract(a.response_json, '$.responder_name')), a.used_at, CASE WHEN EXISTS (SELECT 1 FROM telegram_config t WHERE t.id = 'default' AND t.is_active = 1 AND TRIM(COALESCE(t.bot_token, '')) <> '') AND TRIM(COALESCE((SELECT g.value FROM setting_gex_system g WHERE g.key = 'telegram_chat_id_cs'), '')) <> '' THEN 'PENDING' ELSE 'SKIPPED' END, 0, datetime('now'), datetime('now') FROM approval_tokens a JOIN sample_requests s ON s.id = a.sample_request_id LEFT JOIN clients c ON c.id = s.client_id WHERE a.id = ?1 AND a.used_at IS NOT NULL LIMIT 1 ON CONFLICT(id) DO NOTHING;";
 
 /** MoU disetujui klien, ke grup Finance (v2.5a). ?1 = id log, ?2 = id MoU. */
 export const NOTIFY_MOU_SQL =

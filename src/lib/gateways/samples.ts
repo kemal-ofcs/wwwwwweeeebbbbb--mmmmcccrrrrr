@@ -5,6 +5,7 @@ import type { InvoiceRecord } from "@/lib/gateways/finance";
 import { isDesktopRuntime } from "@/lib/runtime/app-runtime";
 import { invokeDesktop } from "@/lib/runtime/desktop-commands";
 import type { DesignAction, DesignStatus } from "@/lib/validations/design";
+import type { LegalRecord } from "@/lib/validations/legal";
 import type {
   MouAction,
   MouStatus,
@@ -83,6 +84,8 @@ export interface SampleRequestRecord {
   mou_dp_idr: number | null;
   /** 1 = tagihan DP Produksi & Legal lunas atau dijadwal ulang. */
   dp_paid: number;
+  /** Dokumen legal wajib yang belum final (v2.6); null = belum ada MoU disetujui. */
+  legal_open: number | null;
 }
 
 /**
@@ -186,6 +189,21 @@ export interface SampleDetail {
   mou: MouRecord | null;
   /** Setelan persen DP bawaan, untuk form MoU baru. */
   dp_percentage_bp: number;
+  /** Alamat Web persetujuan disetel: tombol tautan ditawarkan (v2.5b). */
+  approval_link_enabled: boolean;
+  /** Dokumen legal semua MoU tiket ini (v2.6). */
+  legal_documents: LegalDocumentRecord[];
+}
+
+/** Satu baris `LEGAL_LIST_SQL` (v2.6, PRD F-21). */
+export interface LegalDocumentRecord extends LegalRecord {
+  id: string;
+  mou_id: string;
+  sample_request_id: string;
+  updated_by: number | null;
+  updated_by_name: string | null;
+  created_at: string;
+  updated_at: string;
 }
 
 /** Satu baris `MOU_LIST_SQL` (v2.5a, PRD F-20). */
@@ -347,6 +365,8 @@ export interface SampleStepInput {
   };
   /** Wajib untuk `SET_REVISION_FEE` (0 = dibebaskan); diabaikan aksi lain. */
   revision_fee_idr: number | null;
+  /** Tangkapan layar balasan klien (WebP base64); wajib untuk jawaban klien (v2.5b). */
+  evidence_base64: string;
 }
 
 export async function recordSampleStep(
@@ -365,6 +385,7 @@ export async function recordSampleStep(
         product_knowledge: step.rnd.product_knowledge,
       },
       revisionFeeIdr: step.revision_fee_idr,
+      evidenceBase64: step.evidence_base64 || null,
     });
   }
   return requestWebApi("/api/samples/step", "POST", step);
@@ -390,6 +411,8 @@ export async function recordDesignStep(step: {
   action: DesignAction;
   notes: string;
   tracking_no: string;
+  /** Wajib untuk jawaban klien atas dummy (v2.5b). */
+  evidence_base64: string;
 }): Promise<{ status: string; rejection_count: number }> {
   if (isDesktopRuntime()) {
     return invokeDesktop("desktop_record_design_step", {
@@ -397,6 +420,7 @@ export async function recordDesignStep(step: {
       action: step.action,
       notes: step.notes,
       trackingNo: step.tracking_no,
+      evidenceBase64: step.evidence_base64 || null,
     });
   }
   return requestWebApi("/api/samples/design/step", "POST", step);
@@ -434,15 +458,39 @@ export async function recordMouStep(step: {
   id: string;
   action: MouAction;
   notes: string;
+  /** Wajib untuk jawaban klien atas MoU (v2.5b). */
+  evidence_base64: string;
 }): Promise<{ status: string }> {
   if (isDesktopRuntime()) {
     return invokeDesktop("desktop_record_mou_step", {
       id: step.id,
       action: step.action,
       notes: step.notes,
+      evidenceBase64: step.evidence_base64 || null,
     });
   }
   return requestWebApi("/api/samples/mou/step", "POST", step);
+}
+
+/** Catat satu dokumen legal; foto dokumen opsional (v2.6). */
+export async function recordLegalDocument(
+  mouId: string,
+  document: LegalRecord,
+  evidenceBase64: string,
+): Promise<{ id: string; status: string }> {
+  const body = { ...document };
+  if (isDesktopRuntime()) {
+    return invokeDesktop("desktop_record_legal_document", {
+      mouId,
+      document: body,
+      evidenceBase64: evidenceBase64 || null,
+    });
+  }
+  return requestWebApi("/api/samples/legal", "POST", {
+    mou_id: mouId,
+    document: body,
+    evidence_base64: evidenceBase64,
+  });
 }
 
 /** Harga Finance untuk iterasi tiket yang sedang `SAMPLE_READY` (v2.2). */
