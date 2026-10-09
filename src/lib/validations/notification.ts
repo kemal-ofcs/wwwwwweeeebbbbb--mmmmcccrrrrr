@@ -16,7 +16,12 @@ import {
 } from "./client";
 import { formatRupiah } from "./sample";
 
-export const NOTIFICATION_DIVISIONS = ["CS", "RND", "FINANCE"] as const;
+export const NOTIFICATION_DIVISIONS = [
+  "CS",
+  "RND",
+  "FINANCE",
+  "DESIGN",
+] as const;
 export type NotificationDivision = (typeof NOTIFICATION_DIVISIONS)[number];
 
 /** Izin per divisi: siapa melihat kejadian divisi itu di lonceng. */
@@ -24,6 +29,7 @@ export const NOTIFICATION_PERMISSIONS = {
   CS: "notifications_cs.view",
   RND: "notifications_rnd.view",
   FINANCE: "notifications_finance.view",
+  DESIGN: "notifications_design.view",
 } as const satisfies Record<NotificationDivision, string>;
 
 export const NOTIFICATION_EVENT_TYPES = [
@@ -39,6 +45,11 @@ export const NOTIFICATION_EVENT_TYPES = [
   // Finance (v2.2, PRD F-15/F-16): tarif revisi dan harga untuk grup CS.
   "SAMPLE_REVISION_FEE",
   "SAMPLE_PRICED",
+  // Desain (v2.4, PRD F-19): brief baru dan dummy direvisi klien.
+  "DESIGN_REQUESTED",
+  "DUMMY_REVISED",
+  // MoU disetujui klien: Finance menerbitkan tagihan DP (v2.5a).
+  "MOU_ACCEPTED",
 ] as const;
 export type NotificationEventType = (typeof NOTIFICATION_EVENT_TYPES)[number];
 
@@ -209,6 +220,24 @@ export function renderNotification(
         `Unit price: ${rupiah(payload, "unit_price_idr")}`,
         `Priced ${when}`,
       ].join("\n");
+    case "DESIGN_REQUESTED":
+      return [
+        `Design requested: ${sample}`,
+        `Brief: ${orDash(text(payload, "brief"))}`,
+        `Requested ${when}`,
+      ].join("\n");
+    case "DUMMY_REVISED":
+      return [
+        `The client wants dummy revision ${text(payload, "rejection_count")}: ${sample}`,
+        `Notes: ${orDash(text(payload, "revision_notes"))}`,
+        `Since ${when}`,
+      ].join("\n");
+    case "MOU_ACCEPTED":
+      return [
+        `MoU accepted, issue the down payment invoice: ${sample}`,
+        `MoU ${text(payload, "mou_number")}, down payment ${rupiah(payload, "dp_amount_idr")}`,
+        `Accepted ${when}`,
+      ].join("\n");
     case "COLD_DIGEST": {
       const leads = Array.isArray(payload.leads)
         ? (payload.leads as Payload[])
@@ -260,6 +289,18 @@ export const NOTIFY_SAMPLE_STATUS_SQL =
 export const NOTIFY_SAMPLE_PRICED_SQL =
   "INSERT INTO notification_outbox (id, event_type, target_division, payload_json, occurred_at, status, attempts, next_attempt_at, created_at) SELECT 'price:' || p.id, 'SAMPLE_PRICED', 'CS', json_object('sample_id', s.id, 'client_code', COALESCE(c.client_code, ''), 'client_name', COALESCE(c.name, ''), 'brand_name', s.brand_name, 'unit_price_idr', p.final_unit_price_idr, 'iteration_number', p.iteration_number), p.recorded_at, CASE WHEN EXISTS (SELECT 1 FROM telegram_config t WHERE t.id = 'default' AND t.is_active = 1 AND TRIM(COALESCE(t.bot_token, '')) <> '') AND TRIM(COALESCE((SELECT g.value FROM setting_gex_system g WHERE g.key = 'telegram_chat_id_cs'), '')) <> '' THEN 'PENDING' ELSE 'SKIPPED' END, 0, datetime('now'), datetime('now') FROM pricing_formulas p JOIN sample_requests s ON s.id = p.sample_request_id LEFT JOIN clients c ON c.id = s.client_id WHERE p.id = ?1 LIMIT 1 ON CONFLICT(id) DO NOTHING;";
 
+/**
+ * Brief desain baru dan dummy yang direvisi klien, ke grup Desain (v2.4).
+ * ?1 = id baris `sample_status_log` langkah ini, ?2 = id tiket desain. Status
+ * selain `MOCKUP`/`DUMMY_REVISION` tidak menulis apa pun.
+ */
+export const NOTIFY_DESIGN_SQL =
+  "INSERT INTO notification_outbox (id, event_type, target_division, payload_json, occurred_at, status, attempts, next_attempt_at, created_at) SELECT 'design:' || ?1, CASE d.status WHEN 'MOCKUP' THEN 'DESIGN_REQUESTED' ELSE 'DUMMY_REVISED' END, 'DESIGN', json_object('sample_id', s.id, 'client_code', COALESCE(c.client_code, ''), 'client_name', COALESCE(c.name, ''), 'brand_name', s.brand_name, 'brief', d.brief, 'revision_notes', d.revision_notes, 'rejection_count', d.dummy_rejection_count), d.status_changed_at, CASE WHEN EXISTS (SELECT 1 FROM telegram_config t WHERE t.id = 'default' AND t.is_active = 1 AND TRIM(COALESCE(t.bot_token, '')) <> '') AND TRIM(COALESCE((SELECT g.value FROM setting_gex_system g WHERE g.key = 'telegram_chat_id_design'), '')) <> '' THEN 'PENDING' ELSE 'SKIPPED' END, 0, datetime('now'), datetime('now') FROM design_tickets d JOIN sample_requests s ON s.id = d.sample_request_id LEFT JOIN clients c ON c.id = s.client_id WHERE d.id = ?2 AND d.status IN ('MOCKUP', 'DUMMY_REVISION') LIMIT 1 ON CONFLICT(id) DO NOTHING;";
+
+/** MoU disetujui klien, ke grup Finance (v2.5a). ?1 = id log, ?2 = id MoU. */
+export const NOTIFY_MOU_SQL =
+  "INSERT INTO notification_outbox (id, event_type, target_division, payload_json, occurred_at, status, attempts, next_attempt_at, created_at) SELECT 'mou:' || ?1, 'MOU_ACCEPTED', 'FINANCE', json_object('sample_id', s.id, 'client_code', COALESCE(c.client_code, ''), 'client_name', COALESCE(c.name, ''), 'brand_name', s.brand_name, 'mou_number', m.mou_number, 'dp_amount_idr', m.dp_amount_required_idr), m.status_changed_at, CASE WHEN EXISTS (SELECT 1 FROM telegram_config t WHERE t.id = 'default' AND t.is_active = 1 AND TRIM(COALESCE(t.bot_token, '')) <> '') AND TRIM(COALESCE((SELECT g.value FROM setting_gex_system g WHERE g.key = 'telegram_chat_id_finance'), '')) <> '' THEN 'PENDING' ELSE 'SKIPPED' END, 0, datetime('now'), datetime('now') FROM production_mou m JOIN sample_requests s ON s.id = m.sample_request_id LEFT JOIN clients c ON c.id = m.client_id WHERE m.id = ?2 AND m.status = 'ACCEPTED' LIMIT 1 ON CONFLICT(id) DO NOTHING;";
+
 /** Ringkasan Cold yang sudah ada untuk satu tanggal, dan tanggal ringkasan terakhir. */
 export const COLD_DIGEST_STATE_SQL =
   "SELECT (SELECT COUNT(*) FROM notification_outbox WHERE id = ?1) AS done, COALESCE((SELECT MAX(id) FROM notification_outbox WHERE id LIKE 'cold-digest:%'), '') AS last_id;";
@@ -300,15 +341,15 @@ export const NOTIFICATION_PENDING_COUNT_SQL =
   "SELECT COUNT(*) AS total FROM notification_outbox WHERE status = 'PENDING';";
 
 /**
- * Lonceng: ?1/?2/?3 = boleh melihat CS/RnD/Finance (0/1). Ringkasan Cold
+ * Lonceng: ?1/?2/?3/?4 = boleh melihat CS/RnD/Finance/Desain (0/1). Ringkasan Cold
  * kosong hanya penanda tanggal, tidak pernah ditampilkan.
  */
 export const NOTIFICATION_BELL_LIST_SQL =
-  "SELECT id, event_type, target_division, payload_json, occurred_at, created_at FROM notification_outbox WHERE ((?1 = 1 AND target_division = 'CS') OR (?2 = 1 AND target_division = 'RND') OR (?3 = 1 AND target_division = 'FINANCE')) AND NOT (event_type = 'COLD_DIGEST' AND json_array_length(payload_json, '$.leads') = 0) ORDER BY created_at DESC, rowid DESC LIMIT 30;";
+  "SELECT id, event_type, target_division, payload_json, occurred_at, created_at FROM notification_outbox WHERE ((?1 = 1 AND target_division = 'CS') OR (?2 = 1 AND target_division = 'RND') OR (?3 = 1 AND target_division = 'FINANCE') OR (?4 = 1 AND target_division = 'DESIGN')) AND NOT (event_type = 'COLD_DIGEST' AND json_array_length(payload_json, '$.leads') = 0) ORDER BY created_at DESC, rowid DESC LIMIT 30;";
 
-/** ?4 = operator id. Belum dibaca = lahir sesudah operator terakhir membuka lonceng. */
+/** ?5 = operator id. Belum dibaca = lahir sesudah operator terakhir membuka lonceng. */
 export const NOTIFICATION_UNREAD_COUNT_SQL =
-  "SELECT COUNT(*) AS total FROM notification_outbox WHERE ((?1 = 1 AND target_division = 'CS') OR (?2 = 1 AND target_division = 'RND') OR (?3 = 1 AND target_division = 'FINANCE')) AND NOT (event_type = 'COLD_DIGEST' AND json_array_length(payload_json, '$.leads') = 0) AND created_at > COALESCE((SELECT seen_at FROM notification_seen WHERE operator_id = ?4), '');";
+  "SELECT COUNT(*) AS total FROM notification_outbox WHERE ((?1 = 1 AND target_division = 'CS') OR (?2 = 1 AND target_division = 'RND') OR (?3 = 1 AND target_division = 'FINANCE') OR (?4 = 1 AND target_division = 'DESIGN')) AND NOT (event_type = 'COLD_DIGEST' AND json_array_length(payload_json, '$.leads') = 0) AND created_at > COALESCE((SELECT seen_at FROM notification_seen WHERE operator_id = ?5), '');";
 
 /** Waktu database, zona perusahaan, dan konfigurasi bot dalam satu baris. */
 export const NOTIFICATION_CONTEXT_SQL =
@@ -316,7 +357,7 @@ export const NOTIFICATION_CONTEXT_SQL =
 
 /** Kunci setelan bisnis yang dibutuhkan pengirim (dibaca lewat `readBusinessSettings`). */
 export const NOTIFICATION_SETTINGS_SQL =
-  "SELECT key, value FROM setting_gex_system WHERE key IN ('lead_hot_max_days', 'lead_warm_max_days', 'telegram_chat_id_cs', 'telegram_chat_id_rnd', 'telegram_chat_id_finance');";
+  "SELECT key, value FROM setting_gex_system WHERE key IN ('lead_hot_max_days', 'lead_warm_max_days', 'telegram_chat_id_cs', 'telegram_chat_id_rnd', 'telegram_chat_id_finance', 'telegram_chat_id_design');";
 
 /** ?1 = token baru (kosong = pertahankan yang lama, aturan 11), ?2 = aktif, ?3 = pelaku. */
 export const TELEGRAM_CONFIG_SAVE_SQL =

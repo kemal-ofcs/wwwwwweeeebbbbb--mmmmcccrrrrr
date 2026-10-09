@@ -6,6 +6,24 @@ import { loadBusinessSettings } from "@/lib/server/business-settings";
 import { ApiRequestError } from "@/lib/server/http/api-response";
 import { listSampleMedia } from "@/lib/server/media";
 import {
+  applyDesignAction,
+  DESIGN_ACTIVE_SQL,
+  DESIGN_BRIEF_INVALID,
+  DESIGN_CHANGED_ELSEWHERE,
+  DESIGN_INSERT_SQL,
+  DESIGN_LIST_SQL,
+  DESIGN_REQUEST_ACTION,
+  DESIGN_TRANSITION_SQL,
+  designRequestError,
+  dummyLimitReached,
+  normalizeDesignBrief,
+  normalizeTrackingNo,
+  TRACKING_NO_INVALID,
+} from "@/lib/validations/design";
+import { INVOICE_LIST_SQL } from "@/lib/validations/finance";
+import { MOU_LIST_SQL } from "@/lib/validations/mou";
+import {
+  NOTIFY_DESIGN_SQL,
   NOTIFY_SAMPLE_PRICED_SQL,
   NOTIFY_SAMPLE_STATUS_SQL,
 } from "@/lib/validations/notification";
@@ -44,6 +62,8 @@ import {
  * `desktop_get_sample_request`, `desktop_create_sample_request`,
  * `desktop_update_sample_request`, dan `desktop_record_sample_step` di
  * `commands.rs`. SQL dan aturan langkahnya bersama (`sample.ts` ↔ `samples.rs`).
+ * Tiket desain (v2.4) ada di sini juga karena langkahnya menulis linimasa
+ * tiket sampel yang sama (`design.ts` ↔ `design.rs`).
  */
 
 type Executor = Client | Transaction;
@@ -125,6 +145,7 @@ export async function getSampleRequest(
     sql: SAMPLE_FORMULA_MATCHES_SQL,
     args: [key],
   });
+  const settings = await loadBusinessSettings(client);
   return {
     request,
     status_log: statusLog.rows.map(plain),
@@ -133,6 +154,30 @@ export async function getSampleRequest(
     formulas: formulas.rows.map(plain),
     formula_matches: formulaMatches.rows.map(plain),
     prices: await listSamplePrices(client, key, withCosts),
+    invoices: (
+      await client.execute({
+        sql: `${INVOICE_LIST_SQL} WHERE i.sample_request_id = ? ORDER BY i.created_at, i.id;`,
+        args: [key],
+      })
+    ).rows.map(plain),
+    // Tiket desain aktif, atau yang terakhir dibatalkan (v2.4).
+    design:
+      (
+        await client.execute({
+          sql: `${DESIGN_LIST_SQL} WHERE d.sample_request_id = ? ORDER BY d.status = 'CANCELLED', d.created_at DESC, d.rowid DESC LIMIT 1;`,
+          args: [key],
+        })
+      ).rows.map(plain)[0] ?? null,
+    max_dummy_rejections: settings.max_dummy_rejections,
+    // MoU aktif, atau yang terakhir dibatalkan/ditolak (v2.5a).
+    mou:
+      (
+        await client.execute({
+          sql: `${MOU_LIST_SQL} WHERE m.sample_request_id = ? ORDER BY m.status IN ('CANCELLED', 'REJECTED'), m.created_at DESC, m.rowid DESC LIMIT 1;`,
+          args: [key],
+        })
+      ).rows.map(plain)[0] ?? null,
+    dp_percentage_bp: settings.dp_percentage_bp,
   };
 }
 
@@ -225,6 +270,7 @@ function draftFromRow(row: Record<string, unknown>): Draft {
     ship_to_address: row.ship_to_address,
     is_dummy_required: Number(row.is_dummy_required) === 1,
     is_paid_sample: Number(row.is_paid_sample) === 1,
+    is_test_requested: Number(row.is_test_requested) === 1,
   };
 }
 
@@ -285,6 +331,7 @@ export async function createSampleRequest(
         draft.is_paid_sample ? 1 : 0,
         now,
         actor.id,
+        draft.is_test_requested ? 1 : 0,
       ],
     });
     await transaction.execute({
@@ -355,6 +402,7 @@ export async function updateSampleRequest(
         draft.deadline_at,
         draft.ship_to_address,
         now,
+        draft.is_test_requested ? 1 : 0,
       ],
     });
     if (result.rowsAffected === 0) invalid("This sample request is closed.");
@@ -422,6 +470,11 @@ export async function recordSampleStep(
         revision_index: baseIndex,
         free_revision_limit: Number(current.free_revision_limit ?? 0),
         has_price: current.unit_price_idr != null,
+        fee_paid: Number(current.fee_paid) === 1,
+        test_ready:
+          Number(current.is_test_requested) !== 1 ||
+          Number(current.test_paid) === 1,
+        mockup_ready: Number(current.mockup_ready) === 1,
       },
       action,
       leadTime,
@@ -525,6 +578,168 @@ export async function recordSampleStep(
     );
     await transaction.commit();
     return { status: result.status, revision_index: result.revision_index };
+  } finally {
+    transaction.close();
+  }
+}
+
+/**
+ * Brief desain untuk tiket sampel (v2.4, PRD F-19, keputusan A). Cermin
+ * `desktop_create_design_ticket`.
+ */
+export async function createDesignTicket(
+  client: Client,
+  input: Draft,
+  actor: AuditActor,
+) {
+  const sampleId =
+    typeof input.sample_id === "string" ? input.sample_id.trim() : "";
+  const brief = normalizeDesignBrief(input.brief);
+  if (!brief) invalid(DESIGN_BRIEF_INVALID);
+  const transaction = await client.transaction("write");
+  try {
+    const current = await findSample(transaction, sampleId);
+    const active = await transaction.execute({
+      sql: DESIGN_ACTIVE_SQL,
+      args: [sampleId, ""],
+    });
+    const blocked = designRequestError(
+      String(current.status),
+      Number(active.rows[0]?.total ?? 0),
+    );
+    if (blocked) invalid(blocked);
+    const now = await databaseNow(transaction);
+    const id = crypto.randomUUID();
+    const logId = crypto.randomUUID();
+    await transaction.execute({
+      sql: DESIGN_INSERT_SQL,
+      args: [id, sampleId, brief, now, actor.id],
+    });
+    await transaction.execute({
+      sql: SAMPLE_STATUS_LOG_INSERT_SQL,
+      args: [
+        logId,
+        sampleId,
+        "",
+        "MOCKUP",
+        DESIGN_REQUEST_ACTION,
+        brief,
+        "",
+        actor.id,
+        now,
+      ],
+    });
+    // Grup Desain (PRD FR-08), di transaksi yang sama.
+    await transaction.execute({ sql: NOTIFY_DESIGN_SQL, args: [logId, id] });
+    await writeAudit(transaction, actor, "design.request", "sample", sampleId, {
+      client_code: String(current.client_code),
+      brand_name: String(current.brand_name),
+      brief,
+    });
+    await transaction.commit();
+    return { id };
+  } finally {
+    transaction.close();
+  }
+}
+
+/**
+ * Satu langkah tiket desain (v2.4). `canOverride` = pencatat memegang
+ * `design.override_dummy_limit` (keputusan E). Cermin
+ * `desktop_record_design_step`.
+ */
+export async function recordDesignStep(
+  client: Client,
+  input: Draft,
+  actor: AuditActor,
+  canOverride: boolean,
+) {
+  const id = typeof input.id === "string" ? input.id.trim() : "";
+  const action = typeof input.action === "string" ? input.action : "";
+  const notes = normalizeSampleNotes(input.notes);
+  if (!notes) invalid("Notes are required, up to 1000 characters.");
+  const tracking = normalizeTrackingNo(input.tracking_no);
+  if (tracking === null) invalid(TRACKING_NO_INVALID);
+
+  const transaction = await client.transaction("write");
+  try {
+    const found = await transaction.execute({
+      sql: `${DESIGN_LIST_SQL} WHERE d.id = ?;`,
+      args: [id],
+    });
+    const row = found.rows[0];
+    if (!row) throw new ApiRequestError("Design ticket not found.", 404);
+    const current = plain(row);
+    const maxRejections = (await loadBusinessSettings(transaction))
+      .max_dummy_rejections;
+    const baseStatus = String(current.status);
+    const baseCount = Number(current.dummy_rejection_count ?? 0);
+    const override =
+      action === "PRINT_DUMMY" &&
+      dummyLimitReached(baseCount, maxRejections) &&
+      canOverride;
+    const step = applyDesignAction(
+      {
+        status: baseStatus,
+        sample_status: String(current.sample_status),
+        has_mockup: Number(current.has_mockup) === 1,
+        dummy_paid: Number(current.dummy_paid) === 1,
+        rejection_count: baseCount,
+        max_rejections: maxRejections,
+        can_override: override,
+      },
+      action,
+    );
+    if ("error" in step) invalid(step.error);
+    const result = step.result;
+    const sampleId = String(current.sample_request_id);
+    const now = await databaseNow(transaction);
+    const changed = await transaction.execute({
+      sql: DESIGN_TRANSITION_SQL,
+      args: [
+        id,
+        result.status,
+        result.rejection_count,
+        // Resi hanya pada langkah kirim, catatan revisi hanya pada revisi.
+        action === "DUMMY_SENT" ? tracking : null,
+        action === "DUMMY_REVISE" ? notes : null,
+        now,
+        baseStatus,
+        baseCount,
+      ],
+    });
+    if (changed.rowsAffected === 0) {
+      throw new ApiRequestError(DESIGN_CHANGED_ELSEWHERE, 409);
+    }
+    const logId = crypto.randomUUID();
+    await transaction.execute({
+      sql: SAMPLE_STATUS_LOG_INSERT_SQL,
+      args: [
+        logId,
+        sampleId,
+        baseStatus,
+        result.status,
+        action,
+        notes,
+        "",
+        actor.id,
+        now,
+      ],
+    });
+    await transaction.execute({ sql: NOTIFY_DESIGN_SQL, args: [logId, id] });
+    await writeAudit(transaction, actor, "design.step", "sample", sampleId, {
+      client_code: String(current.client_code),
+      brand_name: String(current.brand_name),
+      action,
+      from: baseStatus,
+      to: result.status,
+      rejection_count: result.rejection_count,
+      tracking_no: action === "DUMMY_SENT" ? tracking : null,
+      override_limit: override,
+      notes,
+    });
+    await transaction.commit();
+    return result;
   } finally {
     transaction.close();
   }

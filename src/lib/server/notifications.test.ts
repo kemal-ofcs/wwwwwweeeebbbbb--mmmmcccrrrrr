@@ -69,6 +69,14 @@ async function setChats(cs: string, rnd: string, finance: string) {
       telegram_chat_id_rnd: rnd,
       telegram_chat_id_finance: finance,
       offline_login_max_days: 7,
+      default_sample_fee_idr: 0,
+      default_test_fee_idr: 0,
+      invoice_due_days: 7,
+      invoice_payment_instructions: "",
+      telegram_chat_id_design: "",
+      default_dummy_fee_idr: 0,
+      max_dummy_rejections: 0,
+      dp_percentage_bp: 5000,
     },
     ADMIN,
   );
@@ -339,7 +347,7 @@ describe("notifikasi divisi, jalur Web", () => {
   test("lonceng: hanya divisi yang boleh dilihat; membuka = semua dibaca", async () => {
     const cs = await notifications.listNotifications(
       client,
-      [true, false, false],
+      [true, false, false, false],
       7,
     );
     expect(cs.items.length).toBeGreaterThan(0);
@@ -350,7 +358,7 @@ describe("notifikasi divisi, jalur Web", () => {
 
     const rnd = await notifications.listNotifications(
       client,
-      [false, true, false],
+      [false, true, false, false],
       7,
     );
     expect(rnd.items.map((item) => item.event_type)).toEqual([
@@ -360,13 +368,23 @@ describe("notifikasi divisi, jalur Web", () => {
 
     await notifications.markNotificationsSeen(client, 7);
     expect(
-      (await notifications.listNotifications(client, [true, true, true], 7))
-        .unread,
+      (
+        await notifications.listNotifications(
+          client,
+          [true, true, true, true],
+          7,
+        )
+      ).unread,
     ).toBe(0);
     // Penanda dibaca per operator, bukan global.
     expect(
-      (await notifications.listNotifications(client, [true, true, true], 1))
-        .unread,
+      (
+        await notifications.listNotifications(
+          client,
+          [true, true, true, true],
+          1,
+        )
+      ).unread,
     ).toBeGreaterThan(0);
   });
 

@@ -92,6 +92,8 @@ function chatId(settings: BusinessSettings, division: string) {
       return settings.telegram_chat_id_rnd;
     case "FINANCE":
       return settings.telegram_chat_id_finance;
+    case "DESIGN":
+      return settings.telegram_chat_id_design;
     default:
       return "";
   }
@@ -328,13 +330,13 @@ export async function retryFailedNotifications(client: Client) {
 }
 
 /**
- * Divisi lonceng yang boleh dilihat (urutan CS, RnD, Finance). Tanpa satu pun
+ * Divisi lonceng yang boleh dilihat (urutan CS, RnD, Finance, Desain). Tanpa satu pun
  * izin `notifications_*.view` = ditolak. Cermin `notification_access`.
  */
 export function notificationAccess(actor: OperatorUser) {
   const allowed = NOTIFICATION_DIVISIONS.map((division) =>
     hasPermission(actor, NOTIFICATION_PERMISSIONS[division]),
-  ) as [boolean, boolean, boolean];
+  ) as [boolean, boolean, boolean, boolean];
   if (!allowed.some(Boolean)) {
     throw new AuthorizationError("Access denied for this action.", 403);
   }
@@ -343,11 +345,11 @@ export function notificationAccess(actor: OperatorUser) {
 
 /**
  * Lonceng: 30 kejadian terakhir dari divisi yang boleh dilihat, plus jumlah
- * yang belum dibaca. `allowed` = urutan CS, RnD, Finance.
+ * yang belum dibaca. `allowed` = urutan CS, RnD, Finance, Desain.
  */
 export async function listNotifications(
   client: Client,
-  allowed: readonly [boolean, boolean, boolean],
+  allowed: readonly [boolean, boolean, boolean, boolean],
   operatorId: number,
 ) {
   const context = await loadContext(client);

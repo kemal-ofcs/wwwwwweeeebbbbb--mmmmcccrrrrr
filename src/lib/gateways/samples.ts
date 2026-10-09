@@ -1,8 +1,15 @@
 "use client";
 
 import { requestWebApi } from "@/lib/client/api-client";
+import type { InvoiceRecord } from "@/lib/gateways/finance";
 import { isDesktopRuntime } from "@/lib/runtime/app-runtime";
 import { invokeDesktop } from "@/lib/runtime/desktop-commands";
+import type { DesignAction, DesignStatus } from "@/lib/validations/design";
+import type {
+  MouAction,
+  MouStatus,
+  RegulatoryPath,
+} from "@/lib/validations/mou";
 import type {
   BusinessSettings,
   SampleAction,
@@ -58,6 +65,24 @@ export interface SampleRequestRecord {
   revision_fee_idr: number | null;
   /** Harga jual iterasi yang sedang berjalan; null = belum diberi harga. */
   unit_price_idr: number | null;
+  /** 1 = sampel sekalian diuji (D-30). */
+  is_test_requested: number;
+  /** 1 = tagihan biaya sampel/revisi yang sedang ditunggu sudah lunas. */
+  fee_paid: number;
+  /** 1 = tagihan uji sudah lunas. */
+  test_paid: number;
+  /** Status tiket desain aktif (v2.4); null = tanpa tiket desain. */
+  design_status: string | null;
+  /** Putaran dummy tiket desain aktif; null = tanpa tiket desain. */
+  dummy_round: number | null;
+  /** 1 = tiket tidak butuh mockup atau mockup sudah diunggah (D-36). */
+  mockup_ready: number;
+  /** Status MoU aktif (v2.5a); null = belum ada. */
+  mou_status: string | null;
+  /** Nominal DP dari MoU yang disetujui klien; null = belum ada. */
+  mou_dp_idr: number | null;
+  /** 1 = tagihan DP Produksi & Legal lunas atau dijadwal ulang. */
+  dp_paid: number;
 }
 
 /**
@@ -134,7 +159,7 @@ export interface SampleFeedbackEntry {
 /** Data ringkas satu foto; isinya diambil terpisah lewat `getMedia`. */
 export interface SampleMediaEntry {
   id: string;
-  purpose: "REFERENCE" | "PAYMENT_PROOF";
+  purpose: "REFERENCE" | "PAYMENT_PROOF" | "MOCKUP";
   byte_size: number;
   created_by: number | null;
   created_by_name: string | null;
@@ -151,6 +176,80 @@ export interface SampleDetail {
   formulas: SampleFormulaEntry[];
   formula_matches: SampleFormulaMatch[];
   prices: SamplePriceEntry[];
+  /** Tagihan milik tiket ini (v2.3a). */
+  invoices: InvoiceRecord[];
+  /** Tiket desain aktif, atau yang terakhir dibatalkan (v2.4); null = belum ada. */
+  design: DesignTicketRecord | null;
+  /** Setelan `max_dummy_rejections`; 0 = tanpa batas. */
+  max_dummy_rejections: number;
+  /** MoU aktif, atau yang terakhir dibatalkan/ditolak (v2.5a); null = belum ada. */
+  mou: MouRecord | null;
+  /** Setelan persen DP bawaan, untuk form MoU baru. */
+  dp_percentage_bp: number;
+}
+
+/** Satu baris `MOU_LIST_SQL` (v2.5a, PRD F-20). */
+export interface MouRecord {
+  id: string;
+  mou_number: string;
+  sample_request_id: string;
+  client_id: string;
+  total_units: number;
+  unit_price_idr: number;
+  total_production_cost_idr: number;
+  production_lead_time_days: number;
+  regulatory_path: RegulatoryPath;
+  dp_bp: number;
+  dp_amount_required_idr: number;
+  notes: string;
+  status: MouStatus;
+  revision_notes: string;
+  status_changed_at: string;
+  created_by: number | null;
+  created_at: string;
+  updated_at: string;
+  brand_name: string;
+  client_code: string | null;
+  client_name: string | null;
+  client_address: string | null;
+  client_city: string | null;
+  client_province: string | null;
+  /** 1 = tiket tidak meminta dummy atau dummy sudah di-ACC (E-20). */
+  dummy_ready: number;
+  /** 1 = tagihan DP sudah diterbitkan. */
+  dp_invoiced: number;
+  /** 1 = tagihan DP lunas atau sisanya dijadwal ulang (keputusan F). */
+  dp_cleared: number;
+}
+
+/** Isi form MoU; harga satuan dan persen DP hanya dibaca untuk `finance.manage`. */
+export interface MouTermsInput {
+  total_units: number;
+  unit_price_idr: number;
+  production_lead_time_days: number;
+  regulatory_path: RegulatoryPath;
+  dp_bp: number;
+  notes: string;
+}
+
+/** Satu baris `DESIGN_LIST_SQL` (v2.4, PRD F-19). */
+export interface DesignTicketRecord {
+  id: string;
+  sample_request_id: string;
+  brief: string;
+  status: DesignStatus;
+  dummy_rejection_count: number;
+  dummy_tracking_no: string;
+  revision_notes: string;
+  status_changed_at: string;
+  created_by: number | null;
+  created_at: string;
+  updated_at: string;
+  sample_status: string;
+  /** 1 = tiket sampel punya foto mockup. */
+  has_mockup: number;
+  /** 1 = gerbang bayar putaran dummy ini terbuka (keputusan D). */
+  dummy_paid: number;
 }
 
 export interface SampleList {
@@ -187,6 +286,8 @@ export interface SampleDraftInput {
   ship_to_address: string;
   is_dummy_required: boolean;
   is_paid_sample: boolean | null;
+  /** Sampel sekalian diuji (D-30); hanya bisa diubah selama `DRAFT`. */
+  is_test_requested: boolean;
 }
 
 export async function listSampleRequests(): Promise<SampleList> {
@@ -267,6 +368,81 @@ export async function recordSampleStep(
     });
   }
   return requestWebApi("/api/samples/step", "POST", step);
+}
+
+/** Brief desain baru untuk tiket sampel (v2.4, PRD F-19). */
+export async function createDesignTicket(
+  sampleId: string,
+  brief: string,
+): Promise<{ id: string }> {
+  if (isDesktopRuntime()) {
+    return invokeDesktop("desktop_create_design_ticket", { sampleId, brief });
+  }
+  return requestWebApi("/api/samples/design", "POST", {
+    sample_id: sampleId,
+    brief,
+  });
+}
+
+/** Satu langkah tiket desain; resi hanya dibaca pada `DUMMY_SENT`. */
+export async function recordDesignStep(step: {
+  id: string;
+  action: DesignAction;
+  notes: string;
+  tracking_no: string;
+}): Promise<{ status: string; rejection_count: number }> {
+  if (isDesktopRuntime()) {
+    return invokeDesktop("desktop_record_design_step", {
+      id: step.id,
+      action: step.action,
+      notes: step.notes,
+      trackingNo: step.tracking_no,
+    });
+  }
+  return requestWebApi("/api/samples/design/step", "POST", step);
+}
+
+/** Draf MoU untuk tiket yang sudah disetujui klien (v2.5a). */
+export async function createMou(
+  sampleId: string,
+  terms: MouTermsInput,
+): Promise<{ id: string; mou_number: string }> {
+  const body = { ...terms };
+  if (isDesktopRuntime()) {
+    return invokeDesktop("desktop_create_mou", { sampleId, terms: body });
+  }
+  return requestWebApi("/api/samples/mou", "POST", {
+    sample_id: sampleId,
+    terms: body,
+  });
+}
+
+/** Ubah draf MoU. */
+export async function updateMou(
+  id: string,
+  terms: MouTermsInput,
+): Promise<{ id: string }> {
+  const body = { ...terms };
+  if (isDesktopRuntime()) {
+    return invokeDesktop("desktop_update_mou", { id, terms: body });
+  }
+  return requestWebApi("/api/samples/mou/update", "POST", { id, terms: body });
+}
+
+/** Satu langkah MoU: kirim, jawaban klien, atau batal. */
+export async function recordMouStep(step: {
+  id: string;
+  action: MouAction;
+  notes: string;
+}): Promise<{ status: string }> {
+  if (isDesktopRuntime()) {
+    return invokeDesktop("desktop_record_mou_step", {
+      id: step.id,
+      action: step.action,
+      notes: step.notes,
+    });
+  }
+  return requestWebApi("/api/samples/mou/step", "POST", step);
 }
 
 /** Harga Finance untuk iterasi tiket yang sedang `SAMPLE_READY` (v2.2). */

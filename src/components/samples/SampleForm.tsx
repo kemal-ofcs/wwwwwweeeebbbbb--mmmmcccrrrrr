@@ -405,6 +405,18 @@ export function SampleForm({
             />
             Needs a packaging dummy
           </label>
+          <label className="flex min-h-11 items-center gap-2 text-body-md text-on-surface">
+            <input
+              type="checkbox"
+              disabled={locked}
+              checked={draft.is_test_requested}
+              onChange={(event) =>
+                setDraft({ ...draft, is_test_requested: event.target.checked })
+              }
+              className="size-4"
+            />
+            With testing (billed separately, paid before the sample is sent)
+          </label>
           {feeMode === "PER_REQUEST" ? (
             <fieldset className="flex flex-wrap items-center gap-4">
               <legend className="sr-only">Sample fee</legend>

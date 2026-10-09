@@ -24,6 +24,14 @@ export const BUSINESS_SETTING_KEYS = {
   telegramChatIdRnd: "telegram_chat_id_rnd",
   telegramChatIdFinance: "telegram_chat_id_finance",
   offlineLoginMaxDays: "offline_login_max_days",
+  defaultSampleFeeIdr: "default_sample_fee_idr",
+  defaultTestFeeIdr: "default_test_fee_idr",
+  invoiceDueDays: "invoice_due_days",
+  invoicePaymentInstructions: "invoice_payment_instructions",
+  telegramChatIdDesign: "telegram_chat_id_design",
+  defaultDummyFeeIdr: "default_dummy_fee_idr",
+  maxDummyRejections: "max_dummy_rejections",
+  dpPercentageBp: "dp_percentage_bp",
 } as const;
 
 export interface BusinessSettings {
@@ -45,6 +53,27 @@ export interface BusinessSettings {
    * (`APP_OFFLINE_AUTH_MAX_AGE_HOURS`, 7 hari). Web tidak punya login offline.
    */
   offline_login_max_days: number;
+  /**
+   * Isian awal nominal tagihan biaya sampel dan uji (v2.3a, keputusan B);
+   * 0 = kosong, Finance mengetik sendiri.
+   */
+  default_sample_fee_idr: number;
+  default_test_fee_idr: number;
+  /** Jatuh tempo tagihan = tanggal terbit + hari ini (keputusan L). */
+  invoice_due_days: number;
+  /** Teks bebas di invoice PDF: rekening, atas nama, catatan (v2.3c). */
+  invoice_payment_instructions: string;
+  /** Grup Telegram divisi Desain (v2.4, PRD F-19). */
+  telegram_chat_id_design: string;
+  /** Isian awal nominal tagihan dummy (v2.4); 0 = kosong. */
+  default_dummy_fee_idr: number;
+  /**
+   * Batas penolakan dummy (D-18, OQ-29); 0 = tanpa batas. Sesudahnya cetak
+   * ulang hanya oleh pemegang `design.override_dummy_limit`.
+   */
+  max_dummy_rejections: number;
+  /** Persen DP bawaan MoU dalam basis poin (v2.5a, F-20); disalin ke MoU. */
+  dp_percentage_bp: number;
 }
 
 export const DEFAULT_BUSINESS_SETTINGS: BusinessSettings = {
@@ -57,6 +86,14 @@ export const DEFAULT_BUSINESS_SETTINGS: BusinessSettings = {
   telegram_chat_id_rnd: "",
   telegram_chat_id_finance: "",
   offline_login_max_days: 7,
+  default_sample_fee_idr: 0,
+  default_test_fee_idr: 0,
+  invoice_due_days: 7,
+  invoice_payment_instructions: "",
+  telegram_chat_id_design: "",
+  default_dummy_fee_idr: 0,
+  max_dummy_rejections: 0,
+  dp_percentage_bp: 5000,
 };
 
 export const FREE_REVISION_LIMIT_MAX = 20;
@@ -64,12 +101,20 @@ export const LEAD_HOT_MAX_DAYS_LIMIT = 60;
 export const LEAD_WARM_MAX_DAYS_LIMIT = 180;
 export const MAX_PHOTOS_PER_SAMPLE_LIMIT = 50;
 export const OFFLINE_LOGIN_MAX_DAYS_LIMIT = 7;
+/** Sama dengan `INVOICE_AMOUNT_MAX` di `finance.ts`. */
+export const DEFAULT_FEE_MAX = 100_000_000_000;
+export const INVOICE_DUE_DAYS_LIMIT = 90;
+export const PAYMENT_INSTRUCTIONS_MAX = 1000;
+export const MAX_DUMMY_REJECTIONS_LIMIT = 20;
+export const DP_PERCENTAGE_INVALID = "The down payment must be from 0.01% to 100%.";
+export const PAYMENT_INSTRUCTIONS_INVALID =
+  "Payment instructions are up to 1000 characters.";
 
 function wholeNumber(value: unknown): number | null {
   if (typeof value === "number") {
     return Number.isSafeInteger(value) ? value : null;
   }
-  if (typeof value === "string" && /^\d{1,9}$/.test(value.trim())) {
+  if (typeof value === "string" && /^\d{1,12}$/.test(value.trim())) {
     return Number(value.trim());
   }
   return null;
@@ -162,7 +207,56 @@ export function readBusinessSettings(
         1,
         OFFLINE_LOGIN_MAX_DAYS_LIMIT,
       ) ?? DEFAULT_BUSINESS_SETTINGS.offline_login_max_days,
+    default_sample_fee_idr:
+      inRange(
+        wholeNumber(values[BUSINESS_SETTING_KEYS.defaultSampleFeeIdr]),
+        0,
+        DEFAULT_FEE_MAX,
+      ) ?? DEFAULT_BUSINESS_SETTINGS.default_sample_fee_idr,
+    default_test_fee_idr:
+      inRange(
+        wholeNumber(values[BUSINESS_SETTING_KEYS.defaultTestFeeIdr]),
+        0,
+        DEFAULT_FEE_MAX,
+      ) ?? DEFAULT_BUSINESS_SETTINGS.default_test_fee_idr,
+    invoice_due_days:
+      inRange(
+        wholeNumber(values[BUSINESS_SETTING_KEYS.invoiceDueDays]),
+        0,
+        INVOICE_DUE_DAYS_LIMIT,
+      ) ?? DEFAULT_BUSINESS_SETTINGS.invoice_due_days,
+    invoice_payment_instructions: storedInstructions(
+      values[BUSINESS_SETTING_KEYS.invoicePaymentInstructions],
+    ),
+    telegram_chat_id_design:
+      normalizeTelegramChatId(
+        values[BUSINESS_SETTING_KEYS.telegramChatIdDesign],
+      ) ?? "",
+    default_dummy_fee_idr:
+      inRange(
+        wholeNumber(values[BUSINESS_SETTING_KEYS.defaultDummyFeeIdr]),
+        0,
+        DEFAULT_FEE_MAX,
+      ) ?? DEFAULT_BUSINESS_SETTINGS.default_dummy_fee_idr,
+    max_dummy_rejections:
+      inRange(
+        wholeNumber(values[BUSINESS_SETTING_KEYS.maxDummyRejections]),
+        0,
+        MAX_DUMMY_REJECTIONS_LIMIT,
+      ) ?? DEFAULT_BUSINESS_SETTINGS.max_dummy_rejections,
+    dp_percentage_bp:
+      inRange(
+        wholeNumber(values[BUSINESS_SETTING_KEYS.dpPercentageBp]),
+        1,
+        10_000,
+      ) ?? DEFAULT_BUSINESS_SETTINGS.dp_percentage_bp,
   };
+}
+
+/** Teks tersimpan yang terlalu panjang dianggap rusak dan jatuh ke kosong. */
+function storedInstructions(value: string | undefined) {
+  const text = (value ?? "").trim();
+  return [...text].length <= PAYMENT_INSTRUCTIONS_MAX ? text : "";
 }
 
 /** Validasi form Pengaturan. Pesan identik dengan `validate_business_settings`. */
@@ -219,7 +313,13 @@ export function validateBusinessSettings(
   const chatCs = normalizeTelegramChatId(draft.telegram_chat_id_cs);
   const chatRnd = normalizeTelegramChatId(draft.telegram_chat_id_rnd);
   const chatFinance = normalizeTelegramChatId(draft.telegram_chat_id_finance);
-  if (chatCs === null || chatRnd === null || chatFinance === null) {
+  const chatDesign = normalizeTelegramChatId(draft.telegram_chat_id_design);
+  if (
+    chatCs === null ||
+    chatRnd === null ||
+    chatFinance === null ||
+    chatDesign === null
+  ) {
     return { error: TELEGRAM_CHAT_ID_INVALID };
   }
   const offlineDays = inRange(
@@ -233,6 +333,58 @@ export function validateBusinessSettings(
         "The offline sign-in period must be a whole number of days from 1 to 7.",
     };
   }
+  const sampleFee = inRange(
+    strictInt(draft.default_sample_fee_idr),
+    0,
+    DEFAULT_FEE_MAX,
+  );
+  const testFee = inRange(
+    strictInt(draft.default_test_fee_idr),
+    0,
+    DEFAULT_FEE_MAX,
+  );
+  const dummyFee = inRange(
+    strictInt(draft.default_dummy_fee_idr),
+    0,
+    DEFAULT_FEE_MAX,
+  );
+  if (sampleFee === null || testFee === null || dummyFee === null) {
+    return { error: "Default fees must be whole rupiah amounts." };
+  }
+  const dueDays = inRange(
+    strictInt(draft.invoice_due_days),
+    0,
+    INVOICE_DUE_DAYS_LIMIT,
+  );
+  if (dueDays === null) {
+    return {
+      error:
+        "The invoice due period must be a whole number of days from 0 to 90.",
+    };
+  }
+  // Wajib dikirim, walau kosong: field yang hilang akan menimpa teks tersimpan.
+  const instructions =
+    typeof draft.invoice_payment_instructions === "string"
+      ? draft.invoice_payment_instructions.trim()
+      : null;
+  if (
+    instructions === null ||
+    [...instructions].length > PAYMENT_INSTRUCTIONS_MAX
+  ) {
+    return { error: PAYMENT_INSTRUCTIONS_INVALID };
+  }
+  const dummyLimit = inRange(
+    strictInt(draft.max_dummy_rejections),
+    0,
+    MAX_DUMMY_REJECTIONS_LIMIT,
+  );
+  if (dummyLimit === null) {
+    return {
+      error: "The dummy rejection limit must be a whole number from 0 to 20.",
+    };
+  }
+  const dpBp = inRange(strictInt(draft.dp_percentage_bp), 1, 10_000);
+  if (dpBp === null) return { error: DP_PERCENTAGE_INVALID };
   return {
     settings: {
       default_free_revision_limit: limit,
@@ -244,6 +396,14 @@ export function validateBusinessSettings(
       telegram_chat_id_rnd: chatRnd,
       telegram_chat_id_finance: chatFinance,
       offline_login_max_days: offlineDays,
+      default_sample_fee_idr: sampleFee,
+      default_test_fee_idr: testFee,
+      invoice_due_days: dueDays,
+      invoice_payment_instructions: instructions,
+      telegram_chat_id_design: chatDesign,
+      default_dummy_fee_idr: dummyFee,
+      max_dummy_rejections: dummyLimit,
+      dp_percentage_bp: dpBp,
     },
   };
 }
@@ -343,6 +503,15 @@ export interface SampleActionState {
   free_revision_limit: number;
   /** Iterasi yang sedang berjalan sudah diberi harga Finance (D-27). */
   has_price: boolean;
+  /** Tagihan biaya sampel/revisi yang sedang ditunggu sudah lunas (v2.3a). */
+  fee_paid: boolean;
+  /** Tidak diminta uji, atau tagihan uji sudah lunas (D-30). */
+  test_ready: boolean;
+  /**
+   * Tiket tidak butuh mockup, atau mockup sudah diunggah (v2.4, D-36):
+   * mockup wajib bila tiket punya tiket desain aktif atau meminta dummy.
+   */
+  mockup_ready: boolean;
 }
 
 export interface SampleActionResult {
@@ -357,6 +526,12 @@ export interface SampleActionResult {
 export const SAMPLE_STEP_NOT_ALLOWED =
   "This step is not allowed from the current status.";
 export const SAMPLE_NOT_PRICED = "Finance has not priced this sample yet.";
+export const SAMPLE_FEE_UNPAID =
+  "Record the payment on this sample's invoice first.";
+export const SAMPLE_TEST_UNPAID =
+  "The testing fee for this sample is not paid yet.";
+export const SAMPLE_MOCKUP_MISSING =
+  "Upload the mockup before sending the sample.";
 export const REVISION_FEE_INVALID =
   "Enter the revision fee in whole rupiah (0 waives it).";
 
@@ -415,16 +590,26 @@ export function applySampleAction(
         ["RND_ACCEPTED"],
         state.is_paid_sample ? "WAITING_SAMPLE_PAYMENT" : "IN_RND",
       );
-    case "PAYMENT_RECEIVED":
-      return step(
+    case "PAYMENT_RECEIVED": {
+      const result = step(
         ["WAITING_SAMPLE_PAYMENT", "WAITING_REVISION_PAYMENT"],
         "IN_RND",
       );
+      return "error" in result || state.fee_paid
+        ? result
+        : { error: SAMPLE_FEE_UNPAID };
+    }
     case "SAMPLE_READY":
       return step(["IN_RND"], "SAMPLE_READY");
     case "SAMPLE_SENT":
       if (state.status === "SAMPLE_READY" && !state.has_price) {
         return { error: SAMPLE_NOT_PRICED };
+      }
+      if (state.status === "SAMPLE_READY" && !state.test_ready) {
+        return { error: SAMPLE_TEST_UNPAID };
+      }
+      if (state.status === "SAMPLE_READY" && !state.mockup_ready) {
+        return { error: SAMPLE_MOCKUP_MISSING };
       }
       return step(["SAMPLE_READY"], "SAMPLE_SENT");
     case "SET_REVISION_FEE": {
@@ -714,6 +899,8 @@ export interface SampleDraft {
   ship_to_address: string;
   is_dummy_required: boolean;
   is_paid_sample: boolean;
+  /** Sampel sekalian diuji (D-30); hanya bisa diubah selama `DRAFT`. */
+  is_test_requested: boolean;
 }
 
 function text(draft: Record<string, unknown>, key: string) {
@@ -774,6 +961,11 @@ export function validateSampleDraft(
   }
   if (typeof draft.is_dummy_required !== "boolean") {
     return { error: "Choose whether a packaging dummy is needed." };
+  }
+  // Opsional: event lama yang belum membawa kunci ini berarti tanpa uji.
+  const testing = draft.is_test_requested ?? false;
+  if (typeof testing !== "boolean") {
+    return { error: "Choose whether the sample is tested." };
   }
 
   const bpom = text(draft, "bpom_product_name");
@@ -863,6 +1055,7 @@ export function validateSampleDraft(
       ship_to_address: address,
       is_dummy_required: draft.is_dummy_required,
       is_paid_sample: paid,
+      is_test_requested: testing,
     },
   };
 }
@@ -883,10 +1076,10 @@ export const CLIENT_LIFECYCLE_FROM_SAMPLES_SQL =
 // ---------------------------------------------------------------------------
 
 export const SAMPLE_INSERT_SQL =
-  "INSERT INTO sample_requests (id, client_id, lead_id, sample_kind_option_id, formulation_type_option_id, registration_category_option_id, rnd_product_class, product_category_option_id, pic_crm_id, sample_qty, brand_name, bpom_product_name, claims, packaging, reference_notes, client_budget_idr, special_requests_json, deadline_at, ship_to_address, is_dummy_required, is_paid_sample, revision_index, is_billable, status, rnd_lead_time_days, sent_at, status_changed_at, created_by, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, '', ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, 0, 0, 'DRAFT', NULL, '', ?21, ?22, ?21, ?21) ON CONFLICT(id) DO NOTHING;";
+  "INSERT INTO sample_requests (id, client_id, lead_id, sample_kind_option_id, formulation_type_option_id, registration_category_option_id, rnd_product_class, product_category_option_id, pic_crm_id, sample_qty, brand_name, bpom_product_name, claims, packaging, reference_notes, client_budget_idr, special_requests_json, deadline_at, ship_to_address, is_dummy_required, is_paid_sample, revision_index, is_billable, status, rnd_lead_time_days, sent_at, status_changed_at, created_by, created_at, updated_at, is_test_requested) VALUES (?1, ?2, ?3, ?4, ?5, ?6, '', ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, 0, 0, 'DRAFT', NULL, '', ?21, ?22, ?21, ?21, ?23) ON CONFLICT(id) DO NOTHING;";
 
 export const SAMPLE_UPDATE_SQL =
-  "UPDATE sample_requests SET sample_kind_option_id = CASE WHEN status = 'DRAFT' THEN ?2 ELSE sample_kind_option_id END, formulation_type_option_id = CASE WHEN status = 'DRAFT' THEN ?3 ELSE formulation_type_option_id END, registration_category_option_id = CASE WHEN status = 'DRAFT' THEN ?4 ELSE registration_category_option_id END, product_category_option_id = CASE WHEN status = 'DRAFT' THEN ?5 ELSE product_category_option_id END, sample_qty = CASE WHEN status = 'DRAFT' THEN ?6 ELSE sample_qty END, brand_name = CASE WHEN status = 'DRAFT' THEN ?7 ELSE brand_name END, bpom_product_name = CASE WHEN status = 'DRAFT' THEN ?8 ELSE bpom_product_name END, claims = CASE WHEN status = 'DRAFT' THEN ?9 ELSE claims END, packaging = CASE WHEN status = 'DRAFT' THEN ?10 ELSE packaging END, reference_notes = CASE WHEN status = 'DRAFT' THEN ?11 ELSE reference_notes END, special_requests_json = CASE WHEN status = 'DRAFT' THEN ?12 ELSE special_requests_json END, is_dummy_required = CASE WHEN status = 'DRAFT' THEN ?13 ELSE is_dummy_required END, is_paid_sample = CASE WHEN status = 'DRAFT' THEN ?14 ELSE is_paid_sample END, pic_crm_id = ?15, client_budget_idr = ?16, deadline_at = ?17, ship_to_address = ?18, updated_at = ?19 WHERE id = ?1 AND status NOT IN ('RND_REJECTED', 'CLIENT_ACC', 'CLIENT_REJECT', 'CANCELLED');";
+  "UPDATE sample_requests SET sample_kind_option_id = CASE WHEN status = 'DRAFT' THEN ?2 ELSE sample_kind_option_id END, formulation_type_option_id = CASE WHEN status = 'DRAFT' THEN ?3 ELSE formulation_type_option_id END, registration_category_option_id = CASE WHEN status = 'DRAFT' THEN ?4 ELSE registration_category_option_id END, product_category_option_id = CASE WHEN status = 'DRAFT' THEN ?5 ELSE product_category_option_id END, sample_qty = CASE WHEN status = 'DRAFT' THEN ?6 ELSE sample_qty END, brand_name = CASE WHEN status = 'DRAFT' THEN ?7 ELSE brand_name END, bpom_product_name = CASE WHEN status = 'DRAFT' THEN ?8 ELSE bpom_product_name END, claims = CASE WHEN status = 'DRAFT' THEN ?9 ELSE claims END, packaging = CASE WHEN status = 'DRAFT' THEN ?10 ELSE packaging END, reference_notes = CASE WHEN status = 'DRAFT' THEN ?11 ELSE reference_notes END, special_requests_json = CASE WHEN status = 'DRAFT' THEN ?12 ELSE special_requests_json END, is_dummy_required = CASE WHEN status = 'DRAFT' THEN ?13 ELSE is_dummy_required END, is_paid_sample = CASE WHEN status = 'DRAFT' THEN ?14 ELSE is_paid_sample END, is_test_requested = CASE WHEN status = 'DRAFT' THEN ?20 ELSE is_test_requested END, pic_crm_id = ?15, client_budget_idr = ?16, deadline_at = ?17, ship_to_address = ?18, updated_at = ?19 WHERE id = ?1 AND status NOT IN ('RND_REJECTED', 'CLIENT_ACC', 'CLIENT_REJECT', 'CANCELLED');";
 
 export const SAMPLE_TRANSITION_SQL =
   "UPDATE sample_requests SET status = ?2, revision_index = ?3, is_billable = COALESCE(?4, is_billable), rnd_lead_time_days = COALESCE(?5, rnd_lead_time_days), rnd_product_class = COALESCE(?9, rnd_product_class), rnd_reject_reason_option_id = COALESCE(?10, rnd_reject_reason_option_id), revision_fee_idr = COALESCE(?11, revision_fee_idr), sent_at = CASE WHEN ?2 = 'SAMPLE_SENT' THEN ?6 ELSE sent_at END, status_changed_at = ?6, updated_at = ?6 WHERE id = ?1 AND status = ?7 AND revision_index = ?8;";
@@ -899,18 +1092,24 @@ export const SAMPLE_FEEDBACK_INSERT_SQL =
 
 /**
  * Daftar/detail tiket. `unit_price_idr` = harga Finance terbaru untuk iterasi
- * yang sedang berjalan (NULL = belum diberi harga, gerbang D-27). Dipakai Web
+ * yang sedang berjalan (NULL = belum diberi harga, gerbang D-27); `fee_paid`
+ * dan `test_paid` = tagihan yang ditunggu sudah lunas atau sisanya sudah
+ * dijadwal ulang menjadi cicilan (`RESCHEDULED`, v2.3b keputusan G). Harga yang
+ * disimpan dalam detik yang sama dipisahkan `rowid` (urutan simpan).
+ * ponytail: `rowid` hanya urutan simpan di database itu; dua harga satu iterasi
+ * di detik yang sama dari DUA perangkat bisa terbaca berbeda setelah pull.
+ * Tambah kolom urutan bila itu pernah terjadi. Dipakai Web
  * dan perangkat; WAJIB identik dengan `SAMPLE_LIST_SQL` di Rust.
  */
 export const SAMPLE_LIST_SQL =
-  "SELECT s.*, c.client_code, c.name AS client_name, c.free_revision_limit, o.nama_operator AS pic_crm_name, (SELECT p.final_unit_price_idr FROM pricing_formulas p WHERE p.sample_request_id = s.id AND p.iteration_number = s.revision_index + 1 ORDER BY p.recorded_at DESC, p.id DESC LIMIT 1) AS unit_price_idr FROM sample_requests s LEFT JOIN clients c ON c.id = s.client_id LEFT JOIN master_operator o ON o.id = s.pic_crm_id";
+  "SELECT s.*, c.client_code, c.name AS client_name, c.free_revision_limit, o.nama_operator AS pic_crm_name, (SELECT p.final_unit_price_idr FROM pricing_formulas p WHERE p.sample_request_id = s.id AND p.iteration_number = s.revision_index + 1 ORDER BY p.recorded_at DESC, p.rowid DESC LIMIT 1) AS unit_price_idr, EXISTS (SELECT 1 FROM invoices i WHERE i.sample_request_id = s.id AND ((s.status = 'WAITING_SAMPLE_PAYMENT' AND i.ref_type = 'SAMPLE_FEE') OR (s.status = 'WAITING_REVISION_PAYMENT' AND i.ref_type = 'REVISION_FEE' AND i.revision_index = s.revision_index)) AND (i.status = 'RESCHEDULED' OR (i.status = 'OPEN' AND (SELECT COALESCE(SUM(a.amount_idr), 0) FROM fund_allocations a WHERE a.invoice_id = i.id) >= i.total_idr))) AS fee_paid, EXISTS (SELECT 1 FROM invoices i WHERE i.sample_request_id = s.id AND i.ref_type = 'TEST_FEE' AND (i.status = 'RESCHEDULED' OR (i.status = 'OPEN' AND (SELECT COALESCE(SUM(a.amount_idr), 0) FROM fund_allocations a WHERE a.invoice_id = i.id) >= i.total_idr))) AS test_paid, (SELECT d.status FROM design_tickets d WHERE d.sample_request_id = s.id AND d.status <> 'CANCELLED' ORDER BY d.created_at DESC, d.rowid DESC LIMIT 1) AS design_status, (SELECT d.dummy_rejection_count FROM design_tickets d WHERE d.sample_request_id = s.id AND d.status <> 'CANCELLED' ORDER BY d.created_at DESC, d.rowid DESC LIMIT 1) AS dummy_round, ((s.is_dummy_required = 0 AND NOT EXISTS (SELECT 1 FROM design_tickets d WHERE d.sample_request_id = s.id AND d.status <> 'CANCELLED')) OR EXISTS (SELECT 1 FROM media_asset m WHERE m.owner_type = 'sample' AND m.owner_id = s.id AND m.purpose = 'MOCKUP')) AS mockup_ready, (SELECT m.status FROM production_mou m WHERE m.sample_request_id = s.id AND m.status NOT IN ('CANCELLED', 'REJECTED') ORDER BY m.created_at DESC, m.rowid DESC LIMIT 1) AS mou_status, (SELECT m.dp_amount_required_idr FROM production_mou m WHERE m.sample_request_id = s.id AND m.status = 'ACCEPTED' ORDER BY m.created_at DESC, m.rowid DESC LIMIT 1) AS mou_dp_idr, EXISTS (SELECT 1 FROM invoices i WHERE i.sample_request_id = s.id AND i.ref_type = 'DP_PRODUCTION_LEGAL' AND (i.status = 'RESCHEDULED' OR (i.status = 'OPEN' AND (SELECT COALESCE(SUM(a.amount_idr), 0) FROM fund_allocations a WHERE a.invoice_id = i.id) >= i.total_idr))) AS dp_paid FROM sample_requests s LEFT JOIN clients c ON c.id = s.client_id LEFT JOIN master_operator o ON o.id = s.pic_crm_id";
 
 /** Satu harga per simpan (v2.2), hanya-tambah; terbaru per iterasi berlaku. */
 export const PRICE_INSERT_SQL =
   "INSERT INTO pricing_formulas (id, sample_request_id, iteration_number, raw_material_cost_idr, packaging_cost_idr, operational_cost_idr, regulatory_cost_idr, hpp_unit_idr, margin_bp, final_unit_price_idr, notes, recorded_by, recorded_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO NOTHING;";
 
 export const PRICES_SQL =
-  "SELECT p.*, o.nama_operator AS recorded_by_name FROM pricing_formulas p LEFT JOIN master_operator o ON o.id = p.recorded_by WHERE p.sample_request_id = ?1 ORDER BY p.iteration_number, p.recorded_at, p.id;";
+  "SELECT p.*, o.nama_operator AS recorded_by_name FROM pricing_formulas p LEFT JOIN master_operator o ON o.id = p.recorded_by WHERE p.sample_request_id = ?1 ORDER BY p.iteration_number, p.recorded_at, p.rowid;";
 
 /** Kolom rincian HPP yang hanya untuk pemegang `pricing.view` (keputusan H). */
 export const PRICE_COST_COLUMNS = [

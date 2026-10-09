@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-desktop-cancel-invoice"
+description = "Enables the desktop_cancel_invoice command without any pre-configured scope."
+commands.allow = ["desktop_cancel_invoice"]
+
+[[permission]]
+identifier = "deny-desktop-cancel-invoice"
+description = "Denies the desktop_cancel_invoice command without any pre-configured scope."
+commands.deny = ["desktop_cancel_invoice"]

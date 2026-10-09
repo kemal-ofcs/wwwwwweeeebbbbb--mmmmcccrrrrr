@@ -40,7 +40,7 @@ import { SampleForm } from "./SampleForm";
  * klien itu (tombol dari panel lead).
  */
 
-type View = "rnd" | "finance" | "active" | "closed" | "all";
+type View = "rnd" | "finance" | "design" | "active" | "closed" | "all";
 
 /** Antrean kerja RnD (v2.1): menunggu keputusan atau sedang dibuat. */
 const RND_QUEUE_STATUSES = ["RND_REVIEW", "IN_RND"];
@@ -57,6 +57,20 @@ function inFinanceQueue(row: SampleRequestRecord) {
       "WAITING_SAMPLE_PAYMENT",
       "WAITING_REVISION_PAYMENT",
     ].includes(row.status)
+  );
+}
+
+/**
+ * Antrean kerja Desain (v2.4): brief tanpa mockup, dummy yang boleh dicetak
+ * (klien sudah ACC sampel) atau dicetak ulang, dan dummy yang sedang dicetak.
+ */
+function inDesignQueue(row: SampleRequestRecord) {
+  if (row.design_status === "MOCKUP" && row.mockup_ready !== 1) return true;
+  if (row.design_status === "DUMMY_PRINTING") return true;
+  return (
+    (row.design_status === "MOCKUP" ||
+      row.design_status === "DUMMY_REVISION") &&
+    row.status === "CLIENT_ACC"
   );
 }
 
@@ -85,6 +99,7 @@ function emptyDraft(clientId: string, client?: ClientRecord): SampleDraftInput {
       : "",
     is_dummy_required: false,
     is_paid_sample: null,
+    is_test_requested: false,
   };
 }
 
@@ -115,6 +130,7 @@ function draftOf(row: SampleRequestRecord): SampleDraftInput {
     ship_to_address: row.ship_to_address,
     is_dummy_required: row.is_dummy_required === 1,
     is_paid_sample: row.is_paid_sample === 1,
+    is_test_requested: row.is_test_requested === 1,
   };
 }
 
@@ -123,6 +139,7 @@ export function SampleWorkspace() {
   const canManage = hasPermission(user, "samples.manage");
   const canRnd = hasPermission(user, "rnd.manage");
   const canFinance = hasPermission(user, "finance.manage");
+  const canDesign = hasPermission(user, "design.manage");
   const [requests, setRequests] = useState<SampleRequestRecord[]>([]);
   const [feeMode, setFeeMode] = useState<SampleFeeMode>("PER_REQUEST");
   const [clients, setClients] = useState<ClientRecord[]>([]);
@@ -133,7 +150,15 @@ export function SampleWorkspace() {
   const [notice, setNotice] = useState("");
   // Staf RnD dan Finance membuka antreannya lebih dulu; CS di daftar biasa.
   const [view, setView] = useState<View>(
-    canManage ? "active" : canRnd ? "rnd" : canFinance ? "finance" : "active",
+    canManage
+      ? "active"
+      : canRnd
+        ? "rnd"
+        : canFinance
+          ? "finance"
+          : canDesign
+            ? "design"
+            : "active",
   );
   const [search, setSearch] = useState("");
   const [form, setForm] = useState<{
@@ -214,6 +239,7 @@ export function SampleWorkspace() {
       if (view === "rnd" && !RND_QUEUE_STATUSES.includes(row.status))
         return false;
       if (view === "finance" && !inFinanceQueue(row)) return false;
+      if (view === "design" && !inDesignQueue(row)) return false;
       if (view === "active" && closed) return false;
       if (view === "closed" && !closed) return false;
       if (!term) return true;
@@ -224,7 +250,7 @@ export function SampleWorkspace() {
       ].some((value) => value.toLowerCase().includes(term));
     });
     // Antrean diurutkan dari deadline terdekat (`YYYY-MM-DD`).
-    return view === "rnd" || view === "finance"
+    return view === "rnd" || view === "finance" || view === "design"
       ? [...rows].sort((a, b) => a.deadline_at.localeCompare(b.deadline_at))
       : rows;
   }, [requests, view, search]);
@@ -270,6 +296,7 @@ export function SampleWorkspace() {
             [
               ...(canRnd ? ([["rnd", "RnD queue"]] as const) : []),
               ...(canFinance ? ([["finance", "Finance queue"]] as const) : []),
+              ...(canDesign ? ([["design", "Design queue"]] as const) : []),
               ["active", "In progress"],
               ["closed", "Closed"],
               ["all", "All"],

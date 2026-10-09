@@ -13,6 +13,9 @@ use url::Url;
 use zeroize::Zeroizing;
 
 use super::clients;
+use super::design;
+use super::finance;
+use super::mou;
 use super::notifications;
 use super::samples;
 use super::models::{CommandError, OperatorUser};
@@ -657,6 +660,36 @@ const SNAPSHOT_SOURCES: &[SnapshotSource] = &[
         payload_key: "pricingFormulas",
         table: "pricing_formulas",
         sql: "SELECT * FROM pricing_formulas ORDER BY recorded_at, id;",
+    },
+    SnapshotSource {
+        payload_key: "financeOptions",
+        table: "finance_options",
+        sql: "SELECT * FROM finance_options ORDER BY kind, sort_order, id;",
+    },
+    SnapshotSource {
+        payload_key: "invoices",
+        table: "invoices",
+        sql: "SELECT * FROM invoices ORDER BY created_at, id;",
+    },
+    SnapshotSource {
+        payload_key: "incomingFunds",
+        table: "incoming_funds",
+        sql: "SELECT * FROM incoming_funds ORDER BY created_at, id;",
+    },
+    SnapshotSource {
+        payload_key: "fundAllocations",
+        table: "fund_allocations",
+        sql: "SELECT * FROM fund_allocations ORDER BY recorded_at, id;",
+    },
+    SnapshotSource {
+        payload_key: "designTickets",
+        table: "design_tickets",
+        sql: "SELECT * FROM design_tickets ORDER BY created_at, id;",
+    },
+    SnapshotSource {
+        payload_key: "productionMou",
+        table: "production_mou",
+        sql: "SELECT * FROM production_mou ORDER BY created_at, id;",
     },
     // Direktori operator hanya-baca untuk nama PIC dan pilihan pindah PIC saat
     // offline. SENGAJA hanya empat kolom: hash password, email, nomor HP, dan
@@ -1410,6 +1443,12 @@ impl TursoClient {
                 ('rnd.manage', 'Record RnD decisions', 'Samples', 'Accept or reject sample requests, and record each finished sample with its formula.', 1, 60),
                 ('finance.manage', 'Record Finance decisions', 'Finance', 'Price finished samples, set revision fees, and record payments as received.', 1, 61),
                 ('pricing.view', 'View cost and margin', 'Finance', 'See the cost breakdown and margin behind each sample price.', 1, 61),
+                ('invoices.view', 'View invoices', 'Finance', 'See invoices, incoming payments, and which invoices are paid.', 1, 62),
+                ('finance_options.manage', 'Manage taxes and discounts', 'Finance', 'Add and change the taxes and discounts used on new invoices.', 1, 63),
+                ('payments.approve_exception', 'Approve payment exceptions', 'Finance', 'Accept a partial payment into installments, or keep an overpayment as a client deposit.', 1, 64),
+                ('design.manage', 'Do design work', 'Design', 'Upload mockups, print dummies, and record dummies as sent.', 1, 65),
+                ('mou.manage', 'Manage MoUs', 'Samples', 'Draft MoUs for approved samples, send them, and record the client''s answer.', 1, 60),
+                ('design.override_dummy_limit', 'Override the dummy rejection limit', 'Design', 'Print a dummy again after the client has rejected it as many times as the limit allows.', 1, 66),
                 ('password_reset.view', 'View password reset history', 'Operators', 'Review who requested a password recovery, with their verification photo.', 1, 62),
                 ('password_reset.delete', 'Delete password reset history', 'Operators', 'Delete password recovery records and their photos.', 1, 64),
                 ('two_factor.reset', 'Reset another operator''s 2FA', 'Operators', 'Turn off two-step verification for another operator who lost their phone.', 1, 66),
@@ -1426,6 +1465,7 @@ impl TursoClient {
                 ('notifications_cs.view', 'CS notifications', 'Notifications', 'See new leads and leads that went Cold in the notification bell.', 1, 112),
                 ('notifications_rnd.view', 'RnD notifications', 'Notifications', 'See sample requests waiting for RnD review in the notification bell.', 1, 114),
                 ('notifications_finance.view', 'Finance notifications', 'Notifications', 'See sample fees and revision fees waiting for Finance in the notification bell.', 1, 116),
+                ('notifications_design.view', 'Design notifications', 'Notifications', 'See new design briefs and dummy revisions in the notification bell.', 1, 118),
                 ('sync.view', 'View sync status', 'Sync', 'View the sync indicator and queue.', 1, 120),
                 ('sync.retry', 'Retry sync and resolve conflicts', 'Sync', 'Trigger a manual sync and resolve conflicts.', 1, 130),
                 ('diagnostics.view', 'View system diagnostics', 'Diagnostics', 'View runtime information and database health.', 1, 140);"#,
@@ -1444,7 +1484,8 @@ impl TursoClient {
                 WHERE permission_key NOT IN (
                     'roles.manage', 'operators.manage', 'operators.view', 'diagnostics.view',
                     'password_reset.delete', 'two_factor.reset', 'password_reset.approve',
-                    'database_backup.restore', 'settings.manage'
+                    'database_backup.restore', 'settings.manage', 'finance_options.manage',
+                    'payments.approve_exception'
                 );"#,
                 vec![],
             ),
@@ -1457,7 +1498,7 @@ impl TursoClient {
                 WHERE permission_key IN (
                     'home.view', 'dashboard.view', 'clients.view', 'clients.manage',
                     'leads.view', 'leads.manage', 'samples.view', 'samples.manage',
-                    'notifications_cs.view', 'sync.view'
+                    'notifications_cs.view', 'sync.view', 'mou.manage'
                 );"#,
                 vec![],
             ),
@@ -1525,6 +1566,36 @@ impl TursoClient {
                 "INSERT OR IGNORE INTO setting_gex_system (key, value) VALUES ('finance_permissions_seeded', '1');",
                 vec![],
             ),
+            // Izin melihat tagihan (v2.3a, PRD F-17), sekali saja. WAJIB identik
+            // dengan `INVOICE_PERMISSION_SEED_SQL` di `db-schema.ts`.
+            Statement::new(
+                "INSERT OR IGNORE INTO role_permission (role_id, permission_key, is_allowed, updated_at, updated_by) SELECT r.id, p.permission_key, 1, datetime('now'), 'system' FROM app_role r JOIN app_permission p ON p.permission_key = 'invoices.view' WHERE r.role_key IN ('cs', 'finance') AND NOT EXISTS (SELECT 1 FROM setting_gex_system WHERE key = 'invoice_permissions_seeded');",
+                vec![],
+            ),
+            Statement::new(
+                "INSERT OR IGNORE INTO setting_gex_system (key, value) VALUES ('invoice_permissions_seeded', '1');",
+                vec![],
+            ),
+            // Izin MoU (v2.5a, PRD F-20), sekali saja. WAJIB identik dengan
+            // `MOU_PERMISSION_SEED_SQL` di `db-schema.ts`.
+            Statement::new(
+                "INSERT OR IGNORE INTO role_permission (role_id, permission_key, is_allowed, updated_at, updated_by) SELECT r.id, p.permission_key, 1, datetime('now'), 'system' FROM app_role r JOIN app_permission p ON p.permission_key = 'mou.manage' WHERE r.role_key = 'cs' AND NOT EXISTS (SELECT 1 FROM setting_gex_system WHERE key = 'mou_permissions_seeded');",
+                vec![],
+            ),
+            Statement::new(
+                "INSERT OR IGNORE INTO setting_gex_system (key, value) VALUES ('mou_permissions_seeded', '1');",
+                vec![],
+            ),
+            // Izin Desain (v2.4, PRD F-19), sekali saja. WAJIB identik dengan
+            // `DESIGN_PERMISSION_SEED_SQL` di `db-schema.ts`.
+            Statement::new(
+                "INSERT OR IGNORE INTO role_permission (role_id, permission_key, is_allowed, updated_at, updated_by) SELECT r.id, p.permission_key, 1, datetime('now'), 'system' FROM app_role r JOIN app_permission p ON p.permission_key IN ('design.manage', 'samples.view', 'clients.view', 'notifications_design.view') WHERE r.role_key = 'design' AND NOT EXISTS (SELECT 1 FROM setting_gex_system WHERE key = 'design_permissions_seeded');",
+                vec![],
+            ),
+            Statement::new(
+                "INSERT OR IGNORE INTO setting_gex_system (key, value) VALUES ('design_permissions_seeded', '1');",
+                vec![],
+            ),
             // Riwayat versi WAJIB lengkap, bukan hanya fondasinya.
             //
             // `isDatabaseSchemaReady` di `db-schema.ts` menuntut
@@ -1548,7 +1619,10 @@ impl TursoClient {
                 (7, 'sample-requests', datetime('now')),
                 (8, 'media-assets', datetime('now')),
                 (9, 'telegram-notifications', datetime('now')),
-                (10, 'rnd-and-pricing', datetime('now'));"#,
+                (10, 'rnd-and-pricing', datetime('now')),
+                (11, 'invoices-and-funds', datetime('now')),
+                (12, 'design-tickets', datetime('now')),
+                (13, 'production-mou', datetime('now'));"#,
                 vec![],
             ),
             // ============ DOMAIN MAKLONOS ============
@@ -1670,7 +1744,8 @@ impl TursoClient {
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     rnd_reject_reason_option_id TEXT NOT NULL DEFAULT '',
-                    revision_fee_idr INTEGER
+                    revision_fee_idr INTEGER,
+                    is_test_requested INTEGER NOT NULL DEFAULT 0
                 );"#,
                 vec![],
             ),
@@ -1733,6 +1808,119 @@ impl TursoClient {
                     notes TEXT NOT NULL DEFAULT '',
                     recorded_by INTEGER,
                     recorded_at TEXT NOT NULL
+                );"#,
+                vec![],
+            ),
+            // Tagihan dan uang masuk (v2.3a, PRD F-17). WAJIB identik dengan
+            // `db-schema.ts`. Lunas dihitung dari `fund_allocations`.
+            Statement::new(
+                r#"CREATE TABLE IF NOT EXISTS finance_options (
+                    id TEXT PRIMARY KEY,
+                    kind TEXT NOT NULL,
+                    label TEXT NOT NULL,
+                    rate_bp INTEGER NOT NULL,
+                    is_active INTEGER NOT NULL DEFAULT 1,
+                    sort_order INTEGER NOT NULL DEFAULT 0,
+                    updated_at TEXT NOT NULL,
+                    installment_count INTEGER
+                );"#,
+                vec![],
+            ),
+            Statement::new(
+                r#"CREATE TABLE IF NOT EXISTS invoices (
+                    id TEXT PRIMARY KEY,
+                    invoice_number TEXT NOT NULL,
+                    client_id TEXT NOT NULL,
+                    sample_request_id TEXT NOT NULL DEFAULT '',
+                    ref_type TEXT NOT NULL,
+                    revision_index INTEGER NOT NULL DEFAULT 0,
+                    description TEXT NOT NULL DEFAULT '',
+                    subtotal_idr INTEGER NOT NULL,
+                    discount_label TEXT NOT NULL DEFAULT '',
+                    discount_bp INTEGER NOT NULL DEFAULT 0,
+                    discount_idr INTEGER NOT NULL DEFAULT 0,
+                    taxes_json TEXT NOT NULL DEFAULT '[]',
+                    tax_idr INTEGER NOT NULL DEFAULT 0,
+                    total_idr INTEGER NOT NULL,
+                    issued_on TEXT NOT NULL,
+                    due_on TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'OPEN',
+                    cancel_reason TEXT NOT NULL DEFAULT '',
+                    created_by INTEGER,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    parent_invoice_id TEXT NOT NULL DEFAULT '',
+                    installment_no INTEGER NOT NULL DEFAULT 0
+                );"#,
+                vec![],
+            ),
+            Statement::new(
+                r#"CREATE TABLE IF NOT EXISTS incoming_funds (
+                    id TEXT PRIMARY KEY,
+                    client_id TEXT NOT NULL DEFAULT '',
+                    received_on TEXT NOT NULL,
+                    amount_idr INTEGER NOT NULL,
+                    description TEXT NOT NULL DEFAULT '',
+                    proof_media_id TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL DEFAULT 'ACTIVE',
+                    void_reason TEXT NOT NULL DEFAULT '',
+                    recorded_by INTEGER,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    deposit_confirmed_by INTEGER,
+                    deposit_confirmed_at TEXT NOT NULL DEFAULT ''
+                );"#,
+                vec![],
+            ),
+            Statement::new(
+                r#"CREATE TABLE IF NOT EXISTS fund_allocations (
+                    id TEXT PRIMARY KEY,
+                    fund_id TEXT NOT NULL,
+                    invoice_id TEXT NOT NULL,
+                    amount_idr INTEGER NOT NULL,
+                    recorded_by INTEGER,
+                    recorded_at TEXT NOT NULL
+                );"#,
+                vec![],
+            ),
+            // MoU produksi (v2.5a, PRD F-20). WAJIB identik dengan `db-schema.ts`.
+            Statement::new(
+                r#"CREATE TABLE IF NOT EXISTS production_mou (
+                    id TEXT PRIMARY KEY,
+                    mou_number TEXT NOT NULL,
+                    sample_request_id TEXT NOT NULL,
+                    client_id TEXT NOT NULL,
+                    total_units INTEGER NOT NULL,
+                    unit_price_idr INTEGER NOT NULL,
+                    total_production_cost_idr INTEGER NOT NULL,
+                    production_lead_time_days INTEGER NOT NULL,
+                    regulatory_path TEXT NOT NULL,
+                    dp_bp INTEGER NOT NULL,
+                    dp_amount_required_idr INTEGER NOT NULL,
+                    notes TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL DEFAULT 'DRAFT',
+                    revision_notes TEXT NOT NULL DEFAULT '',
+                    status_changed_at TEXT NOT NULL,
+                    created_by INTEGER,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );"#,
+                vec![],
+            ),
+            // Tiket desain (v2.4, PRD F-19). WAJIB identik dengan `db-schema.ts`.
+            Statement::new(
+                r#"CREATE TABLE IF NOT EXISTS design_tickets (
+                    id TEXT PRIMARY KEY,
+                    sample_request_id TEXT NOT NULL,
+                    brief TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'MOCKUP',
+                    dummy_rejection_count INTEGER NOT NULL DEFAULT 0,
+                    dummy_tracking_no TEXT NOT NULL DEFAULT '',
+                    revision_notes TEXT NOT NULL DEFAULT '',
+                    status_changed_at TEXT NOT NULL,
+                    created_by INTEGER,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
                 );"#,
                 vec![],
             ),
@@ -1847,6 +2035,30 @@ impl TursoClient {
                 vec![],
             ),
             Statement::new(
+                "CREATE INDEX IF NOT EXISTS idx_invoices_sample ON invoices(sample_request_id);",
+                vec![],
+            ),
+            Statement::new(
+                "CREATE INDEX IF NOT EXISTS idx_invoices_client ON invoices(client_id);",
+                vec![],
+            ),
+            Statement::new(
+                "CREATE INDEX IF NOT EXISTS idx_fund_allocations_invoice ON fund_allocations(invoice_id);",
+                vec![],
+            ),
+            Statement::new(
+                "CREATE INDEX IF NOT EXISTS idx_fund_allocations_fund ON fund_allocations(fund_id);",
+                vec![],
+            ),
+            Statement::new(
+                "CREATE INDEX IF NOT EXISTS idx_design_tickets_sample ON design_tickets(sample_request_id);",
+                vec![],
+            ),
+            Statement::new(
+                "CREATE INDEX IF NOT EXISTS idx_production_mou_sample ON production_mou(sample_request_id);",
+                vec![],
+            ),
+            Statement::new(
                 "CREATE INDEX IF NOT EXISTS idx_media_asset_owner ON media_asset(owner_type, owner_id);",
                 vec![],
             ),
@@ -1947,6 +2159,8 @@ impl TursoClient {
             ("sample_requests", "rnd_reject_reason_option_id", "ALTER TABLE sample_requests ADD COLUMN rnd_reject_reason_option_id TEXT NOT NULL DEFAULT '';"),
             // Tarif revisi dari Finance (v2.2, PRD F-15).
             ("sample_requests", "revision_fee_idr", "ALTER TABLE sample_requests ADD COLUMN revision_fee_idr INTEGER;"),
+            // Sampel sekalian diuji (v2.3a, D-30).
+            ("sample_requests", "is_test_requested", "ALTER TABLE sample_requests ADD COLUMN is_test_requested INTEGER NOT NULL DEFAULT 0;"),
         ] {
             self.ensure_column(table, column, sql).await?;
         }
@@ -2054,6 +2268,21 @@ impl TursoClient {
         .await?;
         self.query_one(
             "INSERT OR IGNORE INTO schema_migration (version, name, applied_at) VALUES (-2018, 'rnd-pricing-v1', datetime('now'));",
+            vec![],
+        )
+        .await?;
+        self.query_one(
+            "INSERT OR IGNORE INTO schema_migration (version, name, applied_at) VALUES (-2019, 'invoices-funds-v1', datetime('now'));",
+            vec![],
+        )
+        .await?;
+        self.query_one(
+            "INSERT OR IGNORE INTO schema_migration (version, name, applied_at) VALUES (-2020, 'design-tickets-v1', datetime('now'));",
+            vec![],
+        )
+        .await?;
+        self.query_one(
+            "INSERT OR IGNORE INTO schema_migration (version, name, applied_at) VALUES (-2021, 'production-mou-v1', datetime('now'));",
             vec![],
         )
         .await?;
@@ -2225,7 +2454,7 @@ impl TursoClient {
             .query_one(
                 // Sentinel WAJIB dinaikkan setiap kali ensure_schema menambah
                 // tabel atau kolom — nilainya di sini dan pada INSERT harus sama.
-                "SELECT COUNT(*) AS total FROM schema_migration WHERE version = -2018;",
+                "SELECT COUNT(*) AS total FROM schema_migration WHERE version = -2021;",
                 vec![],
             )
             .await
@@ -2660,7 +2889,7 @@ impl TursoClient {
     ) -> Result<Option<String>, CommandError> {
         let row = self
             .query_one(
-                "SELECT s.status, s.is_paid_sample, s.revision_index, s.updated_at, COALESCE(c.free_revision_limit, 0) AS free_revision_limit, EXISTS (SELECT 1 FROM pricing_formulas p WHERE p.sample_request_id = s.id AND p.iteration_number = s.revision_index + 1) AS has_price FROM sample_requests s LEFT JOIN clients c ON c.id = s.client_id WHERE s.id = ?;",
+                format!("{} WHERE s.id = ?;", samples::SAMPLE_LIST_SQL),
                 vec![json!(entity_key)],
             )
             .await?
@@ -2691,7 +2920,10 @@ impl TursoClient {
             is_paid_sample: cloud_int("is_paid_sample") != 0,
             revision_index: cloud_int("revision_index"),
             free_revision_limit: cloud_int("free_revision_limit"),
-            has_price: cloud_int("has_price") != 0,
+            has_price: row.get("unit_price_idr").is_some_and(|value| !value.is_null()),
+            fee_paid: cloud_int("fee_paid") != 0,
+            test_ready: cloud_int("is_test_requested") == 0 || cloud_int("test_paid") != 0,
+            mockup_ready: cloud_int("mockup_ready") != 0,
         };
         let expected = samples::apply_sample_action(
             &state,
@@ -2708,6 +2940,276 @@ impl TursoClient {
             Err(message) => message.to_owned(),
             Ok(_) => "The sample step does not match the company rules in the database.".to_owned(),
         }))
+    }
+
+    /// Pemeriksaan cloud untuk tagihan dan uang masuk (v2.3a). `Some(pesan)` =
+    /// konflik. Aturannya sama dengan perangkat dan Web (`finance.rs`).
+    async fn finance_guard(
+        &self,
+        domain: &str,
+        operation: &str,
+        entity_key: &str,
+        payload: &Value,
+    ) -> Result<Option<String>, CommandError> {
+        let first_row = |sql: &str, args: Vec<Value>| {
+            let sql = sql.to_owned();
+            async move {
+                Ok::<Value, CommandError>(
+                    self.query_one(sql, args)
+                        .await?
+                        .to_objects()
+                        .into_iter()
+                        .next()
+                        .map(|row| Value::Object(row.into_iter().collect()))
+                        .unwrap_or(Value::Null),
+                )
+            }
+        };
+        let payload_text = |key: &str| payload.get(key).and_then(Value::as_str).unwrap_or_default().to_owned();
+        match (domain, operation) {
+            ("invoice", "create") => {
+                let sample_id = payload_text("sample_request_id");
+                let ref_type = payload_text("ref_type");
+                if sample_id.is_empty() || ref_type == "OTHER" {
+                    return Ok(None);
+                }
+                let row = first_row(
+                    finance::INVOICE_DUPLICATE_SQL,
+                    vec![
+                        json!(sample_id),
+                        json!(ref_type),
+                        json!(payload.get("revision_index").and_then(Value::as_i64).unwrap_or(0)),
+                        json!(entity_key),
+                    ],
+                )
+                .await?;
+                let total = row.get("total").and_then(lenient_i64).unwrap_or(0);
+                Ok((total > 0).then(|| finance::INVOICE_DUPLICATE.to_owned()))
+            }
+            ("invoice", "cancel") => {
+                let row = first_row(
+                    "SELECT status, (SELECT COUNT(*) FROM fund_allocations WHERE invoice_id = ?1) AS allocations FROM invoices WHERE id = ?1;",
+                    vec![json!(entity_key)],
+                )
+                .await?;
+                let open = row.get("status").and_then(Value::as_str) == Some("OPEN")
+                    && row.get("allocations").and_then(lenient_i64).unwrap_or(0) == 0;
+                Ok((!open).then(|| "This invoice was paid or cancelled on another device first.".to_owned()))
+            }
+            ("fund", "void") => {
+                let row = first_row(
+                    "SELECT status, (SELECT COUNT(*) FROM fund_allocations WHERE fund_id = ?1) AS allocations FROM incoming_funds WHERE id = ?1;",
+                    vec![json!(entity_key)],
+                )
+                .await?;
+                let active = row.get("status").and_then(Value::as_str) == Some("ACTIVE")
+                    && row.get("allocations").and_then(lenient_i64).unwrap_or(0) == 0;
+                Ok((!active).then(|| "This incoming payment was allocated or voided on another device first.".to_owned()))
+            }
+            ("fund", "allocate") => {
+                let row = first_row(
+                    finance::ALLOCATION_STATE_SQL,
+                    vec![json!(payload_text("invoice_id")), json!(payload_text("fund_id"))],
+                )
+                .await?;
+                Ok(finance::allocation_check(&row, payload.get("amount_idr").unwrap_or(&Value::Null)))
+            }
+            ("invoice", "reschedule") => {
+                let row = first_row(
+                    finance::RESCHEDULE_STATE_SQL,
+                    vec![json!(entity_key), json!(payload_text("fund_id"))],
+                )
+                .await?;
+                let int = |key: &str| row.get(key).and_then(lenient_i64).unwrap_or(0);
+                let text_of = |key: &str| row.get(key).and_then(Value::as_str).unwrap_or_default().to_owned();
+                if text_of("status") != "OPEN" {
+                    return Ok(Some("This invoice was paid or changed on another device first.".to_owned()));
+                }
+                if text_of("fund_status") != "ACTIVE" {
+                    return Ok(Some("This incoming payment is void or does not exist.".to_owned()));
+                }
+                if let Some(message) = finance::partial_payment_error(
+                    payload.get("amount_idr"),
+                    &text_of("ref_type"),
+                    int("invoice_remaining"),
+                    int("fund_unallocated"),
+                ) {
+                    return Ok(Some(message));
+                }
+                // Sisa yang dijadwal ulang dan identitas tagihan wajib sama
+                // dengan yang dilihat penyetujunya.
+                let amount = payload.get("amount_idr").and_then(Value::as_i64).unwrap_or(0);
+                let same = payload.get("remaining_after_idr").and_then(Value::as_i64)
+                    == Some(int("invoice_remaining") - amount)
+                    && payload_text("invoice_number") == text_of("invoice_number")
+                    && payload_text("client_id") == text_of("client_id");
+                Ok((!same).then(|| "This invoice was paid or changed on another device first.".to_owned()))
+            }
+            ("fund", "deposit") => {
+                let row = first_row(finance::FUND_DEPOSIT_STATE_SQL, vec![json!(entity_key)]).await?;
+                let text_of = |key: &str| row.get(key).and_then(Value::as_str).unwrap_or_default().to_owned();
+                let recorded = text_of("client_id");
+                let client = payload_text("client_id");
+                if !recorded.is_empty() && recorded != client {
+                    return Ok(Some("This payment already belongs to another client.".to_owned()));
+                }
+                Ok(finance::deposit_error(
+                    &text_of("status"),
+                    &text_of("deposit_confirmed_at"),
+                    &client,
+                    row.get("unallocated").and_then(lenient_i64).unwrap_or(0),
+                )
+                .map(str::to_owned))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    /// Pemeriksaan cloud untuk tiket desain (v2.4). `Some(pesan)` = konflik.
+    /// Aturannya sama dengan perangkat dan Web (`design.rs`); batas penolakan
+    /// dibaca dari setelan cloud, izin override dari pencatatnya.
+    async fn design_guard(
+        &self,
+        operation: &str,
+        entity_key: &str,
+        payload: &Value,
+    ) -> Result<Option<String>, CommandError> {
+        let payload_text = |key: &str| payload.get(key).and_then(Value::as_str).unwrap_or_default().to_owned();
+        let sample_id = payload_text("sample_request_id");
+        if operation == "create" {
+            let status = self
+                .query_one("SELECT status FROM sample_requests WHERE id = ?;", vec![json!(sample_id)])
+                .await?
+                .to_objects()
+                .into_iter()
+                .next()
+                .and_then(|row| row.get("status").and_then(Value::as_str).map(str::to_owned));
+            let Some(status) = status else {
+                return Ok(Some("This sample request does not exist in the database.".into()));
+            };
+            let active = self
+                .query_one(design::DESIGN_ACTIVE_SQL, vec![json!(sample_id), json!(entity_key)])
+                .await?
+                .to_objects()
+                .into_iter()
+                .next()
+                .and_then(|row| row.get("total").and_then(lenient_i64))
+                .unwrap_or(0);
+            return Ok(design::design_request_error(&status, active).map(str::to_owned));
+        }
+        let row = self
+            .query_one(format!("{} WHERE d.id = ?;", design::DESIGN_LIST_SQL), vec![json!(entity_key)])
+            .await?
+            .to_objects()
+            .into_iter()
+            .next();
+        let Some(row) = row else {
+            return Ok(Some("This design ticket does not exist in the database.".into()));
+        };
+        let cloud_text = |key: &str| row.get(key).and_then(Value::as_str).unwrap_or_default().to_owned();
+        let cloud_int = |key: &str| row.get(key).and_then(lenient_i64).unwrap_or(0);
+        let base_status = payload_text("base_status");
+        let base_count = payload.get("base_rejection_count").and_then(Value::as_i64).unwrap_or(-1);
+        if cloud_text("status") != base_status || cloud_int("dummy_rejection_count") != base_count {
+            return Ok(Some(design::DESIGN_CHANGED_ELSEWHERE.to_owned()));
+        }
+        let values: HashMap<String, String> = self
+            .query_one(
+                "SELECT key, value FROM setting_gex_system WHERE key = ?;",
+                vec![json!(samples::SETTING_MAX_DUMMY_REJECTIONS)],
+            )
+            .await?
+            .to_objects()
+            .into_iter()
+            .filter_map(|row| {
+                Some((
+                    row.get("key")?.as_str()?.to_owned(),
+                    row.get("value")?.as_str()?.to_owned(),
+                ))
+            })
+            .collect();
+        let sample_status = cloud_text("sample_status");
+        let state = design::DesignState {
+            status: &base_status,
+            sample_status: &sample_status,
+            has_mockup: cloud_int("has_mockup") != 0,
+            dummy_paid: cloud_int("dummy_paid") != 0,
+            rejection_count: base_count,
+            max_rejections: samples::read_business_settings(&values).max_dummy_rejections,
+            can_override: payload.get("override_limit").and_then(Value::as_bool).unwrap_or(false),
+        };
+        let expected = design::apply_design_action(&state, &payload_text("action"));
+        let matches = expected.as_ref().is_ok_and(|result| {
+            result.status == payload_text("status")
+                && Some(result.rejection_count) == payload.get("rejection_count").and_then(Value::as_i64)
+        });
+        Ok((!matches).then(|| match expected {
+            Err(message) => message.to_owned(),
+            Ok(_) => "The design step does not match the company rules in the database.".to_owned(),
+        }))
+    }
+
+    /// Pemeriksaan cloud untuk MoU (v2.5a). `Some(pesan)` = konflik. Aturannya
+    /// sama dengan perangkat dan Web (`mou.rs`).
+    async fn mou_guard(
+        &self,
+        operation: &str,
+        entity_key: &str,
+        payload: &Value,
+    ) -> Result<Option<String>, CommandError> {
+        let payload_text = |key: &str| payload.get(key).and_then(Value::as_str).unwrap_or_default().to_owned();
+        if operation == "create" {
+            let sample_id = payload_text("sample_request_id");
+            let status = self
+                .query_one("SELECT status FROM sample_requests WHERE id = ?;", vec![json!(sample_id)])
+                .await?
+                .to_objects()
+                .into_iter()
+                .next()
+                .and_then(|row| row.get("status").and_then(Value::as_str).map(str::to_owned));
+            let Some(status) = status else {
+                return Ok(Some("This sample request does not exist in the database.".into()));
+            };
+            let active = self
+                .query_one(mou::MOU_ACTIVE_SQL, vec![json!(sample_id), json!(entity_key)])
+                .await?
+                .to_objects()
+                .into_iter()
+                .next()
+                .and_then(|row| row.get("total").and_then(lenient_i64))
+                .unwrap_or(0);
+            return Ok(mou::mou_request_error(&status, active).map(str::to_owned));
+        }
+        let row = self
+            .query_one(format!("{} WHERE m.id = ?;", mou::MOU_LIST_SQL), vec![json!(entity_key)])
+            .await?
+            .to_objects()
+            .into_iter()
+            .next();
+        let Some(row) = row else {
+            return Ok(Some("This MoU does not exist in the database.".into()));
+        };
+        let cloud_text = |key: &str| row.get(key).and_then(Value::as_str).unwrap_or_default().to_owned();
+        if operation == "update" {
+            if cloud_text("status") != "DRAFT" {
+                return Ok(Some(mou::MOU_NOT_EDITABLE.to_owned()));
+            }
+            return Ok((cloud_text("updated_at") != payload_text("base_updated_at"))
+                .then(|| mou::MOU_CHANGED_ELSEWHERE.to_owned()));
+        }
+        let base_status = payload_text("base_status");
+        if cloud_text("status") != base_status {
+            return Ok(Some(mou::MOU_CHANGED_ELSEWHERE.to_owned()));
+        }
+        let dummy_ready = row.get("dummy_ready").and_then(lenient_i64).unwrap_or(0) != 0;
+        let expected = mou::apply_mou_action(&base_status, dummy_ready, &payload_text("action"));
+        Ok(match expected {
+            Err(message) => Some(message.to_owned()),
+            Ok(status) if status != payload_text("status") => {
+                Some("The MoU step does not match the company rules in the database.".to_owned())
+            }
+            Ok(_) => None,
+        })
     }
 
     /// Isi satu foto dari cloud (base64), atau `None` bila tidak ada.
@@ -3705,6 +4207,63 @@ impl TursoClient {
                 }
             }
 
+            // Tagihan dan uang masuk (v2.3a): pembatalan, void, dan alokasi
+            // hanya berlaku bila cloud masih seperti yang dilihat pencatatnya;
+            // dua perangkat offline yang melunasi tagihan yang sama, atau
+            // membuat tagihan ganda untuk satu tiket, menjadi konflik.
+            if matches!(domain, "invoice" | "fund") {
+                if let Some(message) = self
+                    .finance_guard(domain, operation, entity_key, &parsed_payload)
+                    .await?
+                {
+                    push_results.push(json!({
+                        "eventId": event_id,
+                        "status": "conflict",
+                        "reason": message.clone(),
+                        "message": message,
+                        "serverRevision": 0
+                    }));
+                    continue;
+                }
+            }
+
+            // Tiket desain (v2.4): satu tiket aktif per tiket sampel, dan
+            // langkahnya dihitung ulang dengan aturan dan setelan cloud.
+            if domain == "design" {
+                if let Some(message) = self
+                    .design_guard(operation, entity_key, &parsed_payload)
+                    .await?
+                {
+                    push_results.push(json!({
+                        "eventId": event_id,
+                        "status": "conflict",
+                        "reason": message.clone(),
+                        "message": message,
+                        "serverRevision": 0
+                    }));
+                    continue;
+                }
+            }
+
+            // MoU (v2.5a): satu MoU aktif per tiket sampel, suntingan hanya
+            // pada draf yang belum diubah perangkat lain, dan langkah dihitung
+            // ulang dengan status dan dummy di cloud.
+            if domain == "mou" {
+                if let Some(message) = self
+                    .mou_guard(operation, entity_key, &parsed_payload)
+                    .await?
+                {
+                    push_results.push(json!({
+                        "eventId": event_id,
+                        "status": "conflict",
+                        "reason": message.clone(),
+                        "message": message,
+                        "serverRevision": 0
+                    }));
+                    continue;
+                }
+            }
+
             // Foto hanya untuk tiket yang ada di cloud. Event `sample/create`
             // tiba lebih dulu di antrean yang sama, jadi urutannya terjaga.
             if domain == "media" {
@@ -4463,6 +5022,11 @@ fn canonical_sync_route(domain: &str, operation: &str) -> Option<(&'static str, 
         "sample" | "sample_requests" => "sample",
         "media" | "media_asset" => "media",
         "audit" | "domain_audit_log" => "audit",
+        "finance-option" | "finance_options" => "finance-option",
+        "invoice" | "invoices" => "invoice",
+        "fund" | "incoming_funds" => "fund",
+        "design" | "design_tickets" => "design",
+        "mou" | "production_mou" => "mou",
         _ => return None,
     };
     let canonical_operation = match (canonical_domain, operation) {
@@ -4478,6 +5042,19 @@ fn canonical_sync_route(domain: &str, operation: &str) -> Option<(&'static str, 
         ("sample", "update") => "update",
         ("sample", "transition") => "transition",
         ("sample", "price") => "price",
+        ("invoice", "reschedule") => "reschedule",
+        ("fund", "deposit") => "deposit",
+        ("finance-option", "upsert") => "upsert",
+        ("invoice", "create") => "create",
+        ("invoice", "cancel") => "cancel",
+        ("fund", "record") => "record",
+        ("fund", "void") => "void",
+        ("fund", "allocate") => "allocate",
+        ("design", "create") => "create",
+        ("design", "transition") => "transition",
+        ("mou", "create") => "create",
+        ("mou", "update") => "update",
+        ("mou", "transition") => "transition",
         ("media", "upload") => "upload",
         ("audit", "record") => "record",
         _ => return None,
@@ -4787,6 +5364,7 @@ async fn apply_event_to_turso(
                             flag("is_paid_sample"),
                             json!(timestamp),
                             payload.get("created_by").filter(|value| value.is_i64()).cloned().unwrap_or(Value::Null),
+                            flag("is_test_requested"),
                         ],
                     )
                     .await?;
@@ -4820,6 +5398,7 @@ async fn apply_event_to_turso(
                             field("deadline_at"),
                             field("ship_to_address"),
                             json!(timestamp),
+                            flag("is_test_requested"),
                         ],
                     )
                     .await?;
@@ -5002,6 +5581,542 @@ async fn apply_event_to_turso(
             // Grup CS: sampel boleh dikirim (PRD FR-08, v2.2).
             turso
                 .query_one(notifications::NOTIFY_SAMPLE_PRICED_SQL, vec![json!(price_id)])
+                .await?;
+        }
+        ("finance-option", "upsert") => {
+            let option = finance::validate_finance_option(payload)
+                .map_err(|message| CommandError::new("TURSO_SYNC_PAYLOAD_INVALID", message))?;
+            if entity_key.is_empty() || clients::parse_stored_timestamp(&text("updated_at")).is_none() {
+                return Err(CommandError::new(
+                    "TURSO_SYNC_PAYLOAD_INVALID",
+                    "The tax or discount is incomplete or invalid.",
+                ));
+            }
+            // `kind` sengaja tidak ikut DO UPDATE: jenisnya tidak pernah berubah.
+            turso
+                .query_one(
+                    finance::FINANCE_OPTION_UPSERT_SQL,
+                    vec![
+                        json!(entity_key),
+                        json!(option.kind),
+                        json!(option.label),
+                        json!(option.rate_bp),
+                        json!(i64::from(option.is_active)),
+                        json!(number("sort_order")),
+                        json!(text("updated_at")),
+                        json!(option.installment_count),
+                    ],
+                )
+                .await?;
+        }
+        ("design", "create") => {
+            // Kelayakan (tiket sampel masih terbuka, belum ada tiket aktif)
+            // diperiksa `design_guard`. Brief sekaligus catatan linimasanya.
+            let brief = design::normalize_design_brief(payload.get("brief"));
+            let created_at = text("created_at");
+            let sample_id = text("sample_request_id");
+            let log_id = payload
+                .get("log")
+                .and_then(|log| log.get("id"))
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned();
+            let (Some(brief), false, false, false, Some(_)) = (
+                brief,
+                entity_key.is_empty(),
+                sample_id.is_empty(),
+                log_id.is_empty(),
+                clients::parse_stored_timestamp(&created_at),
+            ) else {
+                return Err(CommandError::new(
+                    "TURSO_SYNC_PAYLOAD_INVALID",
+                    "The design brief is incomplete or invalid.",
+                ));
+            };
+            let created_by = payload.get("created_by").filter(|value| value.is_i64()).cloned().unwrap_or(Value::Null);
+            turso
+                .query_one(
+                    design::DESIGN_INSERT_SQL,
+                    vec![json!(entity_key), json!(sample_id), json!(brief), json!(created_at), created_by.clone()],
+                )
+                .await?;
+            turso
+                .query_one(
+                    samples::SAMPLE_STATUS_LOG_INSERT_SQL,
+                    vec![
+                        json!(log_id),
+                        json!(sample_id),
+                        json!(""),
+                        json!("MOCKUP"),
+                        json!(design::DESIGN_REQUEST_ACTION),
+                        json!(brief),
+                        json!(""),
+                        created_by,
+                        json!(created_at),
+                    ],
+                )
+                .await?;
+            turso
+                .query_one(notifications::NOTIFY_DESIGN_SQL, vec![json!(log_id), json!(entity_key)])
+                .await?;
+        }
+        ("design", "transition") => {
+            // Kecocokan dengan status cloud dan aturannya diperiksa
+            // `design_guard`; WHERE status/hitungan di SQL menjaga sisanya.
+            let status = text("status");
+            let base_status = text("base_status");
+            let action = text("action");
+            let changed_at = text("changed_at");
+            let sample_id = text("sample_request_id");
+            let log = payload.get("log").filter(|value| value.is_object());
+            let notes = log
+                .and_then(|log| log.get("notes"))
+                .and_then(Value::as_str)
+                .and_then(samples::normalize_sample_notes);
+            let log_id = log
+                .and_then(|log| log.get("id"))
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned();
+            let tracking = design::normalize_tracking_no(payload.get("tracking_no"));
+            let valid = !entity_key.is_empty()
+                && !sample_id.is_empty()
+                && !log_id.is_empty()
+                && design::DESIGN_STATUSES.contains(&status.as_str())
+                && design::DESIGN_STATUSES.contains(&base_status.as_str())
+                && design::DESIGN_ACTIONS.contains(&action.as_str())
+                && clients::parse_stored_timestamp(&changed_at).is_some();
+            let (Some(notes), Some(tracking), true) = (notes, tracking, valid) else {
+                return Err(CommandError::new(
+                    "TURSO_SYNC_PAYLOAD_INVALID",
+                    "The design step is incomplete or invalid.",
+                ));
+            };
+            // Resi hanya pada langkah kirim, catatan revisi hanya pada revisi.
+            let tracking = if action == "DUMMY_SENT" { json!(tracking) } else { Value::Null };
+            let revision_notes = if action == "DUMMY_REVISE" { json!(notes) } else { Value::Null };
+            let recorded_by = log
+                .and_then(|log| log.get("recorded_by"))
+                .filter(|value| value.is_i64())
+                .cloned()
+                .unwrap_or(Value::Null);
+            turso
+                .query_one(
+                    design::DESIGN_TRANSITION_SQL,
+                    vec![
+                        json!(entity_key),
+                        json!(status),
+                        json!(number("rejection_count")),
+                        tracking,
+                        revision_notes,
+                        json!(changed_at),
+                        json!(base_status),
+                        json!(number("base_rejection_count")),
+                    ],
+                )
+                .await?;
+            turso
+                .query_one(
+                    samples::SAMPLE_STATUS_LOG_INSERT_SQL,
+                    vec![
+                        json!(log_id),
+                        json!(sample_id),
+                        json!(base_status),
+                        json!(status),
+                        json!(action),
+                        json!(notes),
+                        json!(""),
+                        recorded_by,
+                        json!(changed_at),
+                    ],
+                )
+                .await?;
+            turso
+                .query_one(notifications::NOTIFY_DESIGN_SQL, vec![json!(log_id), json!(entity_key)])
+                .await?;
+        }
+        ("mou", "create") | ("mou", "update") => {
+            // Kelayakan dan kecocokan draf diperiksa `mou_guard`. Total dan DP
+            // dihitung ulang dari isi payload, tidak dipercaya.
+            let terms = mou::validate_mou_terms(payload.get("terms").unwrap_or(&Value::Null))
+                .map_err(|message| CommandError::new("TURSO_SYNC_PAYLOAD_INVALID", message))?;
+            let sample_id = text("sample_request_id");
+            if operation == "update" {
+                let updated_at = text("updated_at");
+                if entity_key.is_empty() || clients::parse_stored_timestamp(&updated_at).is_none() {
+                    return Err(CommandError::new("TURSO_SYNC_PAYLOAD_INVALID", "The MoU change is incomplete or invalid."));
+                }
+                turso
+                    .query_one(
+                        mou::MOU_UPDATE_SQL,
+                        vec![
+                            json!(entity_key),
+                            json!(terms.total_units),
+                            json!(terms.unit_price_idr),
+                            json!(terms.total_production_cost_idr),
+                            json!(terms.production_lead_time_days),
+                            json!(terms.regulatory_path),
+                            json!(terms.dp_bp),
+                            json!(terms.dp_amount_required_idr),
+                            json!(terms.notes),
+                            json!(updated_at),
+                            json!(text("base_updated_at")),
+                        ],
+                    )
+                    .await?;
+                return Ok(());
+            }
+            let created_at = text("created_at");
+            let number = text("mou_number");
+            let log_id = payload
+                .get("log")
+                .and_then(|log| log.get("id"))
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned();
+            let valid = !entity_key.is_empty()
+                && !number.is_empty()
+                && !sample_id.is_empty()
+                && !text("client_id").is_empty()
+                && !log_id.is_empty()
+                && clients::parse_stored_timestamp(&created_at).is_some();
+            if !valid {
+                return Err(CommandError::new("TURSO_SYNC_PAYLOAD_INVALID", "The MoU is incomplete or invalid."));
+            }
+            let created_by = payload.get("created_by").filter(|value| value.is_i64()).cloned().unwrap_or(Value::Null);
+            turso
+                .query_one(
+                    mou::MOU_INSERT_SQL,
+                    vec![
+                        json!(entity_key),
+                        json!(number),
+                        json!(sample_id),
+                        json!(text("client_id")),
+                        json!(terms.total_units),
+                        json!(terms.unit_price_idr),
+                        json!(terms.total_production_cost_idr),
+                        json!(terms.production_lead_time_days),
+                        json!(terms.regulatory_path),
+                        json!(terms.dp_bp),
+                        json!(terms.dp_amount_required_idr),
+                        json!(terms.notes),
+                        json!(created_at),
+                        created_by.clone(),
+                    ],
+                )
+                .await?;
+            turso
+                .query_one(
+                    samples::SAMPLE_STATUS_LOG_INSERT_SQL,
+                    vec![
+                        json!(log_id),
+                        json!(sample_id),
+                        json!(""),
+                        json!("DRAFT"),
+                        json!(mou::MOU_CREATE_ACTION),
+                        json!(format!("MoU {number}")),
+                        json!(""),
+                        created_by,
+                        json!(created_at),
+                    ],
+                )
+                .await?;
+        }
+        ("mou", "transition") => {
+            let status = text("status");
+            let base_status = text("base_status");
+            let action = text("action");
+            let changed_at = text("changed_at");
+            let sample_id = text("sample_request_id");
+            let log = payload.get("log").filter(|value| value.is_object());
+            let notes = log
+                .and_then(|log| log.get("notes"))
+                .and_then(Value::as_str)
+                .and_then(samples::normalize_sample_notes);
+            let log_id = log
+                .and_then(|log| log.get("id"))
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned();
+            let valid = !entity_key.is_empty()
+                && !sample_id.is_empty()
+                && !log_id.is_empty()
+                && mou::MOU_STATUSES.contains(&status.as_str())
+                && mou::MOU_STATUSES.contains(&base_status.as_str())
+                && mou::MOU_ACTIONS.contains(&action.as_str())
+                && clients::parse_stored_timestamp(&changed_at).is_some();
+            let (Some(notes), true) = (notes, valid) else {
+                return Err(CommandError::new("TURSO_SYNC_PAYLOAD_INVALID", "The MoU step is incomplete or invalid."));
+            };
+            let revision_notes = if action == "MOU_REVISE" { json!(notes) } else { Value::Null };
+            let recorded_by = log
+                .and_then(|log| log.get("recorded_by"))
+                .filter(|value| value.is_i64())
+                .cloned()
+                .unwrap_or(Value::Null);
+            turso
+                .query_one(
+                    mou::MOU_TRANSITION_SQL,
+                    vec![json!(entity_key), json!(status), revision_notes, json!(changed_at), json!(base_status)],
+                )
+                .await?;
+            turso
+                .query_one(
+                    samples::SAMPLE_STATUS_LOG_INSERT_SQL,
+                    vec![
+                        json!(log_id),
+                        json!(sample_id),
+                        json!(base_status),
+                        json!(status),
+                        json!(action),
+                        json!(notes),
+                        json!(""),
+                        recorded_by,
+                        json!(changed_at),
+                    ],
+                )
+                .await?;
+            // MoU disetujui klien: Finance menerbitkan tagihan DP (FR-08).
+            turso
+                .query_one(notifications::NOTIFY_MOU_SQL, vec![json!(log_id), json!(entity_key)])
+                .await?;
+        }
+        ("invoice", "create") => {
+            // Total dihitung ulang dari tarif yang disalin pembuatnya, tidak
+            // dipercaya dari payload.
+            let totals = finance::compute_invoice(payload)
+                .map_err(|message| CommandError::new("TURSO_SYNC_PAYLOAD_INVALID", message))?;
+            let ref_type = text("ref_type");
+            let valid = !entity_key.is_empty()
+                && !text("invoice_number").is_empty()
+                && !text("client_id").is_empty()
+                && finance::INVOICE_REF_TYPES.contains(&ref_type.as_str())
+                && (ref_type == "OTHER" || !text("sample_request_id").is_empty())
+                && samples::is_calendar_date(&text("issued_on"))
+                && samples::is_calendar_date(&text("due_on"))
+                && text("description").chars().count() <= finance::INVOICE_DESCRIPTION_MAX
+                && clients::parse_stored_timestamp(&text("created_at")).is_some();
+            if !valid {
+                return Err(CommandError::new(
+                    "TURSO_SYNC_PAYLOAD_INVALID",
+                    "The invoice is incomplete or invalid.",
+                ));
+            }
+            turso
+                .query_one(
+                    finance::INVOICE_INSERT_SQL,
+                    vec![
+                        json!(entity_key),
+                        json!(text("invoice_number")),
+                        json!(text("client_id")),
+                        json!(text("sample_request_id")),
+                        json!(ref_type),
+                        json!(number("revision_index")),
+                        json!(text("description")),
+                        json!(totals.subtotal_idr),
+                        json!(totals.discount_label),
+                        json!(totals.discount_bp),
+                        json!(totals.discount_idr),
+                        json!(totals.taxes_json),
+                        json!(totals.tax_idr),
+                        json!(totals.total_idr),
+                        json!(text("issued_on")),
+                        json!(text("due_on")),
+                        payload.get("created_by").filter(|value| value.is_i64()).cloned().unwrap_or(Value::Null),
+                        json!(text("created_at")),
+                    ],
+                )
+                .await?;
+        }
+        ("invoice", "cancel") | ("fund", "void") => {
+            let reason = finance::normalize_cancel_reason(&text("reason"));
+            let updated_at = text("updated_at");
+            let (Some(reason), false, Some(_)) =
+                (reason, entity_key.is_empty(), clients::parse_stored_timestamp(&updated_at))
+            else {
+                return Err(CommandError::new("TURSO_SYNC_PAYLOAD_INVALID", finance::CANCEL_REASON_INVALID));
+            };
+            let sql = if domain == "invoice" { finance::INVOICE_CANCEL_SQL } else { finance::FUND_VOID_SQL };
+            turso
+                .query_one(sql, vec![json!(entity_key), json!(reason), json!(updated_at)])
+                .await?;
+        }
+        ("fund", "record") => {
+            let fund = finance::validate_fund_draft(payload)
+                .map_err(|message| CommandError::new("TURSO_SYNC_PAYLOAD_INVALID", message))?;
+            let created_at = text("created_at");
+            if entity_key.is_empty() || clients::parse_stored_timestamp(&created_at).is_none() {
+                return Err(CommandError::new(
+                    "TURSO_SYNC_PAYLOAD_INVALID",
+                    "The incoming payment is incomplete or invalid.",
+                ));
+            }
+            let recorded_by = payload.get("recorded_by").filter(|value| value.is_i64()).cloned().unwrap_or(Value::Null);
+            let mut proof_id = String::new();
+            if let Some(proof) = payload.get("proof").filter(|value| value.is_object()) {
+                proof_id = proof.get("id").and_then(Value::as_str).unwrap_or_default().to_owned();
+                let data = proof.get("data_base64").and_then(Value::as_str).unwrap_or_default();
+                let size = samples::validate_media_upload("PAYMENT_PROOF", data)
+                    .map_err(|message| CommandError::new("TURSO_SYNC_PAYLOAD_INVALID", message))?;
+                if proof_id.is_empty() {
+                    return Err(CommandError::new("TURSO_SYNC_PAYLOAD_INVALID", "The payment proof is incomplete."));
+                }
+                turso
+                    .query_one(
+                        finance::FUND_MEDIA_INSERT_SQL,
+                        vec![
+                            json!(proof_id),
+                            json!(entity_key),
+                            json!(size as i64),
+                            json!(data),
+                            recorded_by.clone(),
+                            json!(created_at),
+                        ],
+                    )
+                    .await?;
+            }
+            turso
+                .query_one(
+                    finance::FUND_INSERT_SQL,
+                    vec![
+                        json!(entity_key),
+                        json!(fund.client_id),
+                        json!(fund.received_on),
+                        json!(fund.amount_idr),
+                        json!(fund.description),
+                        json!(proof_id),
+                        recorded_by,
+                        json!(created_at),
+                    ],
+                )
+                .await?;
+        }
+        ("invoice", "reschedule") => {
+            // Kecocokan dengan tagihan dan uang masuk di cloud sudah diperiksa
+            // `finance_guard`; cicilan dihitung ulang dari paket salinan.
+            let plan = payload.get("plan").cloned().unwrap_or(Value::Null);
+            let count = plan.get("installment_count").and_then(Value::as_i64).unwrap_or(0);
+            let rate = plan.get("rate_bp").and_then(Value::as_i64).unwrap_or(-1);
+            let label = plan.get("label").and_then(Value::as_str).unwrap_or_default().to_owned();
+            let ids: Vec<String> = payload
+                .get("installment_ids")
+                .and_then(Value::as_array)
+                .map(|items| items.iter().filter_map(Value::as_str).map(str::to_owned).collect())
+                .unwrap_or_default();
+            let start_on = text("start_on");
+            let recorded_at = text("recorded_at");
+            let amount = payload.get("amount_idr").and_then(Value::as_i64).unwrap_or(0);
+            let remaining_after = payload.get("remaining_after_idr").and_then(Value::as_i64).unwrap_or(0);
+            let valid = !entity_key.is_empty()
+                && !text("allocation_id").is_empty()
+                && !text("fund_id").is_empty()
+                && !text("invoice_number").is_empty()
+                && (1..=finance::INSTALLMENT_COUNT_MAX).contains(&count)
+                && (0..=finance::RATE_BP_MAX).contains(&rate)
+                && !label.trim().is_empty()
+                && ids.len() as i64 == count
+                && amount >= 1
+                && remaining_after >= 1
+                && samples::is_calendar_date(&start_on)
+                && clients::parse_stored_timestamp(&recorded_at).is_some();
+            if !valid {
+                return Err(CommandError::new(
+                    "TURSO_SYNC_PAYLOAD_INVALID",
+                    "The installment plan is incomplete or invalid.",
+                ));
+            }
+            let recorded_by = payload.get("recorded_by").filter(|value| value.is_i64()).cloned().unwrap_or(Value::Null);
+            turso
+                .query_one(
+                    finance::ALLOCATION_INSERT_SQL,
+                    vec![
+                        json!(text("allocation_id")),
+                        json!(text("fund_id")),
+                        json!(entity_key),
+                        json!(amount),
+                        recorded_by.clone(),
+                        json!(recorded_at),
+                    ],
+                )
+                .await?;
+            turso
+                .query_one(finance::INVOICE_RESCHEDULE_SQL, vec![json!(entity_key), json!(recorded_at)])
+                .await?;
+            let parent = text("invoice_number");
+            let (_, _, lines) = finance::compute_installments(remaining_after, rate, count, &start_on);
+            for (line, id) in lines.iter().zip(&ids) {
+                turso
+                    .query_one(
+                        finance::INSTALLMENT_INSERT_SQL,
+                        vec![
+                            json!(id),
+                            json!(finance::installment_number(&parent, line.installment_no)),
+                            json!(text("client_id")),
+                            json!(text("sample_request_id")),
+                            json!(number("revision_index")),
+                            json!(finance::installment_description(line.installment_no, count, &parent, &label)),
+                            json!(line.amount_idr),
+                            json!(start_on),
+                            json!(line.due_on),
+                            json!(entity_key),
+                            json!(line.installment_no),
+                            recorded_by.clone(),
+                            json!(recorded_at),
+                        ],
+                    )
+                    .await?;
+            }
+        }
+        ("fund", "deposit") => {
+            let confirmed_at = text("confirmed_at");
+            if entity_key.is_empty()
+                || text("client_id").is_empty()
+                || clients::parse_stored_timestamp(&confirmed_at).is_none()
+            {
+                return Err(CommandError::new(
+                    "TURSO_SYNC_PAYLOAD_INVALID",
+                    "The deposit is incomplete or invalid.",
+                ));
+            }
+            turso
+                .query_one(
+                    finance::FUND_DEPOSIT_SQL,
+                    vec![
+                        json!(entity_key),
+                        json!(text("client_id")),
+                        payload.get("confirmed_by").filter(|value| value.is_i64()).cloned().unwrap_or(Value::Null),
+                        json!(confirmed_at),
+                    ],
+                )
+                .await?;
+        }
+        ("fund", "allocate") => {
+            // Sisa tagihan dan uang masuk sudah diperiksa `finance_guard`.
+            let recorded_at = text("recorded_at");
+            let amount = payload.get("amount_idr").and_then(Value::as_i64).unwrap_or(0);
+            if entity_key.is_empty()
+                || text("fund_id").is_empty()
+                || text("invoice_id").is_empty()
+                || amount < 1
+                || clients::parse_stored_timestamp(&recorded_at).is_none()
+            {
+                return Err(CommandError::new(
+                    "TURSO_SYNC_PAYLOAD_INVALID",
+                    "The payment allocation is incomplete or invalid.",
+                ));
+            }
+            turso
+                .query_one(
+                    finance::ALLOCATION_INSERT_SQL,
+                    vec![
+                        json!(entity_key),
+                        json!(text("fund_id")),
+                        json!(text("invoice_id")),
+                        json!(amount),
+                        payload.get("recorded_by").filter(|value| value.is_i64()).cloned().unwrap_or(Value::Null),
+                        json!(recorded_at),
+                    ],
+                )
                 .await?;
         }
         ("media", "upload") => {
@@ -7612,6 +8727,12 @@ mod tests {
                 "sample_status_log",
                 "sample_formulas",
                 "pricing_formulas",
+                "finance_options",
+                "invoices",
+                "incoming_funds",
+                "fund_allocations",
+                "design_tickets",
+                "production_mou",
                 "media_asset",
                 "notification_outbox",
                 "telegram_config",
@@ -7764,6 +8885,326 @@ mod tests {
                 .collect::<Result<_, _>>()
                 .expect("notifikasi");
             assert_eq!(notified, vec![("sample:l1".to_owned(), "RND".to_owned(), "PENDING".to_owned())]);
+        });
+    }
+
+    /// Tagihan dan uang masuk (v2.3a): cloud menghitung ulang total dari tarif
+    /// salinan, dan dua perangkat offline yang melunasi tagihan yang sama atau
+    /// membatalkan tagihan yang sudah dibayar menjadi konflik.
+    #[test]
+    fn push_alokasi_ganda_dan_batal_setelah_lunas_menjadi_konflik() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("runtime uji");
+        runtime.block_on(async {
+            let dir = tempfile::tempdir().expect("direktori sementara");
+            let hub = dir.path().join("app-hub.db");
+            let client = TursoClient::local_file(
+                Url::parse(LOCAL_FILE_ORIGIN).expect("origin lokal"),
+                &hub,
+                Client::new(),
+            );
+            client.ensure_schema().await.expect("provisioning lokal");
+            let mut counter = 0u32;
+            let mut event = |domain: &str, operation: &str, key: &str, payload: Value| {
+                counter += 1;
+                json!({
+                    "eventId": format!("evt-{counter:064x}"),
+                    "clientId": format!("desktop-{:064x}", 1),
+                    "domain": domain,
+                    "operation": operation,
+                    "entityKey": key,
+                    "payload": payload,
+                })
+            };
+            let invoice = event(
+                "invoice",
+                "create",
+                "i1",
+                json!({
+                    "id": "i1",
+                    "invoice_number": "INV-20261008-A101",
+                    "client_id": "c1",
+                    "sample_request_id": "",
+                    "ref_type": "OTHER",
+                    "revision_index": 0,
+                    "description": "",
+                    "subtotal_idr": 1_000_000,
+                    "discount": { "label": "Lebaran", "rate_bp": 2000 },
+                    "taxes": [{ "label": "PPN", "rate_bp": 1100 }],
+                    "issued_on": "2026-10-08",
+                    "due_on": "2026-10-15",
+                    "created_by": 1,
+                    "created_at": "2026-10-08 02:00:00",
+                }),
+            );
+            let fund = |key: &str| {
+                json!({
+                    "id": key,
+                    "client_id": "",
+                    "received_on": "2026-10-08",
+                    "amount_idr": 2_000_000,
+                    "description": "",
+                    "proof": Value::Null,
+                    "recorded_by": 1,
+                    "created_at": "2026-10-08 02:05:00",
+                })
+            };
+            let fund_one = event("fund", "record", "f1", fund("f1"));
+            let allocate = |key: &str| {
+                json!({ "id": key, "fund_id": "f1", "invoice_id": "i1", "amount_idr": 888_000, "recorded_by": 1, "recorded_at": "2026-10-08 02:10:00" })
+            };
+            let first = event("fund", "allocate", "a1", allocate("a1"));
+            // Perangkat kedua melunasi tagihan yang sama saat offline.
+            let second = event("fund", "allocate", "a2", allocate("a2"));
+            let cancel = event(
+                "invoice",
+                "cancel",
+                "i1",
+                json!({ "id": "i1", "reason": "Wrong client", "updated_at": "2026-10-08 02:20:00" }),
+            );
+            let results = client
+                .push_events(&[invoice, fund_one, first, second, cancel])
+                .await
+                .expect("push");
+            let statuses: Vec<&str> = results
+                .iter()
+                .map(|result| result["status"].as_str().unwrap_or_default())
+                .collect();
+            assert_eq!(statuses, vec!["applied", "applied", "applied", "conflict", "conflict"]);
+            assert_eq!(results[3]["message"], json!("This invoice is already paid."));
+
+            let connection = rusqlite::Connection::open(&hub).expect("buka hub");
+            let (total, status, taxes): (i64, String, String) = connection
+                .query_row("SELECT total_idr, status, taxes_json FROM invoices WHERE id = 'i1';", [], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+                })
+                .expect("tagihan");
+            assert_eq!(
+                (total, status.as_str(), taxes.as_str()),
+                (888_000, "OPEN", "[{\"amount_idr\":88000,\"label\":\"PPN\",\"rate_bp\":1100}]")
+            );
+            let allocated: i64 = connection
+                .query_row("SELECT COALESCE(SUM(amount_idr), 0) FROM fund_allocations;", [], |row| row.get(0))
+                .expect("alokasi");
+            assert_eq!(allocated, 888_000);
+        });
+    }
+
+    /// Tiket desain (v2.4): satu tiket aktif per tiket sampel, langkah ganda
+    /// dari dua perangkat menjadi konflik, dan batas penolakan hanya dibuka
+    /// pencatat yang memegang izin override.
+    #[test]
+    fn push_tiket_desain_dijaga_cloud() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("runtime uji");
+        runtime.block_on(async {
+            let dir = tempfile::tempdir().expect("direktori sementara");
+            let hub = dir.path().join("app-hub.db");
+            let client = TursoClient::local_file(
+                Url::parse(LOCAL_FILE_ORIGIN).expect("origin lokal"),
+                &hub,
+                Client::new(),
+            );
+            client.ensure_schema().await.expect("provisioning lokal");
+            {
+                let connection = rusqlite::Connection::open(&hub).expect("buka hub");
+                connection
+                    .execute_batch(
+                        "INSERT INTO sample_requests (id, client_id, product_category_option_id, sample_qty, brand_name, packaging, deadline_at, ship_to_address, status, status_changed_at, created_at, updated_at) VALUES ('s1', 'c1', 'cat', 1, 'Aura', 'Box', '2026-10-31', 'Jl. A', 'CLIENT_ACC', '2026-10-08 01:00:00', '2026-10-08 01:00:00', '2026-10-08 01:00:00');
+                         INSERT INTO media_asset (id, owner_type, owner_id, purpose, mime, byte_size, created_at) VALUES ('m1', 'sample', 's1', 'MOCKUP', 'image/webp', 10, '2026-10-08 01:00:00');
+                         INSERT INTO invoices (id, invoice_number, client_id, sample_request_id, ref_type, revision_index, subtotal_idr, total_idr, issued_on, due_on, created_at, updated_at) VALUES ('i1', 'INV-1', 'c1', 's1', 'DUMMY_FEE', 0, 75000, 75000, '2026-10-08', '2026-10-15', '2026-10-08 01:00:00', '2026-10-08 01:00:00');
+                         INSERT INTO incoming_funds (id, received_on, amount_idr, created_at, updated_at) VALUES ('f1', '2026-10-08', 75000, '2026-10-08 01:00:00', '2026-10-08 01:00:00');
+                         INSERT INTO fund_allocations (id, fund_id, invoice_id, amount_idr, recorded_at) VALUES ('a1', 'f1', 'i1', 75000, '2026-10-08 01:00:00');
+                         INSERT INTO setting_gex_system (key, value) VALUES ('max_dummy_rejections', '1');",
+                    )
+                    .expect("seed tiket");
+            }
+            let mut counter = 0u32;
+            let mut event = |domain: &str, operation: &str, key: &str, payload: Value| {
+                counter += 1;
+                json!({
+                    "eventId": format!("evt-{counter:064x}"),
+                    "clientId": format!("desktop-{:064x}", 1),
+                    "domain": domain,
+                    "operation": operation,
+                    "entityKey": key,
+                    "payload": payload,
+                })
+            };
+            let create = |key: &str, log: &str| {
+                json!({ "id": key, "sample_request_id": "s1", "brief": "Box 50 ml", "created_by": 2, "created_at": "2026-10-08 02:00:00", "log": { "id": log } })
+            };
+            let step = |action: &str, base: &str, base_count: i64, status: &str, count: i64, override_limit: bool, log: &str| {
+                json!({
+                    "id": "d1",
+                    "sample_request_id": "s1",
+                    "action": action,
+                    "base_status": base,
+                    "base_rejection_count": base_count,
+                    "status": status,
+                    "rejection_count": count,
+                    "tracking_no": if action == "DUMMY_SENT" { json!("JNE1") } else { Value::Null },
+                    "override_limit": override_limit,
+                    "changed_at": "2026-10-08 03:00:00",
+                    "log": { "id": log, "notes": format!("Step {action}"), "recorded_by": 9 },
+                })
+            };
+            let events = vec![
+                event("design", "create", "d1", create("d1", "l1")),
+                // Perangkat kedua meminta desain untuk tiket yang sama saat offline.
+                event("design", "create", "d2", create("d2", "l2")),
+                event("design", "transition", "d1", step("PRINT_DUMMY", "MOCKUP", 0, "DUMMY_PRINTING", 0, false, "l3")),
+                event("design", "transition", "d1", step("PRINT_DUMMY", "MOCKUP", 0, "DUMMY_PRINTING", 0, false, "l4")),
+                event("design", "transition", "d1", step("DUMMY_SENT", "DUMMY_PRINTING", 0, "DUMMY_SENT", 0, false, "l5")),
+                event("design", "transition", "d1", step("DUMMY_REVISE", "DUMMY_SENT", 0, "DUMMY_REVISION", 1, false, "l6")),
+                event("design", "transition", "d1", step("PRINT_DUMMY", "DUMMY_REVISION", 1, "DUMMY_PRINTING", 1, false, "l7")),
+                event("design", "transition", "d1", step("PRINT_DUMMY", "DUMMY_REVISION", 1, "DUMMY_PRINTING", 1, true, "l8")),
+            ];
+            let results = client.push_events(&events).await.expect("push");
+            let statuses: Vec<&str> = results
+                .iter()
+                .map(|result| result["status"].as_str().unwrap_or_default())
+                .collect();
+            assert_eq!(
+                statuses,
+                vec!["applied", "conflict", "applied", "conflict", "applied", "applied", "conflict", "applied"]
+            );
+            assert_eq!(results[1]["message"], json!("This sample request already has a design ticket."));
+            assert_eq!(results[3]["message"], json!(design::DESIGN_CHANGED_ELSEWHERE));
+            assert_eq!(results[6]["message"], json!(design::DUMMY_LIMIT_REACHED));
+
+            let connection = rusqlite::Connection::open(&hub).expect("buka hub");
+            let row: (String, i64, String, String) = connection
+                .query_row(
+                    "SELECT status, dummy_rejection_count, dummy_tracking_no, revision_notes FROM design_tickets WHERE id = 'd1';",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )
+                .expect("tiket desain");
+            assert_eq!(
+                row,
+                ("DUMMY_PRINTING".into(), 1, "JNE1".into(), "Step DUMMY_REVISE".into())
+            );
+            let logs: i64 = connection
+                .query_row("SELECT COUNT(*) FROM sample_status_log WHERE sample_request_id = 's1';", [], |row| row.get(0))
+                .expect("linimasa");
+            assert_eq!(logs, 5);
+            let mut notified = connection
+                .prepare("SELECT event_type FROM notification_outbox WHERE target_division = 'DESIGN' ORDER BY event_type;")
+                .expect("notifikasi");
+            let notified: Vec<String> = notified
+                .query_map([], |row| row.get(0))
+                .expect("baris notifikasi")
+                .map(|row| row.expect("event"))
+                .collect();
+            assert_eq!(notified, vec!["DESIGN_REQUESTED", "DUMMY_REVISED"]);
+        });
+    }
+
+    /// Pembayaran sebagian (v2.3b): cloud menghitung ulang cicilan dari paket
+    /// salinan, menolak sisa yang tidak cocok, dan menyimpan deposit klien.
+    #[test]
+    fn push_cicilan_dan_deposit_dihitung_ulang_cloud() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("runtime uji");
+        runtime.block_on(async {
+            let dir = tempfile::tempdir().expect("direktori sementara");
+            let hub = dir.path().join("app-hub.db");
+            let client = TursoClient::local_file(
+                Url::parse(LOCAL_FILE_ORIGIN).expect("origin lokal"),
+                &hub,
+                Client::new(),
+            );
+            client.ensure_schema().await.expect("provisioning lokal");
+            let mut counter = 0u32;
+            let mut event = |domain: &str, operation: &str, key: &str, payload: Value| {
+                counter += 1;
+                json!({
+                    "eventId": format!("evt-{counter:064x}"),
+                    "clientId": format!("desktop-{:064x}", 1),
+                    "domain": domain,
+                    "operation": operation,
+                    "entityKey": key,
+                    "payload": payload,
+                })
+            };
+            let invoice = event(
+                "invoice",
+                "create",
+                "i1",
+                json!({
+                    "id": "i1", "invoice_number": "INV-20261008-A101", "client_id": "c1",
+                    "sample_request_id": "", "ref_type": "OTHER", "revision_index": 0,
+                    "description": "", "subtotal_idr": 5_000_000, "discount": Value::Null, "taxes": [],
+                    "issued_on": "2026-10-08", "due_on": "2026-10-15", "created_by": 1,
+                    "created_at": "2026-10-08 02:00:00",
+                }),
+            );
+            let fund = event(
+                "fund",
+                "record",
+                "f1",
+                json!({
+                    "id": "f1", "client_id": "c1", "received_on": "2026-10-08", "amount_idr": 2_500_000,
+                    "description": "", "proof": Value::Null, "recorded_by": 1, "created_at": "2026-10-08 02:05:00",
+                }),
+            );
+            let reschedule = |remaining_after: i64| {
+                json!({
+                    "id": "i1", "fund_id": "f1", "allocation_id": "a1", "amount_idr": 2_000_000,
+                    "remaining_after_idr": remaining_after,
+                    "plan": { "label": "3 months", "rate_bp": 1000, "installment_count": 3 },
+                    "start_on": "2026-10-08", "installment_ids": ["c-1", "c-2", "c-3"],
+                    "invoice_number": "INV-20261008-A101", "client_id": "c1", "sample_request_id": "",
+                    "revision_index": 0, "recorded_by": 1, "recorded_at": "2026-10-08 02:10:00",
+                })
+            };
+            // Sisa yang tidak sesuai cloud (perangkat lain sudah membayar sebagian).
+            let forged = event("invoice", "reschedule", "i1", reschedule(2_000_000));
+            let accepted = event("invoice", "reschedule", "i1", reschedule(3_000_000));
+            let deposit = event(
+                "fund",
+                "deposit",
+                "f1",
+                json!({ "id": "f1", "client_id": "c1", "confirmed_by": 1, "confirmed_at": "2026-10-08 02:15:00" }),
+            );
+            let results = client
+                .push_events(&[invoice, fund, forged, accepted, deposit])
+                .await
+                .expect("push");
+            let statuses: Vec<&str> = results
+                .iter()
+                .map(|result| result["status"].as_str().unwrap_or_default())
+                .collect();
+            assert_eq!(statuses, vec!["applied", "applied", "conflict", "applied", "applied"]);
+
+            let connection = rusqlite::Connection::open(&hub).expect("buka hub");
+            let parent: String = connection
+                .query_row("SELECT status FROM invoices WHERE id = 'i1';", [], |row| row.get(0))
+                .expect("tagihan asal");
+            assert_eq!(parent, "RESCHEDULED");
+            let children: Vec<(String, i64, String)> = connection
+                .prepare("SELECT invoice_number, total_idr, due_on FROM invoices WHERE parent_invoice_id = 'i1' ORDER BY installment_no;")
+                .expect("cicilan")
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+                .expect("cicilan")
+                .collect::<Result<_, _>>()
+                .expect("cicilan");
+            assert_eq!(
+                children,
+                vec![
+                    ("INV-20261008-A101-1".to_owned(), 1_100_000, "2026-11-08".to_owned()),
+                    ("INV-20261008-A101-2".to_owned(), 1_100_000, "2026-12-08".to_owned()),
+                    ("INV-20261008-A101-3".to_owned(), 1_100_000, "2027-01-08".to_owned()),
+                ]
+            );
+            let confirmed: String = connection
+                .query_row("SELECT deposit_confirmed_at FROM incoming_funds WHERE id = 'f1';", [], |row| row.get(0))
+                .expect("deposit");
+            assert_eq!(confirmed, "2026-10-08 02:15:00");
         });
     }
 

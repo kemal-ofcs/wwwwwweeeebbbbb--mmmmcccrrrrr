@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import {
   type FormEvent,
   useCallback,
@@ -7,10 +8,19 @@ import {
   useRef,
   useState,
 } from "react";
+import { downloadInvoicePdf } from "@/components/finance/invoice-download";
+import {
+  INVOICE_TYPE_LABEL,
+  invoiceStatusLabel,
+  invoiceTone,
+} from "@/components/finance/labels";
 import { FeedbackBanner } from "@/components/ui/FeedbackBanner";
 import { Modal } from "@/components/ui/Modal";
 import { StatusBadge } from "@/components/ui/StatusBadge";
+import { hasPermission } from "@/lib/auth/access";
+import { useAuth } from "@/lib/context/AuthContext";
 import type { MasterOptionRecord } from "@/lib/gateways/clients";
+import type { InvoiceRecord } from "@/lib/gateways/finance";
 import {
   getSampleRequest,
   recordSampleStep,
@@ -29,11 +39,13 @@ import {
   sampleActionPermission,
 } from "@/lib/validations/sample";
 import {
+  DESIGN_STATUS_LABEL,
   SAMPLE_ACTION_LABEL,
   SAMPLE_ACTION_PAST,
   SAMPLE_STATUS_LABEL,
   SAMPLE_STATUS_TONE,
 } from "./labels";
+import { SampleDesign } from "./SampleDesign";
 import { SamplePhotos } from "./SamplePhotos";
 import { SamplePricing } from "./SamplePricing";
 
@@ -74,6 +86,11 @@ function DetailRow({ label, value }: { label: string; value: string }) {
   );
 }
 
+/** Linimasa memuat langkah tiket sampel dan tiket desain (v2.4). */
+function statusLabel(status: string) {
+  return SAMPLE_STATUS_LABEL[status] ?? DESIGN_STATUS_LABEL[status] ?? status;
+}
+
 export function SampleDetail({
   id,
   optionLabel,
@@ -88,6 +105,10 @@ export function SampleDetail({
 }: SampleDetailProps) {
   const [data, setData] = useState<SampleDetailData | null>(null);
   const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+  const { user } = useAuth();
+  const canInvoices = hasPermission(user, "invoices.view");
+  const canDesign = hasPermission(user, "design.manage");
   const [action, setAction] = useState<SampleAction | null>(null);
   const [notes, setNotes] = useState("");
   const [leadTime, setLeadTime] = useState("");
@@ -135,6 +156,10 @@ export function SampleDetail({
                 revision_index: request.revision_index,
                 free_revision_limit: limit,
                 has_price: request.unit_price_idr != null,
+                fee_paid: request.fee_paid === 1,
+                test_ready:
+                  request.is_test_requested !== 1 || request.test_paid === 1,
+                mockup_ready: request.mockup_ready === 1,
               },
               candidate,
               1,
@@ -197,6 +222,23 @@ export function SampleDetail({
     }
   };
 
+  const exportPdf = async (invoice: InvoiceRecord) => {
+    if (isSubmittingRef.current) return;
+    isSubmittingRef.current = true;
+    setBusy(true);
+    setError("");
+    try {
+      setNotice(await downloadInvoicePdf(invoice));
+    } catch (cause) {
+      setError(
+        cause instanceof Error ? cause.message : "The PDF was not created.",
+      );
+    } finally {
+      isSubmittingRef.current = false;
+      setBusy(false);
+    }
+  };
+
   let special: Record<string, string> = {};
   try {
     special = JSON.parse(request?.special_requests_json ?? "{}");
@@ -224,6 +266,11 @@ export function SampleDetail({
         {error ? (
           <FeedbackBanner tone="error" onDismiss={() => setError("")}>
             {error}
+          </FeedbackBanner>
+        ) : null}
+        {notice ? (
+          <FeedbackBanner tone="success" onDismiss={() => setNotice("")}>
+            {notice}
           </FeedbackBanner>
         ) : null}
         {!request ? (
@@ -298,6 +345,16 @@ export function SampleDetail({
                 }
               />
               <DetailRow
+                label="Testing"
+                value={
+                  request.is_test_requested === 1
+                    ? request.test_paid === 1
+                      ? "Requested, fee paid"
+                      : "Requested, fee not paid yet"
+                    : "Not requested"
+                }
+              />
+              <DetailRow
                 label="Packaging dummy"
                 value={
                   request.is_dummy_required === 1 ? "Needed" : "Not needed"
@@ -342,12 +399,86 @@ export function SampleDetail({
               }}
             />
 
+            {data.invoices.length > 0 || canFinance ? (
+              <section aria-label="Invoices" className="grid gap-2">
+                <h3 className="text-body-md font-semibold text-on-surface">
+                  Invoices
+                </h3>
+                {data.invoices.length === 0 ? (
+                  <p className="text-body-sm text-on-surface-variant">
+                    No invoices for this sample yet.
+                  </p>
+                ) : (
+                  <ul className="grid gap-2">
+                    {data.invoices.map((invoice) => (
+                      <li
+                        key={invoice.id}
+                        className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-surface-container p-3"
+                      >
+                        <span className="text-body-md text-on-surface">
+                          <span className="font-mono">
+                            {invoice.invoice_number}
+                          </span>{" "}
+                          ·{" "}
+                          {INVOICE_TYPE_LABEL[invoice.ref_type] ??
+                            invoice.ref_type}{" "}
+                          · {formatRupiah(invoice.total_idr)}
+                        </span>
+                        <span className="flex items-center gap-2">
+                          <StatusBadge tone={invoiceTone(invoice)}>
+                            {invoiceStatusLabel(invoice)}
+                          </StatusBadge>
+                          {canInvoices ? (
+                            <button
+                              type="button"
+                              disabled={busy}
+                              onClick={() => void exportPdf(invoice)}
+                              className="app-btn app-btn-secondary"
+                            >
+                              PDF
+                            </button>
+                          ) : null}
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+                {canFinance ? (
+                  <Link
+                    href={`/finance?sample=${encodeURIComponent(request.id)}`}
+                    className="app-btn app-btn-secondary justify-self-start"
+                  >
+                    Create invoice
+                  </Link>
+                ) : null}
+              </section>
+            ) : null}
+
+            <SampleDesign
+              sample={request}
+              design={data.design}
+              maxRejections={data.max_dummy_rejections}
+              canManage={canManage}
+              onChanged={() => {
+                void load();
+                onChanged();
+              }}
+            />
+
             <SamplePhotos
               sampleId={request.id}
               media={data.media}
               canUpload={canManage && !closed}
               canUploadPaymentProof={request.is_paid_sample === 1}
-              onUploaded={() => void load()}
+              canUploadMockup={
+                canDesign &&
+                data.design !== null &&
+                data.design.status !== "CANCELLED"
+              }
+              onUploaded={() => {
+                void load();
+                onChanged();
+              }}
             />
 
             {canManage && !closed ? (
@@ -613,14 +744,16 @@ export function SampleDetail({
                         {SAMPLE_ACTION_PAST[entry.action] ?? entry.action}
                       </p>
                       <p className="flex flex-wrap items-center gap-1 text-body-sm text-on-surface-variant">
-                        <span className="line-through">
-                          {SAMPLE_STATUS_LABEL[entry.from_status] ??
-                            entry.from_status}
-                        </span>
-                        <span aria-hidden="true">→</span>
+                        {entry.from_status ? (
+                          <>
+                            <span className="line-through">
+                              {statusLabel(entry.from_status)}
+                            </span>
+                            <span aria-hidden="true">→</span>
+                          </>
+                        ) : null}
                         <span className="font-semibold text-on-surface">
-                          {SAMPLE_STATUS_LABEL[entry.to_status] ??
-                            entry.to_status}
+                          {statusLabel(entry.to_status)}
                         </span>
                       </p>
                       <p className="rounded-md border border-surface-container bg-surface-container-low p-2 text-body-md text-on-surface">

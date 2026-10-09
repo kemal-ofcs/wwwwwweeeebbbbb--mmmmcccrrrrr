@@ -23,7 +23,7 @@ use super::models::CommandError;
 use super::samples::{self, BusinessSettings};
 use super::turso::{Statement, TursoClient};
 
-pub const NOTIFICATION_DIVISIONS: &[&str] = &["CS", "RND", "FINANCE"];
+pub const NOTIFICATION_DIVISIONS: &[&str] = &["CS", "RND", "FINANCE", "DESIGN"];
 pub const NOTIFICATION_MAX_ATTEMPTS: i64 = 5;
 pub const COLD_DIGEST_HOUR: i64 = 8;
 pub const COLD_DIGEST_MAX_CATCH_UP_DAYS: i64 = 7;
@@ -34,6 +34,7 @@ pub fn division_permission(division: &str) -> Option<&'static str> {
         "CS" => Some("notifications_cs.view"),
         "RND" => Some("notifications_rnd.view"),
         "FINANCE" => Some("notifications_finance.view"),
+        "DESIGN" => Some("notifications_design.view"),
         _ => None,
     }
 }
@@ -233,6 +234,31 @@ pub fn render_notification(
             format!("Ready {when}"),
         ]
         .join("\n"),
+        "DESIGN_REQUESTED" => [
+            format!("Design requested: {sample}"),
+            format!("Brief: {}", or_dash(field(payload, "brief"))),
+            format!("Requested {when}"),
+        ]
+        .join("\n"),
+        "DUMMY_REVISED" => [
+            format!(
+                "The client wants dummy revision {}: {sample}",
+                field(payload, "rejection_count")
+            ),
+            format!("Notes: {}", or_dash(field(payload, "revision_notes"))),
+            format!("Since {when}"),
+        ]
+        .join("\n"),
+        "MOU_ACCEPTED" => [
+            format!("MoU accepted, issue the down payment invoice: {sample}"),
+            format!(
+                "MoU {}, down payment {}",
+                field(payload, "mou_number"),
+                rupiah(payload, "dp_amount_idr")
+            ),
+            format!("Accepted {when}"),
+        ]
+        .join("\n"),
         "COLD_DIGEST" => {
             let leads = payload
                 .get("leads")
@@ -272,6 +298,12 @@ pub const NOTIFY_LEAD_NEW_SQL: &str = "INSERT INTO notification_outbox (id, even
 pub const NOTIFY_SAMPLE_STATUS_SQL: &str = "INSERT INTO notification_outbox (id, event_type, target_division, payload_json, occurred_at, status, attempts, next_attempt_at, created_at) SELECT 'sample:' || ?1, CASE s.status WHEN 'RND_REVIEW' THEN 'SAMPLE_RND_REVIEW' WHEN 'WAITING_SAMPLE_PAYMENT' THEN 'SAMPLE_WAITING_PAYMENT' WHEN 'PENDING_FEE_ASSESSMENT' THEN 'SAMPLE_PENDING_FEE' WHEN 'RND_ACCEPTED' THEN 'SAMPLE_RND_ACCEPTED' WHEN 'RND_REJECTED' THEN 'SAMPLE_RND_REJECTED' WHEN 'WAITING_REVISION_PAYMENT' THEN 'SAMPLE_REVISION_FEE' ELSE 'SAMPLE_READY' END, CASE WHEN s.status = 'RND_REVIEW' THEN 'RND' WHEN s.status IN ('WAITING_SAMPLE_PAYMENT', 'PENDING_FEE_ASSESSMENT', 'SAMPLE_READY') THEN 'FINANCE' ELSE 'CS' END, json_object('sample_id', s.id, 'client_code', COALESCE(c.client_code, ''), 'client_name', COALESCE(c.name, ''), 'brand_name', s.brand_name, 'revision_index', s.revision_index, 'deadline_at', s.deadline_at, 'lead_time_days', s.rnd_lead_time_days, 'reject_reason', COALESCE(r.label, ''), 'revision_fee_idr', s.revision_fee_idr), s.status_changed_at, CASE WHEN EXISTS (SELECT 1 FROM telegram_config t WHERE t.id = 'default' AND t.is_active = 1 AND TRIM(COALESCE(t.bot_token, '')) <> '') AND TRIM(COALESCE((SELECT g.value FROM setting_gex_system g WHERE g.key = CASE WHEN s.status = 'RND_REVIEW' THEN 'telegram_chat_id_rnd' WHEN s.status IN ('WAITING_SAMPLE_PAYMENT', 'PENDING_FEE_ASSESSMENT', 'SAMPLE_READY') THEN 'telegram_chat_id_finance' ELSE 'telegram_chat_id_cs' END), '')) <> '' THEN 'PENDING' ELSE 'SKIPPED' END, 0, datetime('now'), datetime('now') FROM sample_requests s LEFT JOIN clients c ON c.id = s.client_id LEFT JOIN master_option r ON r.id = s.rnd_reject_reason_option_id WHERE s.id = ?2 AND s.status IN ('RND_REVIEW', 'WAITING_SAMPLE_PAYMENT', 'PENDING_FEE_ASSESSMENT', 'RND_ACCEPTED', 'RND_REJECTED', 'SAMPLE_READY', 'WAITING_REVISION_PAYMENT') LIMIT 1 ON CONFLICT(id) DO NOTHING;";
 
 /// Harga Finance tersimpan (v2.2): grup CS boleh mengirim sampel.
+/// Brief desain baru dan dummy direvisi klien (v2.4). ?1 = id log, ?2 = id tiket desain.
+pub const NOTIFY_DESIGN_SQL: &str = "INSERT INTO notification_outbox (id, event_type, target_division, payload_json, occurred_at, status, attempts, next_attempt_at, created_at) SELECT 'design:' || ?1, CASE d.status WHEN 'MOCKUP' THEN 'DESIGN_REQUESTED' ELSE 'DUMMY_REVISED' END, 'DESIGN', json_object('sample_id', s.id, 'client_code', COALESCE(c.client_code, ''), 'client_name', COALESCE(c.name, ''), 'brand_name', s.brand_name, 'brief', d.brief, 'revision_notes', d.revision_notes, 'rejection_count', d.dummy_rejection_count), d.status_changed_at, CASE WHEN EXISTS (SELECT 1 FROM telegram_config t WHERE t.id = 'default' AND t.is_active = 1 AND TRIM(COALESCE(t.bot_token, '')) <> '') AND TRIM(COALESCE((SELECT g.value FROM setting_gex_system g WHERE g.key = 'telegram_chat_id_design'), '')) <> '' THEN 'PENDING' ELSE 'SKIPPED' END, 0, datetime('now'), datetime('now') FROM design_tickets d JOIN sample_requests s ON s.id = d.sample_request_id LEFT JOIN clients c ON c.id = s.client_id WHERE d.id = ?2 AND d.status IN ('MOCKUP', 'DUMMY_REVISION') LIMIT 1 ON CONFLICT(id) DO NOTHING;";
+
+/// MoU disetujui klien, ke grup Finance (v2.5a). ?1 = id log, ?2 = id MoU.
+pub const NOTIFY_MOU_SQL: &str = "INSERT INTO notification_outbox (id, event_type, target_division, payload_json, occurred_at, status, attempts, next_attempt_at, created_at) SELECT 'mou:' || ?1, 'MOU_ACCEPTED', 'FINANCE', json_object('sample_id', s.id, 'client_code', COALESCE(c.client_code, ''), 'client_name', COALESCE(c.name, ''), 'brand_name', s.brand_name, 'mou_number', m.mou_number, 'dp_amount_idr', m.dp_amount_required_idr), m.status_changed_at, CASE WHEN EXISTS (SELECT 1 FROM telegram_config t WHERE t.id = 'default' AND t.is_active = 1 AND TRIM(COALESCE(t.bot_token, '')) <> '') AND TRIM(COALESCE((SELECT g.value FROM setting_gex_system g WHERE g.key = 'telegram_chat_id_finance'), '')) <> '' THEN 'PENDING' ELSE 'SKIPPED' END, 0, datetime('now'), datetime('now') FROM production_mou m JOIN sample_requests s ON s.id = m.sample_request_id LEFT JOIN clients c ON c.id = m.client_id WHERE m.id = ?2 AND m.status = 'ACCEPTED' LIMIT 1 ON CONFLICT(id) DO NOTHING;";
+
 pub const NOTIFY_SAMPLE_PRICED_SQL: &str = "INSERT INTO notification_outbox (id, event_type, target_division, payload_json, occurred_at, status, attempts, next_attempt_at, created_at) SELECT 'price:' || p.id, 'SAMPLE_PRICED', 'CS', json_object('sample_id', s.id, 'client_code', COALESCE(c.client_code, ''), 'client_name', COALESCE(c.name, ''), 'brand_name', s.brand_name, 'unit_price_idr', p.final_unit_price_idr, 'iteration_number', p.iteration_number), p.recorded_at, CASE WHEN EXISTS (SELECT 1 FROM telegram_config t WHERE t.id = 'default' AND t.is_active = 1 AND TRIM(COALESCE(t.bot_token, '')) <> '') AND TRIM(COALESCE((SELECT g.value FROM setting_gex_system g WHERE g.key = 'telegram_chat_id_cs'), '')) <> '' THEN 'PENDING' ELSE 'SKIPPED' END, 0, datetime('now'), datetime('now') FROM pricing_formulas p JOIN sample_requests s ON s.id = p.sample_request_id LEFT JOIN clients c ON c.id = s.client_id WHERE p.id = ?1 LIMIT 1 ON CONFLICT(id) DO NOTHING;";
 
 pub const COLD_DIGEST_STATE_SQL: &str = "SELECT (SELECT COUNT(*) FROM notification_outbox WHERE id = ?1) AS done, COALESCE((SELECT MAX(id) FROM notification_outbox WHERE id LIKE 'cold-digest:%'), '') AS last_id;";
@@ -298,15 +330,15 @@ pub const NOTIFICATION_FAILED_LIST_SQL: &str = "SELECT id, event_type, target_di
 pub const NOTIFICATION_PENDING_COUNT_SQL: &str =
     "SELECT COUNT(*) AS total FROM notification_outbox WHERE status = 'PENDING';";
 
-pub const NOTIFICATION_BELL_LIST_SQL: &str = "SELECT id, event_type, target_division, payload_json, occurred_at, created_at FROM notification_outbox WHERE ((?1 = 1 AND target_division = 'CS') OR (?2 = 1 AND target_division = 'RND') OR (?3 = 1 AND target_division = 'FINANCE')) AND NOT (event_type = 'COLD_DIGEST' AND json_array_length(payload_json, '$.leads') = 0) ORDER BY created_at DESC, rowid DESC LIMIT 30;";
+pub const NOTIFICATION_BELL_LIST_SQL: &str = "SELECT id, event_type, target_division, payload_json, occurred_at, created_at FROM notification_outbox WHERE ((?1 = 1 AND target_division = 'CS') OR (?2 = 1 AND target_division = 'RND') OR (?3 = 1 AND target_division = 'FINANCE') OR (?4 = 1 AND target_division = 'DESIGN')) AND NOT (event_type = 'COLD_DIGEST' AND json_array_length(payload_json, '$.leads') = 0) ORDER BY created_at DESC, rowid DESC LIMIT 30;";
 
-pub const NOTIFICATION_UNREAD_COUNT_SQL: &str = "SELECT COUNT(*) AS total FROM notification_outbox WHERE ((?1 = 1 AND target_division = 'CS') OR (?2 = 1 AND target_division = 'RND') OR (?3 = 1 AND target_division = 'FINANCE')) AND NOT (event_type = 'COLD_DIGEST' AND json_array_length(payload_json, '$.leads') = 0) AND created_at > COALESCE((SELECT seen_at FROM notification_seen WHERE operator_id = ?4), '');";
+pub const NOTIFICATION_UNREAD_COUNT_SQL: &str = "SELECT COUNT(*) AS total FROM notification_outbox WHERE ((?1 = 1 AND target_division = 'CS') OR (?2 = 1 AND target_division = 'RND') OR (?3 = 1 AND target_division = 'FINANCE') OR (?4 = 1 AND target_division = 'DESIGN')) AND NOT (event_type = 'COLD_DIGEST' AND json_array_length(payload_json, '$.leads') = 0) AND created_at > COALESCE((SELECT seen_at FROM notification_seen WHERE operator_id = ?5), '');";
 
 pub const NOTIFICATION_MARK_SEEN_SQL: &str = "INSERT INTO notification_seen (operator_id, seen_at) VALUES (?1, datetime('now')) ON CONFLICT(operator_id) DO UPDATE SET seen_at = excluded.seen_at;";
 
 pub const NOTIFICATION_CONTEXT_SQL: &str = "SELECT CAST(strftime('%s', 'now') AS INTEGER) AS now_epoch, COALESCE((SELECT timezone FROM company_profile WHERE id = 'default_company'), '') AS timezone, COALESCE((SELECT is_active FROM telegram_config WHERE id = 'default'), 0) AS is_active, COALESCE((SELECT bot_token FROM telegram_config WHERE id = 'default'), '') AS bot_token, COALESCE((SELECT updated_at FROM telegram_config WHERE id = 'default'), '') AS updated_at, COALESCE((SELECT updated_by FROM telegram_config WHERE id = 'default'), '') AS updated_by;";
 
-pub const NOTIFICATION_SETTINGS_SQL: &str = "SELECT key, value FROM setting_gex_system WHERE key IN ('lead_hot_max_days', 'lead_warm_max_days', 'telegram_chat_id_cs', 'telegram_chat_id_rnd', 'telegram_chat_id_finance');";
+pub const NOTIFICATION_SETTINGS_SQL: &str = "SELECT key, value FROM setting_gex_system WHERE key IN ('lead_hot_max_days', 'lead_warm_max_days', 'telegram_chat_id_cs', 'telegram_chat_id_rnd', 'telegram_chat_id_finance', 'telegram_chat_id_design');";
 
 /// ?1 = token baru (kosong = pertahankan yang lama), ?2 = aktif, ?3 = pelaku.
 pub const TELEGRAM_CONFIG_SAVE_SQL: &str = "INSERT INTO telegram_config (id, bot_token, is_active, updated_at, updated_by) VALUES ('default', ?1, ?2, datetime('now'), ?3) ON CONFLICT(id) DO UPDATE SET bot_token = CASE WHEN excluded.bot_token = '' THEN telegram_config.bot_token ELSE excluded.bot_token END, is_active = excluded.is_active, updated_at = excluded.updated_at, updated_by = excluded.updated_by;";
@@ -384,6 +416,7 @@ fn chat_id<'a>(settings: &'a BusinessSettings, division: &str) -> &'a str {
         "CS" => &settings.telegram_chat_id_cs,
         "RND" => &settings.telegram_chat_id_rnd,
         "FINANCE" => &settings.telegram_chat_id_finance,
+        "DESIGN" => &settings.telegram_chat_id_design,
         _ => "",
     }
 }
@@ -651,10 +684,10 @@ pub async fn retry_failed(turso: &TursoClient) -> Result<u64, CommandError> {
 }
 
 /// Lonceng: 30 kejadian terakhir dari divisi yang boleh dilihat, plus jumlah
-/// yang belum dibaca. `allowed` = urutan CS, RnD, Finance.
+/// yang belum dibaca. `allowed` = urutan CS, RnD, Finance, Desain.
 pub async fn bell(
     turso: &TursoClient,
-    allowed: [bool; 3],
+    allowed: [bool; 4],
     operator_id: i64,
 ) -> Result<Value, CommandError> {
     let context = load_context(turso).await?;
@@ -828,6 +861,20 @@ mod tests {
                 "Asia/Jakarta"
             ),
             "Leads that went Cold (2026-10-10): 2\n- Aura (KLN-1), PIC Rina\n- Bina (KLN-2), PIC -"
+        );
+        let design = json!({ "client_name": "Aura Beauty", "client_code": "KLN-20261003-WB01", "brand_name": "Aura Glow", "brief": "Box 50 ml, pastel", "revision_notes": "Logo bigger", "rejection_count": 1 });
+        assert_eq!(
+            render_notification("DESIGN_REQUESTED", &design, "2026-10-03 07:05:00", "Asia/Jakarta"),
+            "Design requested: Aura Glow for Aura Beauty (KLN-20261003-WB01)\nBrief: Box 50 ml, pastel\nRequested 2026-10-03 14:05 WIB"
+        );
+        assert_eq!(
+            render_notification("DUMMY_REVISED", &design, "2026-10-03 07:05:00", "Asia/Jakarta"),
+            "The client wants dummy revision 1: Aura Glow for Aura Beauty (KLN-20261003-WB01)\nNotes: Logo bigger\nSince 2026-10-03 14:05 WIB"
+        );
+        let mou = json!({ "client_name": "Aura Beauty", "client_code": "KLN-20261003-WB01", "brand_name": "Aura Glow", "mou_number": "MOU-20261009-WB01", "dp_amount_idr": 162500000 });
+        assert_eq!(
+            render_notification("MOU_ACCEPTED", &mou, "2026-10-03 07:05:00", "Asia/Jakarta"),
+            "MoU accepted, issue the down payment invoice: Aura Glow for Aura Beauty (KLN-20261003-WB01)\nMoU MOU-20261009-WB01, down payment Rp 162.500.000\nAccepted 2026-10-03 14:05 WIB"
         );
         assert_eq!(
             test_message("RND"),

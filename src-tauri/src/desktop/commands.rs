@@ -998,11 +998,11 @@ pub async fn desktop_retry_failed_notifications(
     notifications::telegram_settings(&turso).await
 }
 
-/// Divisi lonceng yang boleh dilihat sesi ini (urutan CS, RnD, Finance).
+/// Divisi lonceng yang boleh dilihat sesi ini (urutan CS, RnD, Finance, Desain).
 /// Setiap izin diperiksa lewat `require_permission`, termasuk gerbang lisensi;
 /// tanpa satu pun, penolakan terakhir dikembalikan.
-fn notification_access(state: &DesktopState) -> Result<(OperatorUser, [bool; 3]), CommandError> {
-    let mut allowed = [false; 3];
+fn notification_access(state: &DesktopState) -> Result<(OperatorUser, [bool; 4]), CommandError> {
+    let mut allowed = [false; 4];
     let mut granted = None;
     let mut denied = None;
     for (index, division) in notifications::NOTIFICATION_DIVISIONS.iter().enumerate() {
@@ -1953,7 +1953,7 @@ pub async fn desktop_update_company_profile(
 //   4. Picu sinkronisasi latar setelah commit, jangan sebelum.
 // ===========================================================================
 
-use super::{clients, samples};
+use super::{clients, design, finance, mou, samples};
 
 fn draft_text(draft: &Value, key: &str) -> String {
     draft
@@ -3547,6 +3547,22 @@ pub fn desktop_get_sample_request(state: State<'_, DesktopState>, id: String) ->
     let formulas = query_json(&connection, samples::SAMPLE_FORMULAS_SQL, &[&id])?;
     let formula_matches = query_json(&connection, samples::SAMPLE_FORMULA_MATCHES_SQL, &[&id])?;
     let prices = sample_prices(&connection, &id, session_has_permission(&state, "pricing.view"))?;
+    let invoices = query_json(
+        &connection,
+        &format!("{} WHERE i.sample_request_id = ? ORDER BY i.created_at, i.id;", finance::INVOICE_LIST_SQL),
+        &[&id],
+    )?;
+    // Tiket desain aktif, atau yang terakhir dibatalkan (v2.4).
+    let design = query_json(
+        &connection,
+        &format!(
+            "{} WHERE d.sample_request_id = ? ORDER BY d.status = 'CANCELLED', d.created_at DESC, d.rowid DESC LIMIT 1;",
+            design::DESIGN_LIST_SQL
+        ),
+        &[&id],
+    )?
+    .into_iter()
+    .next();
     Ok(json!({
         "request": request,
         "status_log": status_log,
@@ -3555,6 +3571,21 @@ pub fn desktop_get_sample_request(state: State<'_, DesktopState>, id: String) ->
         "formulas": formulas,
         "formula_matches": formula_matches,
         "prices": prices,
+        "invoices": invoices,
+        "design": design,
+        "max_dummy_rejections": business_settings(&connection).max_dummy_rejections,
+        // MoU aktif, atau yang terakhir dibatalkan/ditolak (v2.5a).
+        "mou": query_json(
+            &connection,
+            &format!(
+                "{} WHERE m.sample_request_id = ? ORDER BY m.status IN ('CANCELLED', 'REJECTED'), m.created_at DESC, m.rowid DESC LIMIT 1;",
+                mou::MOU_LIST_SQL
+            ),
+            &[&id],
+        )?
+        .into_iter()
+        .next(),
+        "dp_percentage_bp": business_settings(&connection).dp_percentage_bp,
     }))
 }
 
@@ -3621,6 +3652,7 @@ fn sample_draft_from_row(row: &Value) -> Value {
         "ship_to_address": row["ship_to_address"],
         "is_dummy_required": row["is_dummy_required"].as_i64() == Some(1),
         "is_paid_sample": row["is_paid_sample"].as_i64() == Some(1),
+        "is_test_requested": row["is_test_requested"].as_i64() == Some(1),
     })
 }
 
@@ -3723,6 +3755,7 @@ pub async fn desktop_create_sample_request(
                     flag(&draft["is_paid_sample"]),
                     &now,
                     operator.id,
+                    flag(&draft["is_test_requested"]),
                 ],
             )
             .map_err(|_| CommandError::new("SAMPLE_SAVE_FAILED", "The sample request could not be saved."))?;
@@ -3814,6 +3847,7 @@ pub async fn desktop_update_sample_request(
                     draft["deadline_at"].as_str(),
                     draft["ship_to_address"].as_str(),
                     &now,
+                    flag(&draft["is_test_requested"]),
                 ],
             )
             .map_err(|_| CommandError::new("SAMPLE_SAVE_FAILED", "The sample request could not be saved."))?;
@@ -3865,6 +3899,9 @@ pub async fn desktop_record_sample_step(
         revision_index: base_index,
         free_revision_limit: current["free_revision_limit"].as_i64().unwrap_or(0),
         has_price: !current["unit_price_idr"].is_null(),
+        fee_paid: current["fee_paid"].as_i64() == Some(1),
+        test_ready: current["is_test_requested"].as_i64() != Some(1) || current["test_paid"].as_i64() == Some(1),
+        mockup_ready: current["mockup_ready"].as_i64() == Some(1),
     };
     let lead_time = if action == "RND_ACCEPT" { lead_time_days } else { None };
     let fee = if action == "SET_REVISION_FEE" { revision_fee_idr } else { None };
@@ -4010,6 +4047,488 @@ pub async fn desktop_record_sample_step(
     Ok(json!({ "status": result.status, "revision_index": result.revision_index }))
 }
 
+/// Buat brief desain untuk tiket sampel (v2.4, PRD F-19, keputusan A): CS,
+/// selama tiket belum ditolak/dibatalkan dan belum punya tiket desain aktif.
+/// Cermin `createDesignTicket`.
+#[tauri::command]
+pub async fn desktop_create_design_ticket(
+    state: State<'_, DesktopState>,
+    sample_id: String,
+    brief: String,
+) -> Result<Value, CommandError> {
+    let operator = require_permission(&state, "samples.manage")?;
+    let brief = design::normalize_design_brief(Some(&json!(brief)))
+        .ok_or_else(|| sample_invalid(design::DESIGN_BRIEF_INVALID))?;
+    let now = clients::utc_timestamp(storage::now_epoch_seconds());
+    let current = {
+        let connection = storage::database(&state.data_dir)?;
+        let current = query_json(&connection, &format!("{SAMPLE_LIST_SQL} WHERE s.id = ?;"), &[&sample_id])?
+            .into_iter()
+            .next()
+            .ok_or_else(|| CommandError::new("SAMPLE_NOT_FOUND", "Sample request not found."))?;
+        let active: i64 = connection
+            .query_row(design::DESIGN_ACTIVE_SQL, [sample_id.as_str(), ""], |row| row.get(0))
+            .map_err(|_| CommandError::internal())?;
+        if let Some(message) = design::design_request_error(current["status"].as_str().unwrap_or_default(), active) {
+            return Err(sample_invalid(message));
+        }
+        current
+    };
+    let id = clients::new_uuid();
+    let log_id = clients::new_uuid();
+    let payload = json!({
+        "id": id,
+        "sample_request_id": sample_id,
+        "brief": brief,
+        "created_by": operator.id,
+        "created_at": now,
+        "log": { "id": log_id },
+    });
+    let audit = AuditEntry {
+        actor: &operator,
+        action: "design.request",
+        entity_type: "sample",
+        entity_id: &sample_id,
+        summary: json!({
+            "client_code": current["client_code"],
+            "brand_name": current["brand_name"],
+            "brief": brief,
+        }),
+        on_behalf_of: None,
+    };
+    commit_with_outbox(&state, "design", "create", &id, payload, Some(audit), |transaction| {
+        transaction
+            .execute(design::DESIGN_INSERT_SQL, rusqlite::params![&id, &sample_id, &brief, &now, operator.id])
+            .map_err(|_| CommandError::internal())?;
+        transaction
+            .execute(
+                samples::SAMPLE_STATUS_LOG_INSERT_SQL,
+                rusqlite::params![
+                    &log_id,
+                    &sample_id,
+                    "",
+                    "MOCKUP",
+                    design::DESIGN_REQUEST_ACTION,
+                    &brief,
+                    "",
+                    operator.id,
+                    &now,
+                ],
+            )
+            .map_err(|_| CommandError::internal())?;
+        Ok(())
+    })?;
+    let _ = sync::synchronize(&state).await;
+    Ok(json!({ "id": id }))
+}
+
+/// Satu langkah tiket desain (v2.4). Izin dari `design_action_permission`;
+/// cetak ulang sesudah batas penolakan menuntut izin override (keputusan E).
+/// Catatan wajib. Cermin `recordDesignStep`.
+#[tauri::command]
+pub async fn desktop_record_design_step(
+    state: State<'_, DesktopState>,
+    id: String,
+    action: String,
+    notes: String,
+    tracking_no: Option<String>,
+) -> Result<Value, CommandError> {
+    let operator = require_permission(&state, design::design_action_permission(&action))?;
+    let notes = samples::normalize_sample_notes(&notes)
+        .ok_or_else(|| sample_invalid("Notes are required, up to 1000 characters."))?;
+    let tracking = design::normalize_tracking_no(tracking_no.map(Value::String).as_ref())
+        .ok_or_else(|| sample_invalid(design::TRACKING_NO_INVALID))?;
+    let now = clients::utc_timestamp(storage::now_epoch_seconds());
+    let (current, max_rejections) = {
+        let connection = storage::database(&state.data_dir)?;
+        let current = query_json(&connection, &format!("{} WHERE d.id = ?;", design::DESIGN_LIST_SQL), &[&id])?
+            .into_iter()
+            .next()
+            .ok_or_else(|| CommandError::new("DESIGN_NOT_FOUND", "Design ticket not found."))?;
+        (current, business_settings(&connection).max_dummy_rejections)
+    };
+    let base_status = current["status"].as_str().unwrap_or_default().to_owned();
+    let base_count = current["dummy_rejection_count"].as_i64().unwrap_or(0);
+    let sample_status = current["sample_status"].as_str().unwrap_or_default().to_owned();
+    let sample_id = current["sample_request_id"].as_str().unwrap_or_default().to_owned();
+    let can_override = action == "PRINT_DUMMY"
+        && design::dummy_limit_reached(base_count, max_rejections)
+        && require_permission(&state, design::DUMMY_LIMIT_PERMISSION).is_ok();
+    let state_before = design::DesignState {
+        status: &base_status,
+        sample_status: &sample_status,
+        has_mockup: current["has_mockup"].as_i64() == Some(1),
+        dummy_paid: current["dummy_paid"].as_i64() == Some(1),
+        rejection_count: base_count,
+        max_rejections,
+        can_override,
+    };
+    let result = design::apply_design_action(&state_before, &action).map_err(sample_invalid)?;
+    // Resi hanya pada langkah kirim, catatan revisi hanya pada revisi.
+    let tracking = (action == "DUMMY_SENT").then_some(tracking);
+    let revision_notes = (action == "DUMMY_REVISE").then(|| notes.clone());
+    let log_id = clients::new_uuid();
+    let payload = json!({
+        "id": id,
+        "sample_request_id": sample_id,
+        "action": action,
+        "base_status": base_status,
+        "base_rejection_count": base_count,
+        "status": result.status,
+        "rejection_count": result.rejection_count,
+        "tracking_no": tracking,
+        "override_limit": can_override,
+        "changed_at": now,
+        "log": { "id": log_id, "notes": notes, "recorded_by": operator.id },
+    });
+    let audit = AuditEntry {
+        actor: &operator,
+        action: "design.step",
+        entity_type: "sample",
+        entity_id: &sample_id,
+        summary: json!({
+            "client_code": current["client_code"],
+            "brand_name": current["brand_name"],
+            "action": action,
+            "from": base_status,
+            "to": result.status,
+            "rejection_count": result.rejection_count,
+            "tracking_no": tracking,
+            "override_limit": can_override,
+            "notes": notes,
+        }),
+        on_behalf_of: None,
+    };
+    commit_with_outbox(&state, "design", "transition", &id, payload, Some(audit), |transaction| {
+        let changed = transaction
+            .execute(
+                design::DESIGN_TRANSITION_SQL,
+                rusqlite::params![
+                    &id,
+                    result.status,
+                    result.rejection_count,
+                    tracking.as_deref(),
+                    revision_notes.as_deref(),
+                    &now,
+                    &base_status,
+                    base_count,
+                ],
+            )
+            .map_err(|_| CommandError::internal())?;
+        if changed == 0 {
+            return Err(sample_invalid(design::DESIGN_CHANGED_ELSEWHERE));
+        }
+        transaction
+            .execute(
+                samples::SAMPLE_STATUS_LOG_INSERT_SQL,
+                rusqlite::params![
+                    &log_id,
+                    &sample_id,
+                    &base_status,
+                    result.status,
+                    &action,
+                    &notes,
+                    "",
+                    operator.id,
+                    &now,
+                ],
+            )
+            .map_err(|_| CommandError::internal())?;
+        Ok(())
+    })?;
+    let _ = sync::synchronize(&state).await;
+    Ok(json!({ "status": result.status, "rejection_count": result.rejection_count }))
+}
+
+/// Isi MoU dari form. Harga satuan dan persen DP hanya diambil dari form bila
+/// pencatat memegang `finance.manage`; selain itu dari `fallback` (keputusan D).
+fn merge_mou_terms(input: &Value, fallback: &Value, can_edit: bool, can_price: bool) -> Value {
+    let mut merged = fallback.clone();
+    let mut take = |keys: &[&str]| {
+        for key in keys {
+            merged[*key] = input.get(*key).cloned().unwrap_or(Value::Null);
+        }
+    };
+    if can_edit {
+        take(&["total_units", "production_lead_time_days", "regulatory_path", "notes"]);
+    }
+    if can_price {
+        take(&["unit_price_idr", "dp_bp"]);
+    }
+    merged
+}
+
+/// Draf MoU untuk tiket sampel yang sudah disetujui klien (v2.5a, PRD F-20,
+/// keputusan C/D). Harga satuan bawaan = harga sampel terakhir, persen DP
+/// bawaan = setelan. Cermin `createMou`.
+#[tauri::command]
+pub async fn desktop_create_mou(
+    state: State<'_, DesktopState>,
+    sample_id: String,
+    terms: Value,
+) -> Result<Value, CommandError> {
+    let operator = require_permission(&state, "mou.manage")?;
+    let can_price = require_permission(&state, "finance.manage").is_ok();
+    let tag = sync::local_device_tag(&state)?.ok_or_else(|| {
+        CommandError::new(
+            "DEVICE_TAG_MISSING",
+            "This device has no code tag yet. Connect it to the database once to get one.",
+        )
+    })?;
+    let now = storage::now_epoch_seconds();
+    let timestamp = clients::utc_timestamp(now);
+    let (current, checked, number) = {
+        let connection = storage::database(&state.data_dir)?;
+        let current = query_json(&connection, &format!("{SAMPLE_LIST_SQL} WHERE s.id = ?;"), &[&sample_id])?
+            .into_iter()
+            .next()
+            .ok_or_else(|| CommandError::new("SAMPLE_NOT_FOUND", "Sample request not found."))?;
+        let active: i64 = connection
+            .query_row(mou::MOU_ACTIVE_SQL, [sample_id.as_str(), ""], |row| row.get(0))
+            .map_err(|_| CommandError::internal())?;
+        if let Some(message) = mou::mou_request_error(current["status"].as_str().unwrap_or_default(), active) {
+            return Err(sample_invalid(message));
+        }
+        let fallback = json!({
+            "unit_price_idr": current["unit_price_idr"],
+            "dp_bp": business_settings(&connection).dp_percentage_bp,
+        });
+        let checked = mou::validate_mou_terms(&merge_mou_terms(&terms, &fallback, true, can_price))
+            .map_err(sample_invalid)?;
+        let stamp = clients::company_date_stamp(now, &company_timezone(&connection));
+        let mut statement = connection
+            .prepare("SELECT mou_number FROM production_mou WHERE mou_number LIKE ?;")
+            .map_err(|_| CommandError::internal())?;
+        let numbers = statement
+            .query_map([format!("%-{stamp}-{tag}__")], |row| row.get::<_, String>(0))
+            .map_err(|_| CommandError::internal())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| CommandError::internal())?;
+        let number = clients::next_client_sequence(numbers.iter().map(String::as_str), &stamp, &tag)
+            .and_then(|sequence| clients::format_client_code(mou::MOU_NUMBER_PREFIX, &stamp, &tag, sequence))
+            .ok_or_else(|| sample_invalid("This device has used up its MoU numbers for today."))?;
+        (current, checked, number)
+    };
+    let id = clients::new_uuid();
+    let log_id = clients::new_uuid();
+    let client_id = current["client_id"].as_str().unwrap_or_default().to_owned();
+    let payload = json!({
+        "id": id,
+        "mou_number": number,
+        "sample_request_id": sample_id,
+        "client_id": client_id,
+        "terms": checked.to_json(),
+        "created_by": operator.id,
+        "created_at": timestamp,
+        "log": { "id": log_id },
+    });
+    let audit = AuditEntry {
+        actor: &operator,
+        action: "mou.create",
+        entity_type: "sample",
+        entity_id: &sample_id,
+        summary: json!({
+            "client_code": current["client_code"],
+            "brand_name": current["brand_name"],
+            "mou_number": number,
+            "terms": checked.to_json(),
+        }),
+        on_behalf_of: None,
+    };
+    commit_with_outbox(&state, "mou", "create", &id, payload, Some(audit), |transaction| {
+        transaction
+            .execute(
+                mou::MOU_INSERT_SQL,
+                rusqlite::params![
+                    &id,
+                    &number,
+                    &sample_id,
+                    &client_id,
+                    checked.total_units,
+                    checked.unit_price_idr,
+                    checked.total_production_cost_idr,
+                    checked.production_lead_time_days,
+                    checked.regulatory_path,
+                    checked.dp_bp,
+                    checked.dp_amount_required_idr,
+                    &checked.notes,
+                    &timestamp,
+                    operator.id,
+                ],
+            )
+            .map_err(|_| CommandError::internal())?;
+        transaction
+            .execute(
+                samples::SAMPLE_STATUS_LOG_INSERT_SQL,
+                rusqlite::params![
+                    &log_id,
+                    &sample_id,
+                    "",
+                    "DRAFT",
+                    mou::MOU_CREATE_ACTION,
+                    format!("MoU {number}"),
+                    "",
+                    operator.id,
+                    &timestamp,
+                ],
+            )
+            .map_err(|_| CommandError::internal())?;
+        Ok(())
+    })?;
+    let _ = sync::synchronize(&state).await;
+    Ok(json!({ "id": id, "mou_number": number }))
+}
+
+/// Ubah draf MoU. `mou.manage` mengubah unit, lead time, jalur, dan catatan;
+/// `finance.manage` mengubah harga satuan dan persen DP. Cermin `updateMou`.
+#[tauri::command]
+pub async fn desktop_update_mou(
+    state: State<'_, DesktopState>,
+    id: String,
+    terms: Value,
+) -> Result<Value, CommandError> {
+    let can_price = require_permission(&state, "finance.manage").is_ok();
+    let (operator, can_edit) = match require_permission(&state, "mou.manage") {
+        Ok(operator) => (operator, true),
+        Err(_) if can_price => (require_permission(&state, "finance.manage")?, false),
+        Err(error) => return Err(error),
+    };
+    let now = clients::utc_timestamp(storage::now_epoch_seconds());
+    let current = {
+        let connection = storage::database(&state.data_dir)?;
+        query_json(&connection, &format!("{} WHERE m.id = ?;", mou::MOU_LIST_SQL), &[&id])?
+            .into_iter()
+            .next()
+            .ok_or_else(|| CommandError::new("MOU_NOT_FOUND", "MoU not found."))?
+    };
+    if current["status"].as_str() != Some("DRAFT") {
+        return Err(sample_invalid(mou::MOU_NOT_EDITABLE));
+    }
+    let checked = mou::validate_mou_terms(&merge_mou_terms(&terms, &current, can_edit, can_price))
+        .map_err(sample_invalid)?;
+    let sample_id = current["sample_request_id"].as_str().unwrap_or_default().to_owned();
+    let base_updated_at = current["updated_at"].as_str().unwrap_or_default().to_owned();
+    let payload = json!({
+        "id": id,
+        "sample_request_id": sample_id,
+        "terms": checked.to_json(),
+        "base_updated_at": base_updated_at,
+        "updated_at": now,
+    });
+    let audit = AuditEntry {
+        actor: &operator,
+        action: "mou.update",
+        entity_type: "sample",
+        entity_id: &sample_id,
+        summary: json!({
+            "client_code": current["client_code"],
+            "brand_name": current["brand_name"],
+            "mou_number": current["mou_number"],
+            "terms": checked.to_json(),
+        }),
+        on_behalf_of: None,
+    };
+    commit_with_outbox(&state, "mou", "update", &id, payload, Some(audit), |transaction| {
+        let changed = transaction
+            .execute(
+                mou::MOU_UPDATE_SQL,
+                rusqlite::params![
+                    &id,
+                    checked.total_units,
+                    checked.unit_price_idr,
+                    checked.total_production_cost_idr,
+                    checked.production_lead_time_days,
+                    checked.regulatory_path,
+                    checked.dp_bp,
+                    checked.dp_amount_required_idr,
+                    &checked.notes,
+                    &now,
+                    &base_updated_at,
+                ],
+            )
+            .map_err(|_| CommandError::internal())?;
+        if changed == 0 {
+            return Err(sample_invalid(mou::MOU_CHANGED_ELSEWHERE));
+        }
+        Ok(())
+    })?;
+    let _ = sync::synchronize(&state).await;
+    Ok(json!({ "id": id }))
+}
+
+/// Satu langkah MoU (keputusan E). Catatan wajib; revisi menyimpan catatan
+/// klien. Cermin `recordMouStep`.
+#[tauri::command]
+pub async fn desktop_record_mou_step(
+    state: State<'_, DesktopState>,
+    id: String,
+    action: String,
+    notes: String,
+) -> Result<Value, CommandError> {
+    let operator = require_permission(&state, "mou.manage")?;
+    let notes = samples::normalize_sample_notes(&notes)
+        .ok_or_else(|| sample_invalid("Notes are required, up to 1000 characters."))?;
+    let now = clients::utc_timestamp(storage::now_epoch_seconds());
+    let current = {
+        let connection = storage::database(&state.data_dir)?;
+        query_json(&connection, &format!("{} WHERE m.id = ?;", mou::MOU_LIST_SQL), &[&id])?
+            .into_iter()
+            .next()
+            .ok_or_else(|| CommandError::new("MOU_NOT_FOUND", "MoU not found."))?
+    };
+    let base_status = current["status"].as_str().unwrap_or_default().to_owned();
+    let status = mou::apply_mou_action(&base_status, current["dummy_ready"].as_i64() == Some(1), &action)
+        .map_err(sample_invalid)?;
+    let sample_id = current["sample_request_id"].as_str().unwrap_or_default().to_owned();
+    let revision_notes = (action == "MOU_REVISE").then(|| notes.clone());
+    let log_id = clients::new_uuid();
+    let payload = json!({
+        "id": id,
+        "sample_request_id": sample_id,
+        "action": action,
+        "base_status": base_status,
+        "status": status,
+        "changed_at": now,
+        "log": { "id": log_id, "notes": notes, "recorded_by": operator.id },
+    });
+    let audit = AuditEntry {
+        actor: &operator,
+        action: "mou.step",
+        entity_type: "sample",
+        entity_id: &sample_id,
+        summary: json!({
+            "client_code": current["client_code"],
+            "brand_name": current["brand_name"],
+            "mou_number": current["mou_number"],
+            "action": action,
+            "from": base_status,
+            "to": status,
+            "notes": notes,
+        }),
+        on_behalf_of: None,
+    };
+    commit_with_outbox(&state, "mou", "transition", &id, payload, Some(audit), |transaction| {
+        let changed = transaction
+            .execute(
+                mou::MOU_TRANSITION_SQL,
+                rusqlite::params![&id, status, revision_notes.as_deref(), &now, &base_status],
+            )
+            .map_err(|_| CommandError::internal())?;
+        if changed == 0 {
+            return Err(sample_invalid(mou::MOU_CHANGED_ELSEWHERE));
+        }
+        transaction
+            .execute(
+                samples::SAMPLE_STATUS_LOG_INSERT_SQL,
+                rusqlite::params![&log_id, &sample_id, &base_status, status, &action, &notes, "", operator.id, &now],
+            )
+            .map_err(|_| CommandError::internal())?;
+        Ok(())
+    })?;
+    let _ = sync::synchronize(&state).await;
+    Ok(json!({ "status": status }))
+}
+
 /// Simpan harga Finance untuk iterasi tiket yang sedang berjalan (v2.2, PRD
 /// F-16, D-27). Hanya saat `SAMPLE_READY`; harga jual dihitung ulang di sini
 /// dan di cloud, tidak dipercaya dari form. Cermin `recordSamplePrice`.
@@ -4088,6 +4607,789 @@ pub async fn desktop_record_sample_price(
     Ok(json!({ "id": price_id, "final_unit_price_idr": checked.final_unit_price_idr }))
 }
 
+// ===========================================================================
+// Tagihan dan uang masuk (PRD F-17, v2.3a). Aturan murni di `finance.rs`;
+// cermin `src/lib/server/finance.ts`.
+// ===========================================================================
+
+fn finance_invalid(message: impl Into<String>) -> CommandError {
+    CommandError::new("FINANCE_INVALID", message)
+}
+
+/// Daftar pajak/diskon, tagihan, uang masuk, dan alokasi, ditambah isian awal
+/// form tagihan. Cermin `getFinanceOverview`.
+#[tauri::command]
+pub fn desktop_get_finance_overview(state: State<'_, DesktopState>) -> Result<Value, CommandError> {
+    require_permission(&state, "invoices.view")?;
+    let connection = storage::database(&state.data_dir)?;
+    let settings = business_settings(&connection);
+    Ok(json!({
+        "options": query_json(&connection, finance::FINANCE_OPTIONS_SQL, &[])?,
+        "invoices": query_json(
+            &connection,
+            &format!("{} ORDER BY i.created_at DESC, i.id;", finance::INVOICE_LIST_SQL),
+            &[],
+        )?,
+        "funds": query_json(
+            &connection,
+            &format!("{} ORDER BY f.received_on DESC, f.created_at DESC, f.id;", finance::FUND_LIST_SQL),
+            &[],
+        )?,
+        "allocations": query_json(&connection, finance::ALLOCATION_LIST_SQL, &[])?,
+        "defaults": {
+            "default_sample_fee_idr": settings.default_sample_fee_idr,
+            "default_test_fee_idr": settings.default_test_fee_idr,
+            "default_dummy_fee_idr": settings.default_dummy_fee_idr,
+            "invoice_due_days": settings.invoice_due_days,
+            "invoice_payment_instructions": settings.invoice_payment_instructions,
+        },
+    }))
+}
+
+/// Tambah atau ubah satu pajak/diskon (D-28). Tidak pernah dihapus, hanya
+/// dinonaktifkan; jenisnya tidak pernah berubah. Cermin `saveFinanceOption`.
+#[tauri::command]
+pub async fn desktop_save_finance_option(
+    state: State<'_, DesktopState>,
+    option: Value,
+) -> Result<Value, CommandError> {
+    use rusqlite::OptionalExtension;
+    let operator = require_permission(&state, "finance_options.manage")?;
+    let requested_id = draft_text(&option, "id");
+    let now = clients::utc_timestamp(storage::now_epoch_seconds());
+    let (id, checked, sort_order) = {
+        let connection = storage::database(&state.data_dir)?;
+        let mut input = option.clone();
+        let (id, sort_order) = if requested_id.is_empty() {
+            let next: i64 = connection
+                .query_row(
+                    "SELECT COALESCE(MAX(sort_order), 0) + 10 FROM finance_options WHERE kind = ?;",
+                    [draft_text(&option, "kind")],
+                    |row| row.get(0),
+                )
+                .map_err(|_| CommandError::internal())?;
+            (clients::new_uuid(), next)
+        } else {
+            let (kind, sort_order) = connection
+                .query_row(
+                    "SELECT kind, sort_order FROM finance_options WHERE id = ?;",
+                    [&requested_id],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+                )
+                .optional()
+                .map_err(|_| CommandError::internal())?
+                .ok_or_else(|| CommandError::new("FINANCE_OPTION_NOT_FOUND", "Option not found."))?;
+            input["kind"] = json!(kind);
+            (requested_id.clone(), sort_order)
+        };
+        let checked = finance::validate_finance_option(&input).map_err(finance_invalid)?;
+        (id, checked, sort_order)
+    };
+    let payload = json!({
+        "id": id,
+        "kind": checked.kind,
+        "label": checked.label,
+        "rate_bp": checked.rate_bp,
+        "installment_count": checked.installment_count,
+        "is_active": checked.is_active,
+        "sort_order": sort_order,
+        "updated_at": now,
+    });
+    let audit = AuditEntry {
+        actor: &operator,
+        action: "finance_option.save",
+        entity_type: "finance_option",
+        entity_id: &id,
+        summary: json!({
+            "kind": checked.kind,
+            "label": checked.label,
+            "rate_bp": checked.rate_bp,
+            "is_active": checked.is_active,
+        }),
+        on_behalf_of: None,
+    };
+    commit_with_outbox(&state, "finance-option", "upsert", &id, payload, Some(audit), |transaction| {
+        transaction
+            .execute(
+                finance::FINANCE_OPTION_UPSERT_SQL,
+                rusqlite::params![
+                    &id,
+                    checked.kind,
+                    &checked.label,
+                    checked.rate_bp,
+                    i64::from(checked.is_active),
+                    sort_order,
+                    &now,
+                    checked.installment_count
+                ],
+            )
+            .map_err(|_| CommandError::internal())?;
+        Ok(())
+    })?;
+    let _ = sync::synchronize(&state).await;
+    Ok(json!({ "id": id }))
+}
+
+/// Tarif satu pajak/diskon aktif, sebagai baris `{ label, rate_bp }` untuk
+/// `compute_invoice`. `None` = tidak ada, jenisnya lain, atau nonaktif.
+fn active_rate(connection: &rusqlite::Connection, id: &str, kind: &str) -> Result<Option<Value>, CommandError> {
+    use rusqlite::OptionalExtension;
+    connection
+        .query_row(
+            "SELECT label, rate_bp FROM finance_options WHERE id = ? AND kind = ? AND is_active = 1;",
+            rusqlite::params![id, kind],
+            |row| Ok(json!({ "label": row.get::<_, String>(0)?, "rate_bp": row.get::<_, i64>(1)? })),
+        )
+        .optional()
+        .map_err(|_| CommandError::internal())
+}
+
+/// Buat tagihan (keputusan B, C, E, J, L). Tarif pajak/diskon DISALIN ke
+/// payload sehingga cloud menghitung ulang totalnya dari angka yang sama.
+/// Cermin `createInvoice`.
+#[tauri::command]
+pub async fn desktop_create_invoice(
+    state: State<'_, DesktopState>,
+    invoice: Value,
+) -> Result<Value, CommandError> {
+    let operator = require_permission(&state, "finance.manage")?;
+    let tag = sync::local_device_tag(&state)?.ok_or_else(|| {
+        CommandError::new(
+            "DEVICE_TAG_MISSING",
+            "This device has no code tag yet. Connect it to the database once to get one.",
+        )
+    })?;
+    let ref_type = draft_text(&invoice, "ref_type");
+    let sample_id = draft_text(&invoice, "sample_request_id");
+    let description = draft_text(&invoice, "description");
+    if description.chars().count() > finance::INVOICE_DESCRIPTION_MAX {
+        return Err(finance_invalid("The description is up to 300 characters."));
+    }
+    let now = storage::now_epoch_seconds();
+    let timestamp = clients::utc_timestamp(now);
+    let (client_id, client_code, revision_index, totals, rates, number, issued_on, due_on) = {
+        let connection = storage::database(&state.data_dir)?;
+        let ticket = if sample_id.is_empty() {
+            None
+        } else {
+            Some(
+                query_json(&connection, &format!("{SAMPLE_LIST_SQL} WHERE s.id = ?;"), &[&sample_id])?
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| CommandError::new("SAMPLE_NOT_FOUND", "Sample request not found."))?,
+            )
+        };
+        let rules_ticket = ticket.as_ref().map(|row| finance::InvoiceTicket {
+            is_paid_sample: row["is_paid_sample"].as_i64() == Some(1),
+            is_test_requested: row["is_test_requested"].as_i64() == Some(1),
+            revision_fee_idr: row["revision_fee_idr"].as_i64(),
+            dummy_round: row["dummy_round"].as_i64(),
+            mou_accepted: row["mou_status"].as_str() == Some("ACCEPTED"),
+        });
+        if let Some(message) = finance::invoice_type_error(&ref_type, rules_ticket.as_ref()) {
+            return Err(finance_invalid(message));
+        }
+        let client_id = match &ticket {
+            Some(row) => row["client_id"].as_str().unwrap_or_default().to_owned(),
+            None => draft_text(&invoice, "client_id"),
+        };
+        let client_code: Option<String> = {
+            use rusqlite::OptionalExtension;
+            connection
+                .query_row("SELECT client_code FROM clients WHERE id = ?;", [&client_id], |row| row.get(0))
+                .optional()
+                .map_err(|_| CommandError::internal())?
+        };
+        let client_code = client_code.ok_or_else(|| CommandError::new("CLIENT_NOT_FOUND", "Client not found."))?;
+        let revision_index = ticket.as_ref().map_or(0, |row| {
+            finance::invoice_revision_index(
+                &ref_type,
+                row["revision_index"].as_i64().unwrap_or(0),
+                row["dummy_round"].as_i64(),
+            )
+        });
+        if ticket.is_some() && ref_type != "OTHER" {
+            let duplicates: i64 = connection
+                .query_row(
+                    finance::INVOICE_DUPLICATE_SQL,
+                    rusqlite::params![&sample_id, &ref_type, revision_index, ""],
+                    |row| row.get(0),
+                )
+                .map_err(|_| CommandError::internal())?;
+            if duplicates > 0 {
+                return Err(finance_invalid(finance::INVOICE_DUPLICATE));
+            }
+        }
+        let discount_id = draft_text(&invoice, "discount_option_id");
+        let discount = if discount_id.is_empty() {
+            Value::Null
+        } else {
+            active_rate(&connection, &discount_id, "DISCOUNT")?
+                .ok_or_else(|| finance_invalid("Choose an active discount."))?
+        };
+        let mut taxes = Vec::new();
+        for tax_id in invoice
+            .get("tax_option_ids")
+            .and_then(Value::as_array)
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+        {
+            let tax_id = tax_id.as_str().unwrap_or_default();
+            taxes.push(active_rate(&connection, tax_id, "TAX")?.ok_or_else(|| finance_invalid("Choose active taxes only."))?);
+        }
+        let rates = json!({
+            "subtotal_idr": invoice.get("subtotal_idr").cloned().unwrap_or(Value::Null),
+            "discount": discount,
+            "taxes": taxes,
+        });
+        let totals = finance::compute_invoice(&rates).map_err(finance_invalid)?;
+        let timezone = company_timezone(&connection);
+        let stamp = clients::company_date_stamp(now, &timezone);
+        let mut statement = connection
+            .prepare("SELECT invoice_number FROM invoices WHERE invoice_number LIKE ?;")
+            .map_err(|_| CommandError::internal())?;
+        let numbers = statement
+            .query_map([format!("%-{stamp}-{tag}__")], |row| row.get::<_, String>(0))
+            .map_err(|_| CommandError::internal())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| CommandError::internal())?;
+        let number = clients::next_client_sequence(numbers.iter().map(String::as_str), &stamp, &tag)
+            .and_then(|sequence| clients::format_client_code(finance::INVOICE_NUMBER_PREFIX, &stamp, &tag, sequence))
+            .ok_or_else(|| finance_invalid("This device has used up its invoice numbers for today."))?;
+        let (issued_on, due_on) =
+            finance::invoice_dates(now, &timezone, business_settings(&connection).invoice_due_days);
+        (client_id, client_code, revision_index, totals, rates, number, issued_on, due_on)
+    };
+
+    let id = clients::new_uuid();
+    let payload = json!({
+        "id": id,
+        "invoice_number": number,
+        "client_id": client_id,
+        "sample_request_id": sample_id,
+        "ref_type": ref_type,
+        "revision_index": revision_index,
+        "description": description,
+        "subtotal_idr": totals.subtotal_idr,
+        "discount": rates["discount"],
+        "taxes": rates["taxes"],
+        "issued_on": issued_on,
+        "due_on": due_on,
+        "created_by": operator.id,
+        "created_at": timestamp,
+    });
+    let audit = AuditEntry {
+        actor: &operator,
+        action: "invoice.create",
+        entity_type: "invoice",
+        entity_id: &id,
+        summary: json!({
+            "invoice_number": number,
+            "client_code": client_code,
+            "ref_type": ref_type,
+            "total_idr": totals.total_idr,
+        }),
+        on_behalf_of: None,
+    };
+    commit_with_outbox(&state, "invoice", "create", &id, payload, Some(audit), |transaction| {
+        transaction
+            .execute(
+                finance::INVOICE_INSERT_SQL,
+                rusqlite::params![
+                    &id,
+                    &number,
+                    &client_id,
+                    &sample_id,
+                    &ref_type,
+                    revision_index,
+                    &description,
+                    totals.subtotal_idr,
+                    &totals.discount_label,
+                    totals.discount_bp,
+                    totals.discount_idr,
+                    &totals.taxes_json,
+                    totals.tax_idr,
+                    totals.total_idr,
+                    &issued_on,
+                    &due_on,
+                    operator.id,
+                    &timestamp
+                ],
+            )
+            .map_err(|_| CommandError::internal())?;
+        Ok(())
+    })?;
+    let _ = sync::synchronize(&state).await;
+    Ok(json!({ "id": id, "invoice_number": number, "total_idr": totals.total_idr }))
+}
+
+/// Batalkan tagihan yang belum dibayar sama sekali (keputusan N). Cermin
+/// `cancelInvoice`.
+#[tauri::command]
+pub async fn desktop_cancel_invoice(
+    state: State<'_, DesktopState>,
+    id: String,
+    reason: String,
+) -> Result<Value, CommandError> {
+    let operator = require_permission(&state, "finance.manage")?;
+    let reason = finance::normalize_cancel_reason(&reason).ok_or_else(|| finance_invalid(finance::CANCEL_REASON_INVALID))?;
+    let now = clients::utc_timestamp(storage::now_epoch_seconds());
+    let payload = json!({ "id": id, "reason": reason, "updated_at": now });
+    let audit = AuditEntry {
+        actor: &operator,
+        action: "invoice.cancel",
+        entity_type: "invoice",
+        entity_id: &id,
+        summary: json!({ "reason": reason }),
+        on_behalf_of: None,
+    };
+    commit_with_outbox(&state, "invoice", "cancel", &id, payload, Some(audit), |transaction| {
+        let changed = transaction
+            .execute(finance::INVOICE_CANCEL_SQL, rusqlite::params![&id, &reason, &now])
+            .map_err(|_| CommandError::internal())?;
+        if changed == 0 {
+            return Err(finance_invalid("Only an open invoice with no payment can be cancelled."));
+        }
+        Ok(())
+    })?;
+    let _ = sync::synchronize(&state).await;
+    Ok(json!({ "id": id }))
+}
+
+/// Catat uang masuk dari mutasi bank, dengan foto bukti opsional (keputusan
+/// F). Cermin `recordIncomingFund`.
+#[tauri::command]
+pub async fn desktop_record_incoming_fund(
+    state: State<'_, DesktopState>,
+    fund: Value,
+) -> Result<Value, CommandError> {
+    let operator = require_permission(&state, "finance.manage")?;
+    let draft = finance::validate_fund_draft(&fund).map_err(finance_invalid)?;
+    let proof = draft_text(&fund, "proof_base64");
+    let proof_size = if proof.is_empty() {
+        None
+    } else {
+        Some(samples::validate_media_upload("PAYMENT_PROOF", &proof).map_err(finance_invalid)? as i64)
+    };
+    if !draft.client_id.is_empty() {
+        let connection = storage::database(&state.data_dir)?;
+        let found: i64 = connection
+            .query_row("SELECT COUNT(*) FROM clients WHERE id = ?;", [&draft.client_id], |row| row.get(0))
+            .map_err(|_| CommandError::internal())?;
+        if found == 0 {
+            return Err(CommandError::new("CLIENT_NOT_FOUND", "Client not found."));
+        }
+    }
+    let now = clients::utc_timestamp(storage::now_epoch_seconds());
+    let id = clients::new_uuid();
+    let proof_id = proof_size.map(|_| clients::new_uuid());
+    let payload = json!({
+        "id": id,
+        "client_id": draft.client_id,
+        "received_on": draft.received_on,
+        "amount_idr": draft.amount_idr,
+        "description": draft.description,
+        "proof": proof_id.as_ref().map(|proof_id| json!({ "id": proof_id, "data_base64": proof })),
+        "recorded_by": operator.id,
+        "created_at": now,
+    });
+    let audit = AuditEntry {
+        actor: &operator,
+        action: "fund.record",
+        entity_type: "fund",
+        entity_id: &id,
+        summary: json!({
+            "received_on": draft.received_on,
+            "amount_idr": draft.amount_idr,
+            "has_proof": proof_id.is_some(),
+        }),
+        on_behalf_of: None,
+    };
+    commit_with_outbox(&state, "fund", "record", &id, payload, Some(audit), |transaction| {
+        if let (Some(proof_id), Some(size)) = (&proof_id, proof_size) {
+            transaction
+                .execute(
+                    finance::FUND_MEDIA_INSERT_SQL,
+                    rusqlite::params![proof_id, &id, size, &proof, operator.id, &now],
+                )
+                .map_err(|_| CommandError::new("MEDIA_SAVE_FAILED", "The photo could not be saved."))?;
+        }
+        transaction
+            .execute(
+                finance::FUND_INSERT_SQL,
+                rusqlite::params![
+                    &id,
+                    &draft.client_id,
+                    &draft.received_on,
+                    draft.amount_idr,
+                    &draft.description,
+                    proof_id.as_deref().unwrap_or_default(),
+                    operator.id,
+                    &now
+                ],
+            )
+            .map_err(|_| CommandError::internal())?;
+        Ok(())
+    })?;
+    let _ = sync::synchronize(&state).await;
+    Ok(json!({ "id": id }))
+}
+
+/// Batalkan uang masuk yang belum dialokasikan sama sekali. Cermin
+/// `voidIncomingFund`.
+#[tauri::command]
+pub async fn desktop_void_incoming_fund(
+    state: State<'_, DesktopState>,
+    id: String,
+    reason: String,
+) -> Result<Value, CommandError> {
+    let operator = require_permission(&state, "finance.manage")?;
+    let reason = finance::normalize_cancel_reason(&reason).ok_or_else(|| finance_invalid(finance::CANCEL_REASON_INVALID))?;
+    let now = clients::utc_timestamp(storage::now_epoch_seconds());
+    let payload = json!({ "id": id, "reason": reason, "updated_at": now });
+    let audit = AuditEntry {
+        actor: &operator,
+        action: "fund.void",
+        entity_type: "fund",
+        entity_id: &id,
+        summary: json!({ "reason": reason }),
+        on_behalf_of: None,
+    };
+    commit_with_outbox(&state, "fund", "void", &id, payload, Some(audit), |transaction| {
+        let changed = transaction
+            .execute(finance::FUND_VOID_SQL, rusqlite::params![&id, &reason, &now])
+            .map_err(|_| CommandError::internal())?;
+        if changed == 0 {
+            return Err(finance_invalid("Only an incoming payment with nothing allocated can be voided."));
+        }
+        Ok(())
+    })?;
+    let _ = sync::synchronize(&state).await;
+    Ok(json!({ "id": id }))
+}
+
+/// Pakai uang masuk untuk melunasi satu tagihan (keputusan G: persis sebesar
+/// sisanya). Cermin `allocateFund`.
+#[tauri::command]
+pub async fn desktop_allocate_fund(
+    state: State<'_, DesktopState>,
+    fund_id: String,
+    invoice_id: String,
+    amount_idr: Value,
+) -> Result<Value, CommandError> {
+    let operator = require_permission(&state, "finance.manage")?;
+    let now = clients::utc_timestamp(storage::now_epoch_seconds());
+    let invoice_number = {
+        let connection = storage::database(&state.data_dir)?;
+        let state_row = query_json(&connection, finance::ALLOCATION_STATE_SQL, &[&invoice_id, &fund_id])?
+            .into_iter()
+            .next()
+            .unwrap_or(Value::Null);
+        if let Some(message) = finance::allocation_check(&state_row, &amount_idr) {
+            return Err(finance_invalid(message));
+        }
+        connection
+            .query_row("SELECT invoice_number FROM invoices WHERE id = ?;", [&invoice_id], |row| row.get::<_, String>(0))
+            .map_err(|_| CommandError::internal())?
+    };
+    let amount = amount_idr.as_i64().unwrap_or_default();
+    let id = clients::new_uuid();
+    let payload = json!({
+        "id": id,
+        "fund_id": fund_id,
+        "invoice_id": invoice_id,
+        "amount_idr": amount,
+        "recorded_by": operator.id,
+        "recorded_at": now,
+    });
+    let audit = AuditEntry {
+        actor: &operator,
+        action: "fund.allocate",
+        entity_type: "invoice",
+        entity_id: &invoice_id,
+        summary: json!({ "invoice_number": invoice_number, "amount_idr": amount }),
+        on_behalf_of: None,
+    };
+    commit_with_outbox(&state, "fund", "allocate", &id, payload, Some(audit), |transaction| {
+        transaction
+            .execute(
+                finance::ALLOCATION_INSERT_SQL,
+                rusqlite::params![&id, &fund_id, &invoice_id, amount, operator.id, &now],
+            )
+            .map_err(|_| CommandError::internal())?;
+        Ok(())
+    })?;
+    let _ = sync::synchronize(&state).await;
+    Ok(json!({ "id": id }))
+}
+
+/// Terima pembayaran sebagian (v2.3b, D-29, keputusan A): alokasikan nominal
+/// itu, jadwalkan ulang sisanya dengan satu paket cicilan, dan tandai tagihan
+/// asal `RESCHEDULED`. Hanya pemegang `payments.approve_exception`; audit
+/// mencatat penyetujunya. Cermin `acceptPartialPayment`.
+#[tauri::command]
+pub async fn desktop_accept_partial_payment(
+    state: State<'_, DesktopState>,
+    fund_id: String,
+    invoice_id: String,
+    amount_idr: Value,
+    plan_option_id: String,
+) -> Result<Value, CommandError> {
+    use rusqlite::OptionalExtension;
+    let operator = require_permission(&state, "payments.approve_exception")?;
+    let now = storage::now_epoch_seconds();
+    let timestamp = clients::utc_timestamp(now);
+    let (row, plan, start_on) = {
+        let connection = storage::database(&state.data_dir)?;
+        let row = query_json(&connection, finance::RESCHEDULE_STATE_SQL, &[&invoice_id, &fund_id])?
+            .into_iter()
+            .next()
+            .ok_or_else(|| CommandError::new("INVOICE_NOT_FOUND", "Invoice not found."))?;
+        if row["status"].as_str() != Some("OPEN") {
+            return Err(finance_invalid("This invoice is cancelled or already settled."));
+        }
+        if row["fund_status"].as_str() != Some("ACTIVE") {
+            return Err(finance_invalid("This incoming payment is void or does not exist."));
+        }
+        if let Some(message) = finance::partial_payment_error(
+            Some(&amount_idr),
+            row["ref_type"].as_str().unwrap_or_default(),
+            row["invoice_remaining"].as_i64().unwrap_or(0),
+            row["fund_unallocated"].as_i64().unwrap_or(0),
+        ) {
+            return Err(finance_invalid(message));
+        }
+        let plan = connection
+            .query_row(
+                "SELECT label, rate_bp, installment_count FROM finance_options WHERE id = ? AND kind = 'INSTALLMENT_PLAN' AND is_active = 1;",
+                [&plan_option_id],
+                |found| Ok(json!({
+                    "label": found.get::<_, String>(0)?,
+                    "rate_bp": found.get::<_, i64>(1)?,
+                    "installment_count": found.get::<_, Option<i64>>(2)?,
+                })),
+            )
+            .optional()
+            .map_err(|_| CommandError::internal())?
+            .filter(|plan| plan["installment_count"].as_i64().is_some_and(|count| count >= 1))
+            .ok_or_else(|| finance_invalid("Choose an active installment plan."))?;
+        let start_on = finance::invoice_dates(now, &company_timezone(&connection), 0).0;
+        (row, plan, start_on)
+    };
+    let amount = amount_idr.as_i64().unwrap_or_default();
+    let remaining_after = row["invoice_remaining"].as_i64().unwrap_or(0) - amount;
+    let count = plan["installment_count"].as_i64().unwrap_or(1);
+    let (interest, total, lines) =
+        finance::compute_installments(remaining_after, plan["rate_bp"].as_i64().unwrap_or(0), count, &start_on);
+    let parent_number = row["invoice_number"].as_str().unwrap_or_default().to_owned();
+    let plan_label = plan["label"].as_str().unwrap_or_default().to_owned();
+    let allocation_id = clients::new_uuid();
+    let installment_ids: Vec<String> = lines.iter().map(|_| clients::new_uuid()).collect();
+    let payload = json!({
+        "id": invoice_id,
+        "fund_id": fund_id,
+        "allocation_id": allocation_id,
+        "amount_idr": amount,
+        "remaining_after_idr": remaining_after,
+        "plan": plan,
+        "start_on": start_on,
+        "installment_ids": installment_ids,
+        "invoice_number": parent_number,
+        "client_id": row["client_id"],
+        "sample_request_id": row["sample_request_id"],
+        "revision_index": row["revision_index"],
+        "recorded_by": operator.id,
+        "recorded_at": timestamp,
+    });
+    let audit = AuditEntry {
+        actor: &operator,
+        action: "invoice.reschedule",
+        entity_type: "invoice",
+        entity_id: &invoice_id,
+        summary: json!({
+            "invoice_number": parent_number,
+            "amount_idr": amount,
+            "remaining_idr": remaining_after,
+            "plan": plan_label,
+            "interest_idr": interest,
+            "total_idr": total,
+            "installments": count,
+        }),
+        on_behalf_of: None,
+    };
+    let client_id = row["client_id"].as_str().unwrap_or_default().to_owned();
+    let sample_id = row["sample_request_id"].as_str().unwrap_or_default().to_owned();
+    let revision_index = row["revision_index"].as_i64().unwrap_or(0);
+    commit_with_outbox(&state, "invoice", "reschedule", &invoice_id, payload, Some(audit), |transaction| {
+        transaction
+            .execute(
+                finance::ALLOCATION_INSERT_SQL,
+                rusqlite::params![&allocation_id, &fund_id, &invoice_id, amount, operator.id, &timestamp],
+            )
+            .map_err(|_| CommandError::internal())?;
+        let changed = transaction
+            .execute(finance::INVOICE_RESCHEDULE_SQL, rusqlite::params![&invoice_id, &timestamp])
+            .map_err(|_| CommandError::internal())?;
+        if changed == 0 {
+            return Err(finance_invalid("This invoice is cancelled or already settled."));
+        }
+        for (line, id) in lines.iter().zip(&installment_ids) {
+            transaction
+                .execute(
+                    finance::INSTALLMENT_INSERT_SQL,
+                    rusqlite::params![
+                        id,
+                        finance::installment_number(&parent_number, line.installment_no),
+                        &client_id,
+                        &sample_id,
+                        revision_index,
+                        finance::installment_description(line.installment_no, count, &parent_number, &plan_label),
+                        line.amount_idr,
+                        &start_on,
+                        &line.due_on,
+                        &invoice_id,
+                        line.installment_no,
+                        operator.id,
+                        &timestamp
+                    ],
+                )
+                .map_err(|_| CommandError::internal())?;
+        }
+        Ok(())
+    })?;
+    let _ = sync::synchronize(&state).await;
+    Ok(json!({ "id": invoice_id, "installments": count, "total_idr": total }))
+}
+
+/// Simpan sisa uang masuk sebagai deposit klien (v2.3b, keputusan I). Cermin
+/// `confirmDeposit`.
+#[tauri::command]
+pub async fn desktop_confirm_deposit(
+    state: State<'_, DesktopState>,
+    fund_id: String,
+    client_id: String,
+) -> Result<Value, CommandError> {
+    let operator = require_permission(&state, "payments.approve_exception")?;
+    let now = clients::utc_timestamp(storage::now_epoch_seconds());
+    let (client, client_code, unallocated) = {
+        use rusqlite::OptionalExtension;
+        let connection = storage::database(&state.data_dir)?;
+        let row = query_json(&connection, finance::FUND_DEPOSIT_STATE_SQL, &[&fund_id])?
+            .into_iter()
+            .next()
+            .unwrap_or(Value::Null);
+        let recorded = row["client_id"].as_str().unwrap_or_default();
+        // Klien yang sudah tercatat di uang masuk tidak bisa diganti di sini.
+        let client = if recorded.is_empty() { client_id.trim().to_owned() } else { recorded.to_owned() };
+        let unallocated = row["unallocated"].as_i64().unwrap_or(0);
+        if let Some(message) = finance::deposit_error(
+            row["status"].as_str().unwrap_or_default(),
+            row["deposit_confirmed_at"].as_str().unwrap_or_default(),
+            &client,
+            unallocated,
+        ) {
+            return Err(finance_invalid(message));
+        }
+        let client_code: String = connection
+            .query_row("SELECT client_code FROM clients WHERE id = ?;", [&client], |found| found.get(0))
+            .optional()
+            .map_err(|_| CommandError::internal())?
+            .ok_or_else(|| CommandError::new("CLIENT_NOT_FOUND", "Client not found."))?;
+        (client, client_code, unallocated)
+    };
+    let payload = json!({
+        "id": fund_id,
+        "client_id": client,
+        "confirmed_by": operator.id,
+        "confirmed_at": now,
+    });
+    let audit = AuditEntry {
+        actor: &operator,
+        action: "fund.deposit",
+        entity_type: "fund",
+        entity_id: &fund_id,
+        summary: json!({ "client_code": client_code, "amount_idr": unallocated }),
+        on_behalf_of: None,
+    };
+    commit_with_outbox(&state, "fund", "deposit", &fund_id, payload, Some(audit), |transaction| {
+        let changed = transaction
+            .execute(finance::FUND_DEPOSIT_SQL, rusqlite::params![&fund_id, &client, operator.id, &now])
+            .map_err(|_| CommandError::internal())?;
+        if changed == 0 {
+            return Err(finance_invalid("This payment is already kept as a deposit."));
+        }
+        Ok(())
+    })?;
+    let _ = sync::synchronize(&state).await;
+    Ok(json!({ "id": fund_id }))
+}
+
+/// Batas ukuran dokumen buatan webview (invoice PDF ± beberapa ratus KB).
+pub(crate) const DOCUMENT_MAX_BYTES: usize = 10 * 1024 * 1024;
+
+/// Nama berkas dokumen yang aman: tanpa karakter path, berakhiran `.pdf`,
+/// paling panjang 120 karakter. `None` = tidak sah.
+pub(crate) fn document_file_name(raw: &str) -> Option<String> {
+    let name: String = raw
+        .trim()
+        .chars()
+        .map(|char| if matches!(char, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') || char.is_control() { '_' } else { char })
+        .collect();
+    let valid = name.to_ascii_lowercase().ends_with(".pdf")
+        && name.len() > 4
+        && name.chars().count() <= 120
+        && !name.starts_with('.');
+    valid.then_some(name)
+}
+
+/// `INV.pdf` → `INV (2).pdf` untuk `n = 2`; `n = 1` = nama asli (keputusan E).
+pub(crate) fn numbered_file_name(name: &str, n: u32) -> String {
+    if n <= 1 {
+        return name.to_owned();
+    }
+    match name.rsplit_once('.') {
+        Some((stem, extension)) => format!("{stem} ({n}).{extension}"),
+        None => format!("{name} ({n})"),
+    }
+}
+
+/// Simpan dokumen buatan webview (invoice PDF, v2.3c) ke folder Downloads
+/// tanpa menimpa berkas yang sudah ada. Hanya Desktop; Android memakai
+/// `mobile_save_document` (aturan 28).
+#[tauri::command]
+pub fn desktop_save_document(
+    state: State<'_, DesktopState>,
+    file_name: String,
+    data_base64: String,
+) -> Result<Value, CommandError> {
+    require_permission(&state, "invoices.view")?;
+    let name = document_file_name(&file_name)
+        .ok_or_else(|| CommandError::new("DOCUMENT_INVALID", "The document name is invalid."))?;
+    let bytes = BASE64_STANDARD
+        .decode(data_base64.as_bytes())
+        .ok()
+        .filter(|bytes| bytes.len() <= DOCUMENT_MAX_BYTES)
+        .ok_or_else(|| CommandError::new("DOCUMENT_INVALID", "The document is invalid or too large."))?;
+    for dir in portability::public_output_dirs() {
+        if !dir.exists() && std::fs::create_dir_all(&dir).is_err() {
+            continue;
+        }
+        let Some(target) = (1..=999)
+            .map(|n| dir.join(numbered_file_name(&name, n)))
+            .find(|candidate| !candidate.exists())
+        else {
+            continue;
+        };
+        if std::fs::write(&target, &bytes).is_ok() {
+            return Ok(json!({ "path": target.to_string_lossy() }));
+        }
+    }
+    Err(CommandError::new(
+        "DOCUMENT_SAVE_FAILED",
+        "The document could not be saved to the Downloads folder.",
+    ))
+}
+
 /// Unggah satu foto terkompresi ke tiket (PRD FR-07). Kompresi sudah terjadi
 /// di webview; di sini diperiksa ulang (`validate_media_upload`), dicatat
 /// di audit, dan diantrekan lewat rute `media/upload`. Cermin `uploadSampleMedia`.
@@ -4098,7 +5400,7 @@ pub async fn desktop_upload_sample_media(
     purpose: String,
     data_base64: String,
 ) -> Result<Value, CommandError> {
-    let operator = require_permission(&state, "samples.manage")?;
+    let operator = require_permission(&state, samples::media_purpose_permission(&purpose))?;
     let byte_size = samples::validate_media_upload(&purpose, &data_base64).map_err(sample_invalid)?;
     let now = clients::utc_timestamp(storage::now_epoch_seconds());
     let current = {
@@ -4155,7 +5457,14 @@ fn check_media_allowed(
     purpose: &str,
 ) -> Result<(), CommandError> {
     let status = sample["status"].as_str().unwrap_or_default();
-    if samples::SAMPLE_TERMINAL_STATUSES.contains(&status) {
+    if purpose == "MOCKUP" {
+        let active: i64 = connection
+            .query_row(design::DESIGN_ACTIVE_SQL, [sample["id"].as_str().unwrap_or_default(), ""], |row| row.get(0))
+            .map_err(|_| CommandError::internal())?;
+        if active == 0 {
+            return Err(sample_invalid("Request a design for this sample before uploading a mockup."));
+        }
+    } else if samples::SAMPLE_TERMINAL_STATUSES.contains(&status) {
         return Err(sample_invalid("This sample request is closed."));
     }
     if purpose == "PAYMENT_PROOF" && sample["is_paid_sample"].as_i64() != Some(1) {
@@ -4164,8 +5473,8 @@ fn check_media_allowed(
     let limit = business_settings(connection).max_photos_per_sample;
     let count: i64 = connection
         .query_row(
-            "SELECT COUNT(*) FROM media_asset WHERE owner_type = 'sample' AND owner_id = ?;",
-            [sample["id"].as_str().unwrap_or_default()],
+            "SELECT COUNT(*) FROM media_asset WHERE owner_type = 'sample' AND owner_id = ? AND purpose = ?;",
+            [sample["id"].as_str().unwrap_or_default(), purpose],
             |row| row.get(0),
         )
         .map_err(|_| CommandError::internal())?;
@@ -4213,6 +5522,24 @@ pub async fn desktop_get_media(state: State<'_, DesktopState>, id: String) -> Re
         )
         .map_err(|_| CommandError::internal())?;
     Ok(json!({ "id": id, "mime": samples::MEDIA_MIME, "data_base64": data }))
+}
+
+#[cfg(test)]
+mod tests_documents {
+    use super::{document_file_name, numbered_file_name};
+
+    #[test]
+    fn nama_dokumen_aman_dan_tidak_menimpa() {
+        assert_eq!(document_file_name(" INV-20261008-A101.pdf ").as_deref(), Some("INV-20261008-A101.pdf"));
+        assert_eq!(document_file_name("..\\evil/INV.pdf").as_deref(), None);
+        assert_eq!(document_file_name("a/b:c.PDF").as_deref(), Some("a_b_c.PDF"));
+        assert_eq!(document_file_name("invoice.exe"), None);
+        assert_eq!(document_file_name(".pdf"), None);
+        assert_eq!(document_file_name(&format!("{}.pdf", "x".repeat(117))), None);
+        assert_eq!(numbered_file_name("INV.pdf", 1), "INV.pdf");
+        assert_eq!(numbered_file_name("INV.pdf", 2), "INV (2).pdf");
+        assert_eq!(numbered_file_name("INV-1.2.pdf", 3), "INV-1.2 (3).pdf");
+    }
 }
 
 #[cfg(test)]

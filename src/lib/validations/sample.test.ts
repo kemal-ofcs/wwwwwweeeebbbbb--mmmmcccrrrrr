@@ -8,9 +8,12 @@ import {
   type RndStep,
   readBusinessSettings,
   SAMPLE_ACTIONS,
+  SAMPLE_FEE_UNPAID,
+  SAMPLE_MOCKUP_MISSING,
   SAMPLE_NOT_PRICED,
   SAMPLE_STATUSES,
   SAMPLE_STEP_NOT_ALLOWED,
+  SAMPLE_TEST_UNPAID,
   type SampleAction,
   sampleActionPermission,
   TELEGRAM_CHAT_ID_INVALID,
@@ -21,6 +24,67 @@ import {
 
 // Vektor kembar: `mod tests` di `src-tauri/src/desktop/samples.rs` memakai
 // masukan dan keluaran yang persis sama. Ubah keduanya bersamaan.
+
+describe("gerbang tagihan lunas (gerbang_tagihan_lunas)", () => {
+  const cases: [string, boolean, boolean, SampleAction, string][] = [
+    [
+      "WAITING_SAMPLE_PAYMENT",
+      false,
+      true,
+      "PAYMENT_RECEIVED",
+      SAMPLE_FEE_UNPAID,
+    ],
+    ["WAITING_SAMPLE_PAYMENT", true, true, "PAYMENT_RECEIVED", "IN_RND"],
+    [
+      "WAITING_REVISION_PAYMENT",
+      false,
+      true,
+      "PAYMENT_RECEIVED",
+      SAMPLE_FEE_UNPAID,
+    ],
+    ["IN_RND", false, true, "PAYMENT_RECEIVED", SAMPLE_STEP_NOT_ALLOWED],
+    ["SAMPLE_READY", true, false, "SAMPLE_SENT", SAMPLE_TEST_UNPAID],
+    ["SAMPLE_READY", true, true, "SAMPLE_SENT", "SAMPLE_SENT"],
+  ];
+  for (const [status, feePaid, testReady, action, expected] of cases) {
+    test(`${status} + ${action}`, () => {
+      const result = applySampleAction(
+        {
+          status,
+          is_paid_sample: true,
+          revision_index: 1,
+          free_revision_limit: 0,
+          has_price: true,
+          fee_paid: feePaid,
+          test_ready: testReady,
+          mockup_ready: true,
+        },
+        action,
+        null,
+        null,
+      );
+      expect("error" in result ? result.error : result.status).toBe(expected);
+    });
+  }
+  test("mockup wajib sebelum Sample sent (v2.4)", () => {
+    const result = applySampleAction(
+      {
+        status: "SAMPLE_READY",
+        is_paid_sample: true,
+        revision_index: 1,
+        free_revision_limit: 0,
+        has_price: true,
+        fee_paid: true,
+        test_ready: true,
+        mockup_ready: false,
+      },
+      "SAMPLE_SENT",
+      null,
+      null,
+    );
+    expect(result).toEqual({ error: SAMPLE_MOCKUP_MISSING });
+  });
+});
 
 describe("tarif revisi dan gerbang harga (tarif_revisi_dan_gerbang_harga)", () => {
   const cases: [string, boolean, string, number | null, unknown][] = [
@@ -72,6 +136,9 @@ describe("tarif revisi dan gerbang harga (tarif_revisi_dan_gerbang_harga)", () =
           revision_index: 2,
           free_revision_limit: 1,
           has_price: hasPrice,
+          fee_paid: true,
+          test_ready: true,
+          mockup_ready: true,
         },
         action as SampleAction,
         null,
@@ -285,6 +352,14 @@ describe("readBusinessSettings", () => {
     telegram_chat_id_rnd: "",
     telegram_chat_id_finance: "",
     offline_login_max_days: 7,
+    default_sample_fee_idr: 0,
+    default_test_fee_idr: 0,
+    invoice_due_days: 7,
+    invoice_payment_instructions: "",
+    telegram_chat_id_design: "",
+    default_dummy_fee_idr: 0,
+    max_dummy_rejections: 0,
+    dp_percentage_bp: 5000,
   };
   test("kosong = bawaan", () => {
     expect(readBusinessSettings({})).toEqual(defaults);
@@ -301,6 +376,14 @@ describe("readBusinessSettings", () => {
         telegram_chat_id_rnd: "@maklon_rnd",
         telegram_chat_id_finance: "finance group",
         offline_login_max_days: "3",
+        default_sample_fee_idr: "150000",
+        default_test_fee_idr: "1500000000",
+        invoice_due_days: "14",
+        invoice_payment_instructions: " BCA 123 a.n. Company ",
+        telegram_chat_id_design: "@maklon_design",
+        default_dummy_fee_idr: "75000",
+        max_dummy_rejections: "3",
+        dp_percentage_bp: "3000",
       }),
     ).toEqual({
       default_free_revision_limit: 2,
@@ -312,6 +395,14 @@ describe("readBusinessSettings", () => {
       telegram_chat_id_rnd: "@maklon_rnd",
       telegram_chat_id_finance: "",
       offline_login_max_days: 3,
+      default_sample_fee_idr: 150_000,
+      default_test_fee_idr: 1_500_000_000,
+      invoice_due_days: 14,
+      invoice_payment_instructions: "BCA 123 a.n. Company",
+      telegram_chat_id_design: "@maklon_design",
+      default_dummy_fee_idr: 75_000,
+      max_dummy_rejections: 3,
+      dp_percentage_bp: 3000,
     });
     expect(
       readBusinessSettings({
@@ -321,6 +412,8 @@ describe("readBusinessSettings", () => {
         lead_warm_max_days: "9",
         max_photos_per_sample: "0",
         offline_login_max_days: "9",
+        max_dummy_rejections: "21",
+        dp_percentage_bp: "0",
       }),
     ).toEqual(defaults);
   });
@@ -337,10 +430,21 @@ describe("validateBusinessSettings", () => {
     telegram_chat_id_rnd: "12345",
     telegram_chat_id_finance: "@finance_team",
     offline_login_max_days: 1,
+    default_sample_fee_idr: 0,
+    default_test_fee_idr: 250_000,
+    invoice_due_days: 0,
+    invoice_payment_instructions: " Transfer to BCA ",
+    telegram_chat_id_design: "",
+    default_dummy_fee_idr: 50_000,
+    max_dummy_rejections: 2,
+    dp_percentage_bp: 10_000,
   };
   test("sah", () => {
     expect(validateBusinessSettings(valid)).toEqual({
-      settings: valid as never,
+      settings: {
+        ...valid,
+        invoice_payment_instructions: "Transfer to BCA",
+      } as never,
     });
   });
   const cases: [Record<string, unknown>, string][] = [
@@ -355,6 +459,45 @@ describe("validateBusinessSettings", () => {
     [
       { ...valid, sample_fee_mode: "SOMETIMES" },
       "Choose how sample fees are charged.",
+    ],
+    [
+      { ...valid, default_sample_fee_idr: -1 },
+      "Default fees must be whole rupiah amounts.",
+    ],
+    [
+      { ...valid, default_test_fee_idr: null },
+      "Default fees must be whole rupiah amounts.",
+    ],
+    [
+      { ...valid, default_dummy_fee_idr: -5 },
+      "Default fees must be whole rupiah amounts.",
+    ],
+    [{ ...valid, telegram_chat_id_design: null }, TELEGRAM_CHAT_ID_INVALID],
+    ...[21, -1, "2"].map(
+      (limit) =>
+        [
+          { ...valid, max_dummy_rejections: limit },
+          "The dummy rejection limit must be a whole number from 0 to 20.",
+        ] as [Record<string, unknown>, string],
+    ),
+    ...[0, 10_001, "50"].map(
+      (dp) =>
+        [
+          { ...valid, dp_percentage_bp: dp },
+          "The down payment must be from 0.01% to 100%.",
+        ] as [Record<string, unknown>, string],
+    ),
+    [
+      { ...valid, invoice_payment_instructions: null },
+      "Payment instructions are up to 1000 characters.",
+    ],
+    [
+      { ...valid, invoice_payment_instructions: "x".repeat(1001) },
+      "Payment instructions are up to 1000 characters.",
+    ],
+    [
+      { ...valid, invoice_due_days: 91 },
+      "The invoice due period must be a whole number of days from 0 to 90.",
     ],
     [
       { ...valid, lead_hot_max_days: 61 },
@@ -401,6 +544,9 @@ describe("applySampleAction", () => {
     revision_index: 0,
     free_revision_limit: 1,
     has_price: true,
+    fee_paid: true,
+    test_ready: true,
+    mockup_ready: true,
   };
   // [status, paid, revision_index, limit, action, lead time] → [status, index, billable, decision] | error
   const cases: [
@@ -686,8 +832,22 @@ describe("validateSampleDraft", () => {
         ship_to_address: "Jl. Merdeka 1, Bandung",
         is_dummy_required: false,
         is_paid_sample: true,
+        is_test_requested: false,
       },
     });
+  });
+  test("uji opsional, bila dikirim harus boolean", () => {
+    const testing = validateSampleDraft(
+      { ...draft, is_test_requested: true },
+      "PER_REQUEST",
+    );
+    expect("draft" in testing && testing.draft.is_test_requested).toBe(true);
+    expect(
+      validateSampleDraft(
+        { ...draft, is_test_requested: "yes" },
+        "PER_REQUEST",
+      ),
+    ).toEqual({ error: "Choose whether the sample is tested." });
   });
   test("mode FREE/PAID menentukan biaya; pilihan yang berbeda ditolak", () => {
     const { is_paid_sample: _paid, ...unset } = draft;

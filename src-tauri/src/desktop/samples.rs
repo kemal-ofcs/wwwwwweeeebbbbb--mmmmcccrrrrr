@@ -24,6 +24,14 @@ pub const SETTING_TELEGRAM_CHAT_ID_CS: &str = "telegram_chat_id_cs";
 pub const SETTING_TELEGRAM_CHAT_ID_RND: &str = "telegram_chat_id_rnd";
 pub const SETTING_TELEGRAM_CHAT_ID_FINANCE: &str = "telegram_chat_id_finance";
 pub const SETTING_OFFLINE_LOGIN_MAX_DAYS: &str = "offline_login_max_days";
+pub const SETTING_DEFAULT_SAMPLE_FEE_IDR: &str = "default_sample_fee_idr";
+pub const SETTING_DEFAULT_TEST_FEE_IDR: &str = "default_test_fee_idr";
+pub const SETTING_INVOICE_DUE_DAYS: &str = "invoice_due_days";
+pub const SETTING_INVOICE_PAYMENT_INSTRUCTIONS: &str = "invoice_payment_instructions";
+pub const SETTING_TELEGRAM_CHAT_ID_DESIGN: &str = "telegram_chat_id_design";
+pub const SETTING_DEFAULT_DUMMY_FEE_IDR: &str = "default_dummy_fee_idr";
+pub const SETTING_MAX_DUMMY_REJECTIONS: &str = "max_dummy_rejections";
+pub const SETTING_DP_PERCENTAGE_BP: &str = "dp_percentage_bp";
 pub const BUSINESS_SETTING_KEYS: &[&str] = &[
     SETTING_DEFAULT_FREE_REVISION_LIMIT,
     SETTING_SAMPLE_FEE_MODE,
@@ -34,6 +42,14 @@ pub const BUSINESS_SETTING_KEYS: &[&str] = &[
     SETTING_TELEGRAM_CHAT_ID_RND,
     SETTING_TELEGRAM_CHAT_ID_FINANCE,
     SETTING_OFFLINE_LOGIN_MAX_DAYS,
+    SETTING_DEFAULT_SAMPLE_FEE_IDR,
+    SETTING_DEFAULT_TEST_FEE_IDR,
+    SETTING_INVOICE_DUE_DAYS,
+    SETTING_INVOICE_PAYMENT_INSTRUCTIONS,
+    SETTING_TELEGRAM_CHAT_ID_DESIGN,
+    SETTING_DEFAULT_DUMMY_FEE_IDR,
+    SETTING_MAX_DUMMY_REJECTIONS,
+    SETTING_DP_PERCENTAGE_BP,
 ];
 
 pub const FREE_REVISION_LIMIT_MAX: i64 = 20;
@@ -41,6 +57,12 @@ pub const LEAD_HOT_MAX_DAYS_LIMIT: i64 = 60;
 pub const LEAD_WARM_MAX_DAYS_LIMIT: i64 = 180;
 pub const MAX_PHOTOS_PER_SAMPLE_LIMIT: i64 = 50;
 pub const OFFLINE_LOGIN_MAX_DAYS_LIMIT: i64 = 7;
+pub const DEFAULT_FEE_MAX: i64 = 100_000_000_000;
+pub const INVOICE_DUE_DAYS_LIMIT: i64 = 90;
+pub const PAYMENT_INSTRUCTIONS_MAX: usize = 1000;
+pub const MAX_DUMMY_REJECTIONS_LIMIT: i64 = 20;
+pub const DP_PERCENTAGE_INVALID: &str = "The down payment must be from 0.01% to 100%.";
+pub const PAYMENT_INSTRUCTIONS_INVALID: &str = "Payment instructions are up to 1000 characters.";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BusinessSettings {
@@ -55,6 +77,21 @@ pub struct BusinessSettings {
     pub telegram_chat_id_finance: String,
     /// Masa login offline dalam hari, 1 sampai batas build (7 hari).
     pub offline_login_max_days: i64,
+    /// Isian awal nominal tagihan biaya sampel dan uji (v2.3a); 0 = kosong.
+    pub default_sample_fee_idr: i64,
+    pub default_test_fee_idr: i64,
+    /// Jatuh tempo tagihan = tanggal terbit + hari ini.
+    pub invoice_due_days: i64,
+    /// Teks bebas di invoice PDF (v2.3c).
+    pub invoice_payment_instructions: String,
+    /// Grup Telegram divisi Desain (v2.4, PRD F-19).
+    pub telegram_chat_id_design: String,
+    /// Isian awal nominal tagihan dummy (v2.4); 0 = kosong.
+    pub default_dummy_fee_idr: i64,
+    /// Batas penolakan dummy (D-18, OQ-29); 0 = tanpa batas.
+    pub max_dummy_rejections: i64,
+    /// Persen DP bawaan MoU dalam basis poin (v2.5a, F-20).
+    pub dp_percentage_bp: i64,
 }
 
 impl Default for BusinessSettings {
@@ -69,6 +106,14 @@ impl Default for BusinessSettings {
             telegram_chat_id_rnd: String::new(),
             telegram_chat_id_finance: String::new(),
             offline_login_max_days: 7,
+            default_sample_fee_idr: 0,
+            default_test_fee_idr: 0,
+            invoice_due_days: 7,
+            invoice_payment_instructions: String::new(),
+            telegram_chat_id_design: String::new(),
+            default_dummy_fee_idr: 0,
+            max_dummy_rejections: 0,
+            dp_percentage_bp: 5000,
         }
     }
 }
@@ -85,6 +130,14 @@ impl BusinessSettings {
             "telegram_chat_id_rnd": self.telegram_chat_id_rnd,
             "telegram_chat_id_finance": self.telegram_chat_id_finance,
             "offline_login_max_days": self.offline_login_max_days,
+            "default_sample_fee_idr": self.default_sample_fee_idr,
+            "default_test_fee_idr": self.default_test_fee_idr,
+            "invoice_due_days": self.invoice_due_days,
+            "invoice_payment_instructions": self.invoice_payment_instructions,
+            "telegram_chat_id_design": self.telegram_chat_id_design,
+            "default_dummy_fee_idr": self.default_dummy_fee_idr,
+            "max_dummy_rejections": self.max_dummy_rejections,
+            "dp_percentage_bp": self.dp_percentage_bp,
         })
     }
 
@@ -100,13 +153,21 @@ impl BusinessSettings {
             (SETTING_TELEGRAM_CHAT_ID_RND, self.telegram_chat_id_rnd.clone()),
             (SETTING_TELEGRAM_CHAT_ID_FINANCE, self.telegram_chat_id_finance.clone()),
             (SETTING_OFFLINE_LOGIN_MAX_DAYS, self.offline_login_max_days.to_string()),
+            (SETTING_DEFAULT_SAMPLE_FEE_IDR, self.default_sample_fee_idr.to_string()),
+            (SETTING_DEFAULT_TEST_FEE_IDR, self.default_test_fee_idr.to_string()),
+            (SETTING_INVOICE_DUE_DAYS, self.invoice_due_days.to_string()),
+            (SETTING_INVOICE_PAYMENT_INSTRUCTIONS, self.invoice_payment_instructions.clone()),
+            (SETTING_TELEGRAM_CHAT_ID_DESIGN, self.telegram_chat_id_design.clone()),
+            (SETTING_DEFAULT_DUMMY_FEE_IDR, self.default_dummy_fee_idr.to_string()),
+            (SETTING_MAX_DUMMY_REJECTIONS, self.max_dummy_rejections.to_string()),
+            (SETTING_DP_PERCENTAGE_BP, self.dp_percentage_bp.to_string()),
         ]
     }
 }
 
 fn stored_int(value: Option<&String>) -> Option<i64> {
     let text = value?.trim();
-    if text.is_empty() || text.len() > 9 || !text.bytes().all(|byte| byte.is_ascii_digit()) {
+    if text.is_empty() || text.len() > 12 || !text.bytes().all(|byte| byte.is_ascii_digit()) {
         return None;
     }
     text.parse().ok()
@@ -179,6 +240,29 @@ pub fn read_business_settings(values: &HashMap<String, String>) -> BusinessSetti
             OFFLINE_LOGIN_MAX_DAYS_LIMIT,
         )
         .unwrap_or(defaults.offline_login_max_days),
+        default_sample_fee_idr: in_range(stored_int(values.get(SETTING_DEFAULT_SAMPLE_FEE_IDR)), 0, DEFAULT_FEE_MAX)
+            .unwrap_or(defaults.default_sample_fee_idr),
+        default_test_fee_idr: in_range(stored_int(values.get(SETTING_DEFAULT_TEST_FEE_IDR)), 0, DEFAULT_FEE_MAX)
+            .unwrap_or(defaults.default_test_fee_idr),
+        invoice_due_days: in_range(stored_int(values.get(SETTING_INVOICE_DUE_DAYS)), 0, INVOICE_DUE_DAYS_LIMIT)
+            .unwrap_or(defaults.invoice_due_days),
+        // Teks tersimpan yang terlalu panjang dianggap rusak dan jatuh ke kosong.
+        invoice_payment_instructions: values
+            .get(SETTING_INVOICE_PAYMENT_INSTRUCTIONS)
+            .map(|text| text.trim().to_owned())
+            .filter(|text| text.chars().count() <= PAYMENT_INSTRUCTIONS_MAX)
+            .unwrap_or_default(),
+        telegram_chat_id_design: stored_chat_id(values, SETTING_TELEGRAM_CHAT_ID_DESIGN),
+        default_dummy_fee_idr: in_range(stored_int(values.get(SETTING_DEFAULT_DUMMY_FEE_IDR)), 0, DEFAULT_FEE_MAX)
+            .unwrap_or(defaults.default_dummy_fee_idr),
+        max_dummy_rejections: in_range(
+            stored_int(values.get(SETTING_MAX_DUMMY_REJECTIONS)),
+            0,
+            MAX_DUMMY_REJECTIONS_LIMIT,
+        )
+        .unwrap_or(defaults.max_dummy_rejections),
+        dp_percentage_bp: in_range(stored_int(values.get(SETTING_DP_PERCENTAGE_BP)), 1, 10_000)
+            .unwrap_or(defaults.dp_percentage_bp),
     }
 }
 
@@ -221,21 +305,49 @@ pub fn validate_business_settings(draft: &Value) -> Result<BusinessSettings, &'s
             .and_then(normalize_telegram_chat_id)
             .ok_or(TELEGRAM_CHAT_ID_INVALID)
     };
+    let chat_cs = chat(SETTING_TELEGRAM_CHAT_ID_CS)?;
+    let chat_rnd = chat(SETTING_TELEGRAM_CHAT_ID_RND)?;
+    let chat_finance = chat(SETTING_TELEGRAM_CHAT_ID_FINANCE)?;
+    let chat_design = chat(SETTING_TELEGRAM_CHAT_ID_DESIGN)?;
     Ok(BusinessSettings {
         default_free_revision_limit: limit,
         sample_fee_mode: mode,
         lead_hot_max_days: hot,
         lead_warm_max_days: warm,
         max_photos_per_sample: photos,
-        telegram_chat_id_cs: chat(SETTING_TELEGRAM_CHAT_ID_CS)?,
-        telegram_chat_id_rnd: chat(SETTING_TELEGRAM_CHAT_ID_RND)?,
-        telegram_chat_id_finance: chat(SETTING_TELEGRAM_CHAT_ID_FINANCE)?,
+        telegram_chat_id_cs: chat_cs,
+        telegram_chat_id_rnd: chat_rnd,
+        telegram_chat_id_finance: chat_finance,
         offline_login_max_days: in_range(
             strict_int(draft.get(SETTING_OFFLINE_LOGIN_MAX_DAYS)),
             1,
             OFFLINE_LOGIN_MAX_DAYS_LIMIT,
         )
         .ok_or("The offline sign-in period must be a whole number of days from 1 to 7.")?,
+        default_sample_fee_idr: in_range(strict_int(draft.get(SETTING_DEFAULT_SAMPLE_FEE_IDR)), 0, DEFAULT_FEE_MAX)
+            .ok_or("Default fees must be whole rupiah amounts.")?,
+        default_test_fee_idr: in_range(strict_int(draft.get(SETTING_DEFAULT_TEST_FEE_IDR)), 0, DEFAULT_FEE_MAX)
+            .ok_or("Default fees must be whole rupiah amounts.")?,
+        invoice_due_days: in_range(strict_int(draft.get(SETTING_INVOICE_DUE_DAYS)), 0, INVOICE_DUE_DAYS_LIMIT)
+            .ok_or("The invoice due period must be a whole number of days from 0 to 90.")?,
+        // Wajib dikirim, walau kosong: field yang hilang akan menimpa teks tersimpan.
+        invoice_payment_instructions: draft
+            .get(SETTING_INVOICE_PAYMENT_INSTRUCTIONS)
+            .and_then(Value::as_str)
+            .map(|text| text.trim().to_owned())
+            .filter(|text| text.chars().count() <= PAYMENT_INSTRUCTIONS_MAX)
+            .ok_or(PAYMENT_INSTRUCTIONS_INVALID)?,
+        telegram_chat_id_design: chat_design,
+        default_dummy_fee_idr: in_range(strict_int(draft.get(SETTING_DEFAULT_DUMMY_FEE_IDR)), 0, DEFAULT_FEE_MAX)
+            .ok_or("Default fees must be whole rupiah amounts.")?,
+        max_dummy_rejections: in_range(
+            strict_int(draft.get(SETTING_MAX_DUMMY_REJECTIONS)),
+            0,
+            MAX_DUMMY_REJECTIONS_LIMIT,
+        )
+        .ok_or("The dummy rejection limit must be a whole number from 0 to 20.")?,
+        dp_percentage_bp: in_range(strict_int(draft.get(SETTING_DP_PERCENTAGE_BP)), 1, 10_000)
+            .ok_or(DP_PERCENTAGE_INVALID)?,
     })
 }
 
@@ -281,6 +393,9 @@ pub const SAMPLE_NOTES_MAX: usize = 1000;
 pub const RND_LEAD_TIME_MAX_DAYS: i64 = 365;
 pub const SAMPLE_STEP_NOT_ALLOWED: &str = "This step is not allowed from the current status.";
 pub const SAMPLE_NOT_PRICED: &str = "Finance has not priced this sample yet.";
+pub const SAMPLE_FEE_UNPAID: &str = "Record the payment on this sample's invoice first.";
+pub const SAMPLE_TEST_UNPAID: &str = "The testing fee for this sample is not paid yet.";
+pub const SAMPLE_MOCKUP_MISSING: &str = "Upload the mockup before sending the sample.";
 pub const REVISION_FEE_INVALID: &str = "Enter the revision fee in whole rupiah (0 waives it).";
 
 /// Padanan `SAMPLE_ACTION_DIVISION`: divisi yang sebenarnya memutuskan.
@@ -310,6 +425,12 @@ pub struct SampleActionState<'a> {
     pub free_revision_limit: i64,
     /// Iterasi yang sedang berjalan sudah diberi harga Finance (D-27).
     pub has_price: bool,
+    /// Tagihan biaya sampel/revisi yang sedang ditunggu sudah lunas (v2.3a).
+    pub fee_paid: bool,
+    /// Tidak diminta uji, atau tagihan uji sudah lunas (D-30).
+    pub test_ready: bool,
+    /// Tiket tidak butuh mockup, atau mockup sudah diunggah (v2.4, D-36).
+    pub mockup_ready: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -355,11 +476,23 @@ pub fn apply_sample_action(
             &["RND_ACCEPTED"],
             if state.is_paid_sample { "WAITING_SAMPLE_PAYMENT" } else { "IN_RND" },
         ),
-        "PAYMENT_RECEIVED" => step(&["WAITING_SAMPLE_PAYMENT", "WAITING_REVISION_PAYMENT"], "IN_RND"),
+        "PAYMENT_RECEIVED" => {
+            let result = step(&["WAITING_SAMPLE_PAYMENT", "WAITING_REVISION_PAYMENT"], "IN_RND")?;
+            if !state.fee_paid {
+                return Err(SAMPLE_FEE_UNPAID);
+            }
+            Ok(result)
+        }
         "SAMPLE_READY" => step(&["IN_RND"], "SAMPLE_READY"),
         "SAMPLE_SENT" => {
             if state.status == "SAMPLE_READY" && !state.has_price {
                 return Err(SAMPLE_NOT_PRICED);
+            }
+            if state.status == "SAMPLE_READY" && !state.test_ready {
+                return Err(SAMPLE_TEST_UNPAID);
+            }
+            if state.status == "SAMPLE_READY" && !state.mockup_ready {
+                return Err(SAMPLE_MOCKUP_MISSING);
             }
             step(&["SAMPLE_READY"], "SAMPLE_SENT")
         }
@@ -642,6 +775,12 @@ pub fn validate_sample_draft(draft: &Value, fee_mode: &str) -> Result<Value, &'s
     let Some(dummy) = draft.get("is_dummy_required").and_then(Value::as_bool) else {
         return Err("Choose whether a packaging dummy is needed.");
     };
+    // Opsional: event lama yang belum membawa kunci ini berarti tanpa uji.
+    let testing = match draft.get("is_test_requested") {
+        None | Some(Value::Null) => false,
+        Some(Value::Bool(testing)) => *testing,
+        Some(_) => return Err("Choose whether the sample is tested."),
+    };
 
     let bpom = draft_text(draft, "bpom_product_name");
     let claims = draft_text(draft, "claims");
@@ -720,6 +859,7 @@ pub fn validate_sample_draft(draft: &Value, fee_mode: &str) -> Result<Value, &'s
         "ship_to_address": address,
         "is_dummy_required": dummy,
         "is_paid_sample": paid,
+        "is_test_requested": testing,
     }))
 }
 
@@ -734,14 +874,15 @@ pub const CLIENT_LIFECYCLE_FROM_SAMPLES_SQL: &str = "UPDATE clients SET lifecycl
 /// ?6 registration_category, ?7 product_category, ?8 pic_crm_id, ?9 qty,
 /// ?10 brand, ?11 bpom, ?12 claims, ?13 packaging, ?14 reference,
 /// ?15 budget, ?16 special_requests_json, ?17 deadline, ?18 address,
-/// ?19 dummy, ?20 paid, ?21 waktu, ?22 created_by.
-pub const SAMPLE_INSERT_SQL: &str = "INSERT INTO sample_requests (id, client_id, lead_id, sample_kind_option_id, formulation_type_option_id, registration_category_option_id, rnd_product_class, product_category_option_id, pic_crm_id, sample_qty, brand_name, bpom_product_name, claims, packaging, reference_notes, client_budget_idr, special_requests_json, deadline_at, ship_to_address, is_dummy_required, is_paid_sample, revision_index, is_billable, status, rnd_lead_time_days, sent_at, status_changed_at, created_by, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, '', ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, 0, 0, 'DRAFT', NULL, '', ?21, ?22, ?21, ?21) ON CONFLICT(id) DO NOTHING;";
+/// ?19 dummy, ?20 paid, ?21 waktu, ?22 created_by, ?23 uji (D-30).
+pub const SAMPLE_INSERT_SQL: &str = "INSERT INTO sample_requests (id, client_id, lead_id, sample_kind_option_id, formulation_type_option_id, registration_category_option_id, rnd_product_class, product_category_option_id, pic_crm_id, sample_qty, brand_name, bpom_product_name, claims, packaging, reference_notes, client_budget_idr, special_requests_json, deadline_at, ship_to_address, is_dummy_required, is_paid_sample, revision_index, is_billable, status, rnd_lead_time_days, sent_at, status_changed_at, created_by, created_at, updated_at, is_test_requested) VALUES (?1, ?2, ?3, ?4, ?5, ?6, '', ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, 0, 0, 'DRAFT', NULL, '', ?21, ?22, ?21, ?21, ?23) ON CONFLICT(id) DO NOTHING;";
 
 /// Keputusan G ditegakkan di SQL: spesifikasi produk hanya berubah selama
 /// `DRAFT`; deadline, alamat, PIC CRM, dan budget boleh berubah sampai tiket
 /// ditutup. ?1 id, ?2-?14 spesifikasi (urutan sama dengan kolom di bawah),
-/// ?15 pic_crm_id, ?16 budget, ?17 deadline, ?18 address, ?19 waktu.
-pub const SAMPLE_UPDATE_SQL: &str = "UPDATE sample_requests SET sample_kind_option_id = CASE WHEN status = 'DRAFT' THEN ?2 ELSE sample_kind_option_id END, formulation_type_option_id = CASE WHEN status = 'DRAFT' THEN ?3 ELSE formulation_type_option_id END, registration_category_option_id = CASE WHEN status = 'DRAFT' THEN ?4 ELSE registration_category_option_id END, product_category_option_id = CASE WHEN status = 'DRAFT' THEN ?5 ELSE product_category_option_id END, sample_qty = CASE WHEN status = 'DRAFT' THEN ?6 ELSE sample_qty END, brand_name = CASE WHEN status = 'DRAFT' THEN ?7 ELSE brand_name END, bpom_product_name = CASE WHEN status = 'DRAFT' THEN ?8 ELSE bpom_product_name END, claims = CASE WHEN status = 'DRAFT' THEN ?9 ELSE claims END, packaging = CASE WHEN status = 'DRAFT' THEN ?10 ELSE packaging END, reference_notes = CASE WHEN status = 'DRAFT' THEN ?11 ELSE reference_notes END, special_requests_json = CASE WHEN status = 'DRAFT' THEN ?12 ELSE special_requests_json END, is_dummy_required = CASE WHEN status = 'DRAFT' THEN ?13 ELSE is_dummy_required END, is_paid_sample = CASE WHEN status = 'DRAFT' THEN ?14 ELSE is_paid_sample END, pic_crm_id = ?15, client_budget_idr = ?16, deadline_at = ?17, ship_to_address = ?18, updated_at = ?19 WHERE id = ?1 AND status NOT IN ('RND_REJECTED', 'CLIENT_ACC', 'CLIENT_REJECT', 'CANCELLED');";
+/// ?15 pic_crm_id, ?16 budget, ?17 deadline, ?18 address, ?19 waktu,
+/// ?20 uji (D-30, hanya selama `DRAFT`).
+pub const SAMPLE_UPDATE_SQL: &str = "UPDATE sample_requests SET sample_kind_option_id = CASE WHEN status = 'DRAFT' THEN ?2 ELSE sample_kind_option_id END, formulation_type_option_id = CASE WHEN status = 'DRAFT' THEN ?3 ELSE formulation_type_option_id END, registration_category_option_id = CASE WHEN status = 'DRAFT' THEN ?4 ELSE registration_category_option_id END, product_category_option_id = CASE WHEN status = 'DRAFT' THEN ?5 ELSE product_category_option_id END, sample_qty = CASE WHEN status = 'DRAFT' THEN ?6 ELSE sample_qty END, brand_name = CASE WHEN status = 'DRAFT' THEN ?7 ELSE brand_name END, bpom_product_name = CASE WHEN status = 'DRAFT' THEN ?8 ELSE bpom_product_name END, claims = CASE WHEN status = 'DRAFT' THEN ?9 ELSE claims END, packaging = CASE WHEN status = 'DRAFT' THEN ?10 ELSE packaging END, reference_notes = CASE WHEN status = 'DRAFT' THEN ?11 ELSE reference_notes END, special_requests_json = CASE WHEN status = 'DRAFT' THEN ?12 ELSE special_requests_json END, is_dummy_required = CASE WHEN status = 'DRAFT' THEN ?13 ELSE is_dummy_required END, is_paid_sample = CASE WHEN status = 'DRAFT' THEN ?14 ELSE is_paid_sample END, is_test_requested = CASE WHEN status = 'DRAFT' THEN ?20 ELSE is_test_requested END, pic_crm_id = ?15, client_budget_idr = ?16, deadline_at = ?17, ship_to_address = ?18, updated_at = ?19 WHERE id = ?1 AND status NOT IN ('RND_REJECTED', 'CLIENT_ACC', 'CLIENT_REJECT', 'CANCELLED');";
 
 /// Satu langkah tiket, hanya bila status dan revisinya masih seperti yang
 /// dilihat pencatat. ?1 id, ?2 status baru, ?3 revisi baru, ?4 billable
@@ -756,14 +897,15 @@ pub const SAMPLE_FEEDBACK_INSERT_SQL: &str = "INSERT INTO sample_feedbacks (id, 
 
 /// Padanan `SAMPLE_LIST_SQL`: `unit_price_idr` = harga Finance terbaru untuk
 /// iterasi yang sedang berjalan (NULL = belum diberi harga, gerbang D-27).
-pub const SAMPLE_LIST_SQL: &str = "SELECT s.*, c.client_code, c.name AS client_name, c.free_revision_limit, o.nama_operator AS pic_crm_name, (SELECT p.final_unit_price_idr FROM pricing_formulas p WHERE p.sample_request_id = s.id AND p.iteration_number = s.revision_index + 1 ORDER BY p.recorded_at DESC, p.id DESC LIMIT 1) AS unit_price_idr FROM sample_requests s LEFT JOIN clients c ON c.id = s.client_id LEFT JOIN master_operator o ON o.id = s.pic_crm_id";
+/// Seri di detik yang sama dipisahkan `rowid`; lihat catatan `ponytail` di TS.
+pub const SAMPLE_LIST_SQL: &str = "SELECT s.*, c.client_code, c.name AS client_name, c.free_revision_limit, o.nama_operator AS pic_crm_name, (SELECT p.final_unit_price_idr FROM pricing_formulas p WHERE p.sample_request_id = s.id AND p.iteration_number = s.revision_index + 1 ORDER BY p.recorded_at DESC, p.rowid DESC LIMIT 1) AS unit_price_idr, EXISTS (SELECT 1 FROM invoices i WHERE i.sample_request_id = s.id AND ((s.status = 'WAITING_SAMPLE_PAYMENT' AND i.ref_type = 'SAMPLE_FEE') OR (s.status = 'WAITING_REVISION_PAYMENT' AND i.ref_type = 'REVISION_FEE' AND i.revision_index = s.revision_index)) AND (i.status = 'RESCHEDULED' OR (i.status = 'OPEN' AND (SELECT COALESCE(SUM(a.amount_idr), 0) FROM fund_allocations a WHERE a.invoice_id = i.id) >= i.total_idr))) AS fee_paid, EXISTS (SELECT 1 FROM invoices i WHERE i.sample_request_id = s.id AND i.ref_type = 'TEST_FEE' AND (i.status = 'RESCHEDULED' OR (i.status = 'OPEN' AND (SELECT COALESCE(SUM(a.amount_idr), 0) FROM fund_allocations a WHERE a.invoice_id = i.id) >= i.total_idr))) AS test_paid, (SELECT d.status FROM design_tickets d WHERE d.sample_request_id = s.id AND d.status <> 'CANCELLED' ORDER BY d.created_at DESC, d.rowid DESC LIMIT 1) AS design_status, (SELECT d.dummy_rejection_count FROM design_tickets d WHERE d.sample_request_id = s.id AND d.status <> 'CANCELLED' ORDER BY d.created_at DESC, d.rowid DESC LIMIT 1) AS dummy_round, ((s.is_dummy_required = 0 AND NOT EXISTS (SELECT 1 FROM design_tickets d WHERE d.sample_request_id = s.id AND d.status <> 'CANCELLED')) OR EXISTS (SELECT 1 FROM media_asset m WHERE m.owner_type = 'sample' AND m.owner_id = s.id AND m.purpose = 'MOCKUP')) AS mockup_ready, (SELECT m.status FROM production_mou m WHERE m.sample_request_id = s.id AND m.status NOT IN ('CANCELLED', 'REJECTED') ORDER BY m.created_at DESC, m.rowid DESC LIMIT 1) AS mou_status, (SELECT m.dp_amount_required_idr FROM production_mou m WHERE m.sample_request_id = s.id AND m.status = 'ACCEPTED' ORDER BY m.created_at DESC, m.rowid DESC LIMIT 1) AS mou_dp_idr, EXISTS (SELECT 1 FROM invoices i WHERE i.sample_request_id = s.id AND i.ref_type = 'DP_PRODUCTION_LEGAL' AND (i.status = 'RESCHEDULED' OR (i.status = 'OPEN' AND (SELECT COALESCE(SUM(a.amount_idr), 0) FROM fund_allocations a WHERE a.invoice_id = i.id) >= i.total_idr))) AS dp_paid FROM sample_requests s LEFT JOIN clients c ON c.id = s.client_id LEFT JOIN master_operator o ON o.id = s.pic_crm_id";
 
 /// Satu harga per simpan (v2.2), hanya-tambah. ?1 id, ?2 tiket, ?3 iterasi,
 /// ?4-?7 komponen, ?8 HPP, ?9 margin, ?10 harga jual, ?11 catatan,
 /// ?12 pencatat, ?13 waktu.
 pub const PRICE_INSERT_SQL: &str = "INSERT INTO pricing_formulas (id, sample_request_id, iteration_number, raw_material_cost_idr, packaging_cost_idr, operational_cost_idr, regulatory_cost_idr, hpp_unit_idr, margin_bp, final_unit_price_idr, notes, recorded_by, recorded_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO NOTHING;";
 
-pub const PRICES_SQL: &str = "SELECT p.*, o.nama_operator AS recorded_by_name FROM pricing_formulas p LEFT JOIN master_operator o ON o.id = p.recorded_by WHERE p.sample_request_id = ?1 ORDER BY p.iteration_number, p.recorded_at, p.id;";
+pub const PRICES_SQL: &str = "SELECT p.*, o.nama_operator AS recorded_by_name FROM pricing_formulas p LEFT JOIN master_operator o ON o.id = p.recorded_by WHERE p.sample_request_id = ?1 ORDER BY p.iteration_number, p.recorded_at, p.rowid;";
 
 /// Padanan `PRICE_COST_COLUMNS`: hanya untuk pemegang `pricing.view`.
 pub const PRICE_COST_COLUMNS: &[&str] = &[
@@ -794,7 +936,16 @@ pub const SAMPLE_CHANGED_ELSEWHERE: &str =
 // Kompresi dikerjakan webview; di sini hanya pemeriksaan ulang hasilnya.
 // ---------------------------------------------------------------------------
 
-pub const SAMPLE_MEDIA_PURPOSES: &[&str] = &["REFERENCE", "PAYMENT_PROOF"];
+pub const SAMPLE_MEDIA_PURPOSES: &[&str] = &["REFERENCE", "PAYMENT_PROOF", "MOCKUP"];
+
+/// Padanan `mediaPurposePermission`: mockup milik desainer (v2.4).
+pub fn media_purpose_permission(purpose: &str) -> &'static str {
+    if purpose == "MOCKUP" {
+        "design.manage"
+    } else {
+        "samples.manage"
+    }
+}
 pub const MEDIA_MIME: &str = "image/webp";
 pub const MEDIA_MAX_BYTES: usize = 307_200;
 pub const MEDIA_TOO_LARGE: &str =
@@ -863,6 +1014,14 @@ mod tests {
                 ("telegram_chat_id_rnd", "@maklon_rnd"),
                 ("telegram_chat_id_finance", "finance group"),
                 ("offline_login_max_days", "3"),
+                ("default_sample_fee_idr", "150000"),
+                ("default_test_fee_idr", "1500000000"),
+                ("invoice_due_days", "14"),
+                ("invoice_payment_instructions", " BCA 123 a.n. Company "),
+                ("telegram_chat_id_design", "@maklon_design"),
+                ("default_dummy_fee_idr", "75000"),
+                ("max_dummy_rejections", "3"),
+                ("dp_percentage_bp", "3000"),
             ]),
             BusinessSettings {
                 default_free_revision_limit: 2,
@@ -874,6 +1033,14 @@ mod tests {
                 telegram_chat_id_rnd: "@maklon_rnd".into(),
                 telegram_chat_id_finance: String::new(),
                 offline_login_max_days: 3,
+                default_sample_fee_idr: 150_000,
+                default_test_fee_idr: 1_500_000_000,
+                invoice_due_days: 14,
+                invoice_payment_instructions: "BCA 123 a.n. Company".into(),
+                telegram_chat_id_design: "@maklon_design".into(),
+                default_dummy_fee_idr: 75_000,
+                max_dummy_rejections: 3,
+                dp_percentage_bp: 3000,
             }
         );
         assert_eq!(
@@ -884,6 +1051,8 @@ mod tests {
                 ("lead_warm_max_days", "9"),
                 ("max_photos_per_sample", "0"),
                 ("offline_login_max_days", "9"),
+                ("max_dummy_rejections", "21"),
+                ("dp_percentage_bp", "0"),
             ]),
             BusinessSettings::default()
         );
@@ -912,6 +1081,14 @@ mod tests {
             "telegram_chat_id_rnd": "12345",
             "telegram_chat_id_finance": "@finance_team",
             "offline_login_max_days": 1,
+            "default_sample_fee_idr": 0,
+            "default_test_fee_idr": 250000,
+            "invoice_due_days": 0,
+            "invoice_payment_instructions": " Transfer to BCA ",
+            "telegram_chat_id_design": "",
+            "default_dummy_fee_idr": 50000,
+            "max_dummy_rejections": 2,
+            "dp_percentage_bp": 10000,
         });
         assert_eq!(
             validate_business_settings(&valid),
@@ -925,6 +1102,14 @@ mod tests {
                 telegram_chat_id_rnd: "12345".into(),
                 telegram_chat_id_finance: "@finance_team".into(),
                 offline_login_max_days: 1,
+                default_sample_fee_idr: 0,
+                default_test_fee_idr: 250_000,
+                invoice_due_days: 0,
+                invoice_payment_instructions: "Transfer to BCA".into(),
+                telegram_chat_id_design: String::new(),
+                default_dummy_fee_idr: 50_000,
+                max_dummy_rejections: 2,
+                dp_percentage_bp: 10_000,
             })
         );
         let with = |key: &str, value: Value| {
@@ -935,6 +1120,25 @@ mod tests {
         assert_eq!(with("default_free_revision_limit", json!(21)), "Free revisions must be a whole number from 0 to 20.");
         assert_eq!(with("default_free_revision_limit", json!(1.5)), "Free revisions must be a whole number from 0 to 20.");
         assert_eq!(with("sample_fee_mode", json!("SOMETIMES")), "Choose how sample fees are charged.");
+        assert_eq!(with("default_sample_fee_idr", json!(-1)), "Default fees must be whole rupiah amounts.");
+        assert_eq!(with("default_test_fee_idr", Value::Null), "Default fees must be whole rupiah amounts.");
+        assert_eq!(with("default_dummy_fee_idr", json!(-5)), "Default fees must be whole rupiah amounts.");
+        assert_eq!(with("telegram_chat_id_design", Value::Null), TELEGRAM_CHAT_ID_INVALID);
+        for limit in [json!(21), json!(-1), json!("2")] {
+            assert_eq!(
+                with("max_dummy_rejections", limit),
+                "The dummy rejection limit must be a whole number from 0 to 20."
+            );
+        }
+        for dp in [json!(0), json!(10_001), json!("50")] {
+            assert_eq!(with("dp_percentage_bp", dp), DP_PERCENTAGE_INVALID);
+        }
+        assert_eq!(with("invoice_payment_instructions", Value::Null), PAYMENT_INSTRUCTIONS_INVALID);
+        assert_eq!(with("invoice_payment_instructions", json!("x".repeat(1001))), PAYMENT_INSTRUCTIONS_INVALID);
+        assert_eq!(
+            with("invoice_due_days", json!(91)),
+            "The invoice due period must be a whole number of days from 0 to 90."
+        );
         assert_eq!(with("lead_hot_max_days", json!(61)), "The Hot limit must be a whole number of days from 0 to 60.");
         assert_eq!(
             with("lead_warm_max_days", json!(181)),
@@ -1003,6 +1207,9 @@ mod tests {
                 revision_index: *index,
                 free_revision_limit: *limit,
                 has_price: true,
+                fee_paid: true,
+                test_ready: true,
+                mockup_ready: true,
             };
             let actual = apply_sample_action(&state, action, *lead, None)
                 .map(|result| (result.status, result.revision_index, result.is_billable, result.client_decision));
@@ -1018,6 +1225,9 @@ mod tests {
             revision_index: 2,
             free_revision_limit: 1,
             has_price,
+            fee_paid: true,
+            test_ready: true,
+            mockup_ready: true,
         };
         type Expected = Result<(&'static str, i64, Option<bool>), &'static str>;
         let cases: &[(&'static str, bool, &str, Option<i64>, Expected)] = &[
@@ -1035,6 +1245,45 @@ mod tests {
                 .map(|result| (result.status, result.revision_index, result.is_billable));
             assert_eq!(actual, *expected, "{status} + {action} {fee:?}");
         }
+    }
+
+    #[test]
+    fn gerbang_tagihan_lunas() {
+        let state = |status: &'static str, fee_paid: bool, test_ready: bool| SampleActionState {
+            status,
+            is_paid_sample: true,
+            revision_index: 1,
+            free_revision_limit: 0,
+            has_price: true,
+            fee_paid,
+            test_ready,
+            mockup_ready: true,
+        };
+        type Expected = Result<&'static str, &'static str>;
+        let cases: &[(&'static str, bool, bool, &str, Expected)] = &[
+            ("WAITING_SAMPLE_PAYMENT", false, true, "PAYMENT_RECEIVED", Err(SAMPLE_FEE_UNPAID)),
+            ("WAITING_SAMPLE_PAYMENT", true, true, "PAYMENT_RECEIVED", Ok("IN_RND")),
+            ("WAITING_REVISION_PAYMENT", false, true, "PAYMENT_RECEIVED", Err(SAMPLE_FEE_UNPAID)),
+            ("IN_RND", false, true, "PAYMENT_RECEIVED", Err(SAMPLE_STEP_NOT_ALLOWED)),
+            ("SAMPLE_READY", true, false, "SAMPLE_SENT", Err(SAMPLE_TEST_UNPAID)),
+            ("SAMPLE_READY", true, true, "SAMPLE_SENT", Ok("SAMPLE_SENT")),
+        ];
+        let no_mockup = SampleActionState { mockup_ready: false, ..state("SAMPLE_READY", true, true) };
+        assert_eq!(apply_sample_action(&no_mockup, "SAMPLE_SENT", None, None), Err(SAMPLE_MOCKUP_MISSING));
+        for (status, fee_paid, test_ready, action, expected) in cases {
+            let actual = apply_sample_action(&state(status, *fee_paid, *test_ready), action, None, None)
+                .map(|result| result.status);
+            assert_eq!(actual, *expected, "{status} + {action}");
+        }
+        let testing = json!({
+            "product_category_option_id": "cat-1", "sample_qty": 1, "brand_name": "A",
+            "packaging": "P", "deadline_at": "2026-10-31", "ship_to_address": "Jl. A",
+            "is_dummy_required": false, "is_paid_sample": true, "is_test_requested": true,
+        });
+        assert_eq!(validate_sample_draft(&testing, "PER_REQUEST").unwrap()["is_test_requested"], json!(true));
+        let mut wrong = testing.clone();
+        wrong["is_test_requested"] = json!("yes");
+        assert_eq!(validate_sample_draft(&wrong, "PER_REQUEST").unwrap_err(), "Choose whether the sample is tested.");
     }
 
     #[test]
@@ -1178,6 +1427,7 @@ mod tests {
                 "ship_to_address": "Jl. Merdeka 1, Bandung",
                 "is_dummy_required": false,
                 "is_paid_sample": true,
+                "is_test_requested": false,
             })
         );
 
@@ -1219,7 +1469,8 @@ mod tests {
         let cases: &[(&str, &str, Result<usize, &str>)] = &[
             ("REFERENCE", TINY_WEBP, Ok(16)),
             ("PAYMENT_PROOF", TINY_WEBP, Ok(16)),
-            ("MOCKUP", TINY_WEBP, Err(MEDIA_PURPOSE_INVALID)),
+            ("MOCKUP", TINY_WEBP, Ok(16)),
+            ("INVOICE", TINY_WEBP, Err(MEDIA_PURPOSE_INVALID)),
             ("REFERENCE", PNG, Err(MEDIA_NOT_WEBP)),
             ("REFERENCE", "not base64!", Err(MEDIA_NOT_WEBP)),
             ("REFERENCE", "UklGRgwAAABXRUJQVlA4TA", Err(MEDIA_NOT_WEBP)),

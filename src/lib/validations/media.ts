@@ -5,8 +5,12 @@
  * target; Web dan cloud hanya memeriksa ulang hasilnya dengan aturan ini.
  */
 
-/** Jenis foto di tiket sampel. PRD 7.2 punya jenis lain untuk fase berikutnya. */
-export const SAMPLE_MEDIA_PURPOSES = ["REFERENCE", "PAYMENT_PROOF"] as const;
+/** Jenis foto di tiket sampel; `MOCKUP` milik desainer (v2.4, PRD F-19). */
+export const SAMPLE_MEDIA_PURPOSES = [
+  "REFERENCE",
+  "PAYMENT_PROOF",
+  "MOCKUP",
+] as const;
 export type SampleMediaPurpose = (typeof SAMPLE_MEDIA_PURPOSES)[number];
 
 export const MEDIA_MIME = "image/webp";
@@ -21,6 +25,11 @@ export const MEDIA_TOO_LARGE =
   "The image is still over 300 KB after compression. Crop the parts you do not need, then upload it again.";
 export const MEDIA_NOT_WEBP = "The photo is not a valid WebP image.";
 export const MEDIA_PURPOSE_INVALID = "Choose what the photo is for.";
+
+/** Izin unggah per jenis (keputusan F). Padanan `media_purpose_permission`. */
+export function mediaPurposePermission(purpose: unknown) {
+  return purpose === "MOCKUP" ? "design.manage" : "samples.manage";
+}
 
 export function isSampleMediaPurpose(
   value: unknown,

@@ -143,6 +143,12 @@ const COLUMN_MIGRATIONS: readonly ColumnMigration[] = [
     column: "revision_fee_idr",
     sql: "ALTER TABLE sample_requests ADD COLUMN revision_fee_idr INTEGER;",
   },
+  // Sampel sekalian diuji (v2.3a, D-30).
+  {
+    table: "sample_requests",
+    column: "is_test_requested",
+    sql: "ALTER TABLE sample_requests ADD COLUMN is_test_requested INTEGER NOT NULL DEFAULT 0;",
+  },
 ];
 
 async function tableExists(client: Client, table: string) {
@@ -292,6 +298,35 @@ export async function runDatabaseMigrations(client: Client) {
   await client.execute({
     sql: `INSERT OR IGNORE INTO schema_migration (version, name, applied_at)
           VALUES (10, 'rnd-and-pricing', ?);`,
+    args: [new Date().toISOString()],
+  });
+
+  // Versi 11: tagihan dan uang masuk (v2.3a, PRD F-17): tabel
+  // `finance_options`, `invoices`, `incoming_funds`, `fund_allocations` (DDL
+  // awal), kolom `sample_requests.is_test_requested` (`COLUMN_MIGRATIONS`),
+  // izin `invoices.view` dan `finance_options.manage`. Nomor dan nama WAJIB
+  // sama dengan `turso.rs`.
+  await client.execute({
+    sql: `INSERT OR IGNORE INTO schema_migration (version, name, applied_at)
+          VALUES (11, 'invoices-and-funds', ?);`,
+    args: [new Date().toISOString()],
+  });
+
+  // Versi 12: tiket desain (v2.4, PRD F-19): tabel `design_tickets` (DDL
+  // awal), izin `design.*` dan `notifications_design.view`, setelan dummy.
+  // Nomor dan nama WAJIB sama dengan `turso.rs`.
+  await client.execute({
+    sql: `INSERT OR IGNORE INTO schema_migration (version, name, applied_at)
+          VALUES (12, 'design-tickets', ?);`,
+    args: [new Date().toISOString()],
+  });
+
+  // Versi 13: MoU produksi (v2.5a, PRD F-20): tabel `production_mou` (DDL
+  // awal), izin `mou.manage`, setelan `dp_percentage_bp`. Nomor dan nama
+  // WAJIB sama dengan `turso.rs`.
+  await client.execute({
+    sql: `INSERT OR IGNORE INTO schema_migration (version, name, applied_at)
+          VALUES (13, 'production-mou', ?);`,
     args: [new Date().toISOString()],
   });
 }

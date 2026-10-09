@@ -12,7 +12,8 @@ import { compressImageToWebp } from "@/lib/media/compress-image";
 import { formatDateTime } from "@/lib/utils/format";
 
 /**
- * Foto tiket sampel (PRD FR-07): referensi produk dan bukti bayar. Foto
+ * Foto tiket sampel (PRD FR-07): referensi produk, bukti bayar, dan mockup
+ * desainer (v2.4). Foto
  * dikompresi di perangkat sebelum diunggah. Isi foto dimuat satu per satu;
  * di Desktop/Mobile foto yang pernah dimuat tersimpan di perangkat, jadi
  * tetap terlihat saat offline.
@@ -21,6 +22,7 @@ import { formatDateTime } from "@/lib/utils/format";
 const PURPOSE_LABEL: Record<SampleMediaEntry["purpose"], string> = {
   REFERENCE: "Reference",
   PAYMENT_PROOF: "Payment proof",
+  MOCKUP: "Mockup",
 };
 
 interface SamplePhotosProps {
@@ -28,6 +30,8 @@ interface SamplePhotosProps {
   media: SampleMediaEntry[];
   canUpload: boolean;
   canUploadPaymentProof: boolean;
+  /** Pemegang `design.manage` pada tiket desain aktif (v2.4). */
+  canUploadMockup: boolean;
   onUploaded: () => void;
 }
 
@@ -38,6 +42,7 @@ export function SamplePhotos({
   media,
   canUpload,
   canUploadPaymentProof,
+  canUploadMockup,
   onUploaded,
 }: SamplePhotosProps) {
   const [loaded, setLoaded] = useState<Record<string, Loaded>>({});
@@ -178,7 +183,7 @@ export function SamplePhotos({
         />
       ) : null}
 
-      {canUpload ? (
+      {canUpload || canUploadMockup ? (
         <div className="flex flex-wrap gap-2">
           <input
             ref={inputRef}
@@ -189,17 +194,29 @@ export function SamplePhotos({
             aria-hidden="true"
             onChange={(event) => void upload(event)}
           />
-          <button
-            type="button"
-            disabled={busy}
-            onClick={() => pick("REFERENCE")}
-            className="app-btn app-btn-secondary"
-          >
-            {busy && purpose === "REFERENCE"
-              ? "Compressing…"
-              : "Add reference photo"}
-          </button>
-          {canUploadPaymentProof ? (
+          {canUpload ? (
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => pick("REFERENCE")}
+              className="app-btn app-btn-secondary"
+            >
+              {busy && purpose === "REFERENCE"
+                ? "Compressing…"
+                : "Add reference photo"}
+            </button>
+          ) : null}
+          {canUploadMockup ? (
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => pick("MOCKUP")}
+              className="app-btn app-btn-secondary"
+            >
+              {busy && purpose === "MOCKUP" ? "Compressing…" : "Add mockup"}
+            </button>
+          ) : null}
+          {canUpload && canUploadPaymentProof ? (
             <button
               type="button"
               disabled={busy}

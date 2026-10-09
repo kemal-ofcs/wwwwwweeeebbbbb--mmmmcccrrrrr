@@ -13,6 +13,7 @@ export type AppArea =
   | "dashboard"
   | "clients"
   | "samples"
+  | "finance"
   | "audit"
   | "operators"
   | "password_reset"
@@ -29,6 +30,7 @@ const AREA_PERMISSION: Record<AppArea, PermissionKey> = {
   dashboard: "dashboard.view",
   clients: "clients.view",
   samples: "samples.view",
+  finance: "invoices.view",
   audit: "audit.view",
   operators: "operators.view",
   password_reset: "password_reset.view",

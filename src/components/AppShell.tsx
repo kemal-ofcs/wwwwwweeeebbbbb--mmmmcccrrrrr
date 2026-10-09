@@ -29,6 +29,7 @@ interface NavItem {
 const NAV_ITEMS: readonly NavItem[] = [
   { area: "clients", href: "/clients", label: "Clients", icon: "users" },
   { area: "samples", href: "/samples", label: "Samples", icon: "document" },
+  { area: "finance", href: "/finance", label: "Finance", icon: "database" },
   { area: "operators", href: "/operators", label: "Operators", icon: "user" },
   { area: "audit", href: "/audit", label: "Audit", icon: "history" },
   {

@@ -314,7 +314,8 @@ pub fn initialize(path: &Path) -> Result<(), String> {
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
         rnd_reject_reason_option_id TEXT NOT NULL DEFAULT '',
-        revision_fee_idr INTEGER
+        revision_fee_idr INTEGER,
+        is_test_requested INTEGER NOT NULL DEFAULT 0
       );
       CREATE TABLE IF NOT EXISTS sample_feedbacks (
         id TEXT PRIMARY KEY,
@@ -367,6 +368,112 @@ pub fn initialize(path: &Path) -> Result<(), String> {
       );
       CREATE INDEX IF NOT EXISTS idx_local_pricing_formulas_request
         ON pricing_formulas(sample_request_id, iteration_number);
+      -- Tagihan dan uang masuk (v2.3a), cache milik cloud.
+      CREATE TABLE IF NOT EXISTS finance_options (
+        id TEXT PRIMARY KEY,
+        kind TEXT NOT NULL,
+        label TEXT NOT NULL,
+        rate_bp INTEGER NOT NULL,
+        is_active INTEGER NOT NULL DEFAULT 1,
+        sort_order INTEGER NOT NULL DEFAULT 0,
+        updated_at TEXT NOT NULL,
+        installment_count INTEGER
+      );
+      CREATE TABLE IF NOT EXISTS invoices (
+        id TEXT PRIMARY KEY,
+        invoice_number TEXT NOT NULL,
+        client_id TEXT NOT NULL,
+        sample_request_id TEXT NOT NULL DEFAULT '',
+        ref_type TEXT NOT NULL,
+        revision_index INTEGER NOT NULL DEFAULT 0,
+        description TEXT NOT NULL DEFAULT '',
+        subtotal_idr INTEGER NOT NULL,
+        discount_label TEXT NOT NULL DEFAULT '',
+        discount_bp INTEGER NOT NULL DEFAULT 0,
+        discount_idr INTEGER NOT NULL DEFAULT 0,
+        taxes_json TEXT NOT NULL DEFAULT '[]',
+        tax_idr INTEGER NOT NULL DEFAULT 0,
+        total_idr INTEGER NOT NULL,
+        issued_on TEXT NOT NULL,
+        due_on TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'OPEN',
+        cancel_reason TEXT NOT NULL DEFAULT '',
+        created_by INTEGER,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        parent_invoice_id TEXT NOT NULL DEFAULT '',
+        installment_no INTEGER NOT NULL DEFAULT 0
+      );
+      CREATE TABLE IF NOT EXISTS incoming_funds (
+        id TEXT PRIMARY KEY,
+        client_id TEXT NOT NULL DEFAULT '',
+        received_on TEXT NOT NULL,
+        amount_idr INTEGER NOT NULL,
+        description TEXT NOT NULL DEFAULT '',
+        proof_media_id TEXT NOT NULL DEFAULT '',
+        status TEXT NOT NULL DEFAULT 'ACTIVE',
+        void_reason TEXT NOT NULL DEFAULT '',
+        recorded_by INTEGER,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        deposit_confirmed_by INTEGER,
+        deposit_confirmed_at TEXT NOT NULL DEFAULT ''
+      );
+      CREATE TABLE IF NOT EXISTS fund_allocations (
+        id TEXT PRIMARY KEY,
+        fund_id TEXT NOT NULL,
+        invoice_id TEXT NOT NULL,
+        amount_idr INTEGER NOT NULL,
+        recorded_by INTEGER,
+        recorded_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_local_invoices_sample
+        ON invoices(sample_request_id);
+      CREATE INDEX IF NOT EXISTS idx_local_invoices_client
+        ON invoices(client_id);
+      CREATE INDEX IF NOT EXISTS idx_local_fund_allocations_invoice
+        ON fund_allocations(invoice_id);
+      CREATE INDEX IF NOT EXISTS idx_local_fund_allocations_fund
+        ON fund_allocations(fund_id);
+      -- Tiket desain (v2.4, PRD F-19), cache cloud seperti tiket sampel.
+      CREATE TABLE IF NOT EXISTS design_tickets (
+        id TEXT PRIMARY KEY,
+        sample_request_id TEXT NOT NULL,
+        brief TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'MOCKUP',
+        dummy_rejection_count INTEGER NOT NULL DEFAULT 0,
+        dummy_tracking_no TEXT NOT NULL DEFAULT '',
+        revision_notes TEXT NOT NULL DEFAULT '',
+        status_changed_at TEXT NOT NULL,
+        created_by INTEGER,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_local_design_tickets_sample
+        ON design_tickets(sample_request_id);
+      -- MoU produksi (v2.5a, PRD F-20), cache cloud seperti tiket sampel.
+      CREATE TABLE IF NOT EXISTS production_mou (
+        id TEXT PRIMARY KEY,
+        mou_number TEXT NOT NULL,
+        sample_request_id TEXT NOT NULL,
+        client_id TEXT NOT NULL,
+        total_units INTEGER NOT NULL,
+        unit_price_idr INTEGER NOT NULL,
+        total_production_cost_idr INTEGER NOT NULL,
+        production_lead_time_days INTEGER NOT NULL,
+        regulatory_path TEXT NOT NULL,
+        dp_bp INTEGER NOT NULL,
+        dp_amount_required_idr INTEGER NOT NULL,
+        notes TEXT NOT NULL DEFAULT '',
+        status TEXT NOT NULL DEFAULT 'DRAFT',
+        revision_notes TEXT NOT NULL DEFAULT '',
+        status_changed_at TEXT NOT NULL,
+        created_by INTEGER,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_local_production_mou_sample
+        ON production_mou(sample_request_id);
       -- Foto: data ringkas ditarik dari cloud; `data_base64` terisi untuk foto
       -- buatan perangkat ini dan foto yang pernah dibuka ('' = belum diambil).
       CREATE TABLE IF NOT EXISTS media_asset (
@@ -481,6 +588,13 @@ pub fn initialize(path: &Path) -> Result<(), String> {
         "revision_fee_idr",
         "ALTER TABLE sample_requests ADD COLUMN revision_fee_idr INTEGER;",
     )?;
+    // Sampel sekalian diuji (v2.3a, D-30).
+    ensure_column(
+        &connection,
+        "sample_requests",
+        "is_test_requested",
+        "ALTER TABLE sample_requests ADD COLUMN is_test_requested INTEGER NOT NULL DEFAULT 0;",
+    )?;
 
     Ok(())
 }
@@ -503,6 +617,12 @@ const CLOUD_MIRRORED_TABLES: &[&str] = &[
     "sample_status_log",
     "sample_formulas",
     "pricing_formulas",
+    "finance_options",
+    "invoices",
+    "incoming_funds",
+    "fund_allocations",
+    "design_tickets",
+    "production_mou",
     "media_asset",
 ];
 
@@ -819,6 +939,12 @@ mod tests {
             "sample_status_log",
             "sample_formulas",
             "pricing_formulas",
+            "finance_options",
+            "invoices",
+            "incoming_funds",
+            "fund_allocations",
+            "design_tickets",
+            "production_mou",
             "media_asset",
             "setting_gex_system",
             "desktop_sync_outbox",

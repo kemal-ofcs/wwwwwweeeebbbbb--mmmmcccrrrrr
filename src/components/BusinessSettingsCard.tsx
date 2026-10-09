@@ -11,10 +11,13 @@ import {
 import {
   DEFAULT_BUSINESS_SETTINGS,
   FREE_REVISION_LIMIT_MAX,
+  INVOICE_DUE_DAYS_LIMIT,
   LEAD_HOT_MAX_DAYS_LIMIT,
   LEAD_WARM_MAX_DAYS_LIMIT,
+  MAX_DUMMY_REJECTIONS_LIMIT,
   MAX_PHOTOS_PER_SAMPLE_LIMIT,
   OFFLINE_LOGIN_MAX_DAYS_LIMIT,
+  PAYMENT_INSTRUCTIONS_MAX,
   type SampleFeeMode,
 } from "@/lib/validations/sample";
 
@@ -210,7 +213,7 @@ export function BusinessSettingsCard({ canManage }: { canManage: boolean }) {
               </span>
             </label>
             <label className="app-label grid gap-1.5">
-              Photos per sample request
+              Photos of each kind per sample request
               <input
                 required
                 type="number"
@@ -226,6 +229,27 @@ export function BusinessSettingsCard({ canManage }: { canManage: boolean }) {
                 }
                 className="app-input font-normal"
               />
+            </label>
+            <label className="app-label grid gap-1.5">
+              Dummy rejections before an override is needed
+              <input
+                required
+                type="number"
+                min={0}
+                max={MAX_DUMMY_REJECTIONS_LIMIT}
+                step={1}
+                value={settings.max_dummy_rejections}
+                onChange={(event) =>
+                  setSettings({
+                    ...settings,
+                    max_dummy_rejections: wholeNumber(event.target.value),
+                  })
+                }
+                className="app-input font-normal"
+              />
+              <span className="text-body-sm font-normal text-on-surface-variant">
+                0 means no limit.
+              </span>
             </label>
             <label className="app-label grid gap-1.5">
               Offline sign-in period (days)
@@ -251,7 +275,73 @@ export function BusinessSettingsCard({ canManage }: { canManage: boolean }) {
               </span>
             </label>
           </fieldset>
-          <fieldset disabled={!canManage} className="grid gap-4 sm:grid-cols-3">
+          <fieldset disabled={!canManage} className="grid gap-4 sm:grid-cols-2">
+            <legend className="mb-2 text-body-md text-on-surface-variant">
+              Invoices. Default fees only prefill the invoice form; 0 leaves it
+              empty.
+            </legend>
+            {(
+              [
+                ["default_sample_fee_idr", "Default sample fee (Rp)"],
+                ["default_test_fee_idr", "Default testing fee (Rp)"],
+                ["default_dummy_fee_idr", "Default dummy fee (Rp)"],
+              ] as const
+            ).map(([key, label]) => (
+              <label key={key} className="app-label grid gap-1.5">
+                {label}
+                <input
+                  required
+                  type="number"
+                  inputMode="numeric"
+                  min={0}
+                  step={1}
+                  value={settings[key]}
+                  onChange={(event) =>
+                    setSettings({
+                      ...settings,
+                      [key]: wholeNumber(event.target.value),
+                    })
+                  }
+                  className="app-input font-normal"
+                />
+              </label>
+            ))}
+            <label className="app-label grid gap-1.5">
+              Invoice due after (days)
+              <input
+                required
+                type="number"
+                min={0}
+                max={INVOICE_DUE_DAYS_LIMIT}
+                step={1}
+                value={settings.invoice_due_days}
+                onChange={(event) =>
+                  setSettings({
+                    ...settings,
+                    invoice_due_days: wholeNumber(event.target.value),
+                  })
+                }
+                className="app-input font-normal"
+              />
+            </label>
+            <label className="app-label grid gap-1.5 sm:col-span-2">
+              Payment instructions on the invoice PDF
+              <textarea
+                rows={3}
+                maxLength={PAYMENT_INSTRUCTIONS_MAX}
+                value={settings.invoice_payment_instructions}
+                placeholder="Transfer to BCA 1234567890 a.n. Company Name"
+                onChange={(event) =>
+                  setSettings({
+                    ...settings,
+                    invoice_payment_instructions: event.target.value,
+                  })
+                }
+                className="app-input min-h-24 py-2 font-normal"
+              />
+            </label>
+          </fieldset>
+          <fieldset disabled={!canManage} className="grid gap-4 sm:grid-cols-2">
             <legend className="mb-2 text-body-md text-on-surface-variant">
               Telegram group chat ID per division. Leave empty to keep that
               division's events in the app only.
@@ -261,6 +351,7 @@ export function BusinessSettingsCard({ canManage }: { canManage: boolean }) {
                 ["telegram_chat_id_cs", "CS group"],
                 ["telegram_chat_id_rnd", "RnD group"],
                 ["telegram_chat_id_finance", "Finance group"],
+                ["telegram_chat_id_design", "Design group"],
               ] as const
             ).map(([key, label]) => (
               <label key={key} className="app-label grid gap-1.5">

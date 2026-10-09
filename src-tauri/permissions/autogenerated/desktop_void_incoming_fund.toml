@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-desktop-void-incoming-fund"
+description = "Enables the desktop_void_incoming_fund command without any pre-configured scope."
+commands.allow = ["desktop_void_incoming_fund"]
+
+[[permission]]
+identifier = "deny-desktop-void-incoming-fund"
+description = "Denies the desktop_void_incoming_fund command without any pre-configured scope."
+commands.deny = ["desktop_void_incoming_fund"]

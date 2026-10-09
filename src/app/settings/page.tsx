@@ -14,6 +14,7 @@ import { CompanyProfileCard } from "@/components/CompanyProfileCard";
 import { ClientCodeCard } from "@/components/clients/ClientCodeCard";
 import { MasterDataCard } from "@/components/clients/MasterDataCard";
 import { DatabaseBackupCard } from "@/components/DatabaseBackupCard";
+import { FinanceOptionsCard } from "@/components/finance/FinanceOptionsCard";
 import { LicenseCard } from "@/components/license/LicenseCard";
 import { MailSettingsCard } from "@/components/MailSettingsCard";
 import { PasswordRecoveryCard } from "@/components/PasswordRecoveryCard";
@@ -457,6 +458,9 @@ export default function SettingsPage() {
         canManage={hasPermission(user, "settings.manage")}
       />
       {hasPermission(user, "master_data.manage") ? <MasterDataCard /> : null}
+      {hasPermission(user, "finance_options.manage") ? (
+        <FinanceOptionsCard />
+      ) : null}
       {hasPermission(user, "settings.manage") ? <ClientCodeCard /> : null}
 
       {isDesktop ? (

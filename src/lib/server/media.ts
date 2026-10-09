@@ -4,6 +4,7 @@ import type { Client, Transaction } from "@libsql/client";
 import { type AuditActor, writeAudit } from "@/lib/server/audit";
 import { loadBusinessSettings } from "@/lib/server/business-settings";
 import { ApiRequestError } from "@/lib/server/http/api-response";
+import { DESIGN_ACTIVE_SQL } from "@/lib/validations/design";
 import {
   MEDIA_INSERT_SQL,
   MEDIA_MIME,
@@ -60,7 +61,18 @@ async function checkMediaAllowed(
   sample: { id: string; status: string; is_paid_sample: number },
   purpose: string,
 ) {
-  if (SAMPLE_TERMINAL_STATUSES.includes(sample.status as SampleStatus)) {
+  if (purpose === "MOCKUP") {
+    const design = await transaction.execute({
+      sql: DESIGN_ACTIVE_SQL,
+      args: [sample.id, ""],
+    });
+    if (Number(design.rows[0]?.total) === 0) {
+      throw new ApiRequestError(
+        "Request a design for this sample before uploading a mockup.",
+        400,
+      );
+    }
+  } else if (SAMPLE_TERMINAL_STATUSES.includes(sample.status as SampleStatus)) {
     throw new ApiRequestError("This sample request is closed.", 400);
   }
   if (purpose === "PAYMENT_PROOF" && sample.is_paid_sample !== 1) {
@@ -68,8 +80,8 @@ async function checkMediaAllowed(
   }
   const limit = (await loadBusinessSettings(transaction)).max_photos_per_sample;
   const count = await transaction.execute({
-    sql: "SELECT COUNT(*) AS total FROM media_asset WHERE owner_type = 'sample' AND owner_id = ?;",
-    args: [sample.id],
+    sql: "SELECT COUNT(*) AS total FROM media_asset WHERE owner_type = 'sample' AND owner_id = ? AND purpose = ?;",
+    args: [sample.id, purpose],
   });
   if (Number(count.rows[0]?.total) >= limit) {
     throw new ApiRequestError(

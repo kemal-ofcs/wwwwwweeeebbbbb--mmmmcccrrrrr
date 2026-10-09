@@ -47,6 +47,7 @@ const DIVISION_LABEL: Record<NotificationDivision, string> = {
   CS: "CS",
   RND: "RnD",
   FINANCE: "Finance",
+  DESIGN: "Design",
 };
 
 function message(error: unknown, fallback: string) {
@@ -157,9 +158,10 @@ export function TelegramSettingsCard() {
               Telegram notifications
             </h2>
             <p className="mt-1 max-w-2xl text-body-md text-on-surface-variant">
-              New leads, Cold leads, and sample requests waiting for RnD or
-              Finance are sent to each division's Telegram group. Add the bot to
-              every group, then set the group chat IDs in Business settings.
+              New leads, Cold leads, sample requests waiting for RnD or Finance,
+              and design briefs are sent to each division's Telegram group. Add
+              the bot to every group, then set the group chat IDs in Business
+              settings.
             </p>
           </div>
         </div>

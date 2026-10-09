@@ -14,7 +14,7 @@ import { runDatabaseMigrations } from "./db-migrations";
  * Rust DAN migrasi `ALTER TABLE` di `db-migrations.ts`, supaya klien mana pun
  * bisa menyembuhkan database buatan klien lain.
  */
-export const CURRENT_SCHEMA_VERSION = 10;
+export const CURRENT_SCHEMA_VERSION = 13;
 
 /** Tabel yang wajib ada sebelum database dianggap siap dipakai. */
 export const REQUIRED_TABLES = [
@@ -61,6 +61,16 @@ export const REQUIRED_TABLES = [
   "sample_formulas",
   // Harga Finance per iterasi tiket (v2.2, PRD F-16), ikut sinkronisasi.
   "pricing_formulas",
+  // Tagihan, uang masuk, alokasi, dan daftar pajak/diskon (v2.3a, PRD F-17).
+  // Keempatnya ikut sinkronisasi.
+  "finance_options",
+  "invoices",
+  "incoming_funds",
+  "fund_allocations",
+  // Tiket desain: mockup dan dummy (v2.4, PRD F-19), ikut sinkronisasi.
+  "design_tickets",
+  // MoU produksi (v2.5a, PRD F-20), ikut sinkronisasi.
+  "production_mou",
   // Foto (PRD F-07). Isi gambar tidak pernah ikut snapshot perangkat.
   "media_asset",
   // Notifikasi divisi (PRD FR-08). Ketiganya cloud-only.
@@ -157,6 +167,33 @@ export const RND_PERMISSION_SEED_SQL = [
 export const FINANCE_PERMISSION_SEED_SQL = [
   "INSERT OR IGNORE INTO role_permission (role_id, permission_key, is_allowed, updated_at, updated_by) SELECT r.id, p.permission_key, 1, datetime('now'), 'system' FROM app_role r JOIN app_permission p ON p.permission_key IN ('finance.manage', 'pricing.view', 'samples.view', 'clients.view') WHERE r.role_key = 'finance' AND NOT EXISTS (SELECT 1 FROM setting_gex_system WHERE key = 'finance_permissions_seeded');",
   "INSERT OR IGNORE INTO setting_gex_system (key, value) VALUES ('finance_permissions_seeded', '1');",
+];
+
+/**
+ * Izin melihat tagihan (v2.3a, PRD F-17) untuk role divisi CS dan Finance,
+ * sekali saja. WAJIB identik dengan seed yang sama di `turso.rs`.
+ */
+export const INVOICE_PERMISSION_SEED_SQL = [
+  "INSERT OR IGNORE INTO role_permission (role_id, permission_key, is_allowed, updated_at, updated_by) SELECT r.id, p.permission_key, 1, datetime('now'), 'system' FROM app_role r JOIN app_permission p ON p.permission_key = 'invoices.view' WHERE r.role_key IN ('cs', 'finance') AND NOT EXISTS (SELECT 1 FROM setting_gex_system WHERE key = 'invoice_permissions_seeded');",
+  "INSERT OR IGNORE INTO setting_gex_system (key, value) VALUES ('invoice_permissions_seeded', '1');",
+];
+
+/**
+ * Izin Desain (v2.4, PRD F-19) untuk role divisi Design, sekali saja. WAJIB
+ * identik dengan seed yang sama di `turso.rs` (dites per karakter).
+ */
+export const DESIGN_PERMISSION_SEED_SQL = [
+  "INSERT OR IGNORE INTO role_permission (role_id, permission_key, is_allowed, updated_at, updated_by) SELECT r.id, p.permission_key, 1, datetime('now'), 'system' FROM app_role r JOIN app_permission p ON p.permission_key IN ('design.manage', 'samples.view', 'clients.view', 'notifications_design.view') WHERE r.role_key = 'design' AND NOT EXISTS (SELECT 1 FROM setting_gex_system WHERE key = 'design_permissions_seeded');",
+  "INSERT OR IGNORE INTO setting_gex_system (key, value) VALUES ('design_permissions_seeded', '1');",
+];
+
+/**
+ * Izin MoU (v2.5a, PRD F-20) untuk role divisi CS, sekali saja. WAJIB
+ * identik dengan seed yang sama di `turso.rs` (dites per karakter).
+ */
+export const MOU_PERMISSION_SEED_SQL = [
+  "INSERT OR IGNORE INTO role_permission (role_id, permission_key, is_allowed, updated_at, updated_by) SELECT r.id, p.permission_key, 1, datetime('now'), 'system' FROM app_role r JOIN app_permission p ON p.permission_key = 'mou.manage' WHERE r.role_key = 'cs' AND NOT EXISTS (SELECT 1 FROM setting_gex_system WHERE key = 'mou_permissions_seeded');",
+  "INSERT OR IGNORE INTO setting_gex_system (key, value) VALUES ('mou_permissions_seeded', '1');",
 ];
 
 export async function initDatabaseSchema(client: Client) {
@@ -468,7 +505,8 @@ export async function initDatabaseSchema(client: Client) {
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL,
       rnd_reject_reason_option_id TEXT NOT NULL DEFAULT '',
-      revision_fee_idr INTEGER
+      revision_fee_idr INTEGER,
+      is_test_requested INTEGER NOT NULL DEFAULT 0
       );`,
     // Satu baris per keputusan klien atas satu iterasi sampel (ACC/REVISE/REJECT).
     `CREATE TABLE IF NOT EXISTS sample_feedbacks (
@@ -523,6 +561,107 @@ export async function initDatabaseSchema(client: Client) {
       notes TEXT NOT NULL DEFAULT '',
       recorded_by INTEGER,
       recorded_at TEXT NOT NULL
+      );`,
+    // Tagihan dan uang masuk (v2.3a, PRD F-17). `finance_options` = daftar
+    // pajak dan diskon (D-28); tarifnya DISALIN ke tagihan saat dibuat. Lunas
+    // dihitung dari `fund_allocations`, tidak disimpan. Tanpa UNIQUE: nomor
+    // tagihan memakai kode perangkat seperti kode klien.
+    `CREATE TABLE IF NOT EXISTS finance_options (
+        id TEXT PRIMARY KEY,
+        kind TEXT NOT NULL,
+        label TEXT NOT NULL,
+        rate_bp INTEGER NOT NULL,
+        is_active INTEGER NOT NULL DEFAULT 1,
+        sort_order INTEGER NOT NULL DEFAULT 0,
+        updated_at TEXT NOT NULL,
+        installment_count INTEGER
+      );`,
+    `CREATE TABLE IF NOT EXISTS invoices (
+        id TEXT PRIMARY KEY,
+        invoice_number TEXT NOT NULL,
+        client_id TEXT NOT NULL,
+        sample_request_id TEXT NOT NULL DEFAULT '',
+        ref_type TEXT NOT NULL,
+        revision_index INTEGER NOT NULL DEFAULT 0,
+        description TEXT NOT NULL DEFAULT '',
+        subtotal_idr INTEGER NOT NULL,
+        discount_label TEXT NOT NULL DEFAULT '',
+        discount_bp INTEGER NOT NULL DEFAULT 0,
+        discount_idr INTEGER NOT NULL DEFAULT 0,
+        taxes_json TEXT NOT NULL DEFAULT '[]',
+        tax_idr INTEGER NOT NULL DEFAULT 0,
+        total_idr INTEGER NOT NULL,
+        issued_on TEXT NOT NULL,
+        due_on TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'OPEN',
+        cancel_reason TEXT NOT NULL DEFAULT '',
+        created_by INTEGER,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        parent_invoice_id TEXT NOT NULL DEFAULT '',
+        installment_no INTEGER NOT NULL DEFAULT 0
+      );`,
+    `CREATE TABLE IF NOT EXISTS incoming_funds (
+        id TEXT PRIMARY KEY,
+        client_id TEXT NOT NULL DEFAULT '',
+        received_on TEXT NOT NULL,
+        amount_idr INTEGER NOT NULL,
+        description TEXT NOT NULL DEFAULT '',
+        proof_media_id TEXT NOT NULL DEFAULT '',
+        status TEXT NOT NULL DEFAULT 'ACTIVE',
+        void_reason TEXT NOT NULL DEFAULT '',
+        recorded_by INTEGER,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        deposit_confirmed_by INTEGER,
+        deposit_confirmed_at TEXT NOT NULL DEFAULT ''
+      );`,
+    `CREATE TABLE IF NOT EXISTS fund_allocations (
+        id TEXT PRIMARY KEY,
+        fund_id TEXT NOT NULL,
+        invoice_id TEXT NOT NULL,
+        amount_idr INTEGER NOT NULL,
+        recorded_by INTEGER,
+        recorded_at TEXT NOT NULL
+      );`,
+    // Tiket desain (v2.4, PRD F-19): satu per tiket sampel, tanpa UNIQUE
+    // (keunikan dijaga `DESIGN_ACTIVE_SQL`). `status` dan
+    // `dummy_rejection_count` hanya berubah lewat rute `design/transition`.
+    `CREATE TABLE IF NOT EXISTS design_tickets (
+      id TEXT PRIMARY KEY,
+      sample_request_id TEXT NOT NULL,
+      brief TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'MOCKUP',
+      dummy_rejection_count INTEGER NOT NULL DEFAULT 0,
+      dummy_tracking_no TEXT NOT NULL DEFAULT '',
+      revision_notes TEXT NOT NULL DEFAULT '',
+      status_changed_at TEXT NOT NULL,
+      created_by INTEGER,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+      );`,
+    // MoU produksi (v2.5a, PRD F-20): satu MoU aktif per tiket sampel, tanpa
+    // UNIQUE (`MOU_ACTIVE_SQL`). Total dan DP dihitung `validateMouTerms`;
+    // status hanya berubah lewat rute `mou/transition`, isi hanya saat draf.
+    `CREATE TABLE IF NOT EXISTS production_mou (
+      id TEXT PRIMARY KEY,
+      mou_number TEXT NOT NULL,
+      sample_request_id TEXT NOT NULL,
+      client_id TEXT NOT NULL,
+      total_units INTEGER NOT NULL,
+      unit_price_idr INTEGER NOT NULL,
+      total_production_cost_idr INTEGER NOT NULL,
+      production_lead_time_days INTEGER NOT NULL,
+      regulatory_path TEXT NOT NULL,
+      dp_bp INTEGER NOT NULL,
+      dp_amount_required_idr INTEGER NOT NULL,
+      notes TEXT NOT NULL DEFAULT '',
+      status TEXT NOT NULL DEFAULT 'DRAFT',
+      revision_notes TEXT NOT NULL DEFAULT '',
+      status_changed_at TEXT NOT NULL,
+      created_by INTEGER,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
       );`,
     // Foto terkompresi (PRD FR-07), terpisah dari baris pemiliknya supaya query
     // daftar tidak membawa biner. Hanya-tambah (D-13). Perangkat menarik kolom
@@ -591,6 +730,12 @@ export async function initDatabaseSchema(client: Client) {
     `CREATE INDEX IF NOT EXISTS idx_sample_status_log_request ON sample_status_log(sample_request_id, recorded_at);`,
     `CREATE INDEX IF NOT EXISTS idx_sample_formulas_request ON sample_formulas(sample_request_id, iteration_number);`,
     `CREATE INDEX IF NOT EXISTS idx_pricing_formulas_request ON pricing_formulas(sample_request_id, iteration_number);`,
+    `CREATE INDEX IF NOT EXISTS idx_invoices_sample ON invoices(sample_request_id);`,
+    `CREATE INDEX IF NOT EXISTS idx_invoices_client ON invoices(client_id);`,
+    `CREATE INDEX IF NOT EXISTS idx_fund_allocations_invoice ON fund_allocations(invoice_id);`,
+    `CREATE INDEX IF NOT EXISTS idx_fund_allocations_fund ON fund_allocations(fund_id);`,
+    `CREATE INDEX IF NOT EXISTS idx_design_tickets_sample ON design_tickets(sample_request_id);`,
+    `CREATE INDEX IF NOT EXISTS idx_production_mou_sample ON production_mou(sample_request_id);`,
     `CREATE INDEX IF NOT EXISTS idx_media_asset_owner ON media_asset(owner_type, owner_id);`,
     `CREATE INDEX IF NOT EXISTS idx_notification_outbox_due ON notification_outbox(status, next_attempt_at);`,
     `CREATE INDEX IF NOT EXISTS idx_notification_outbox_created ON notification_outbox(created_at);`,
@@ -619,6 +764,12 @@ export async function initDatabaseSchema(client: Client) {
       ('rnd.manage', 'Record RnD decisions', 'Samples', 'Accept or reject sample requests, and record each finished sample with its formula.', 1, 60),
       ('finance.manage', 'Record Finance decisions', 'Finance', 'Price finished samples, set revision fees, and record payments as received.', 1, 61),
       ('pricing.view', 'View cost and margin', 'Finance', 'See the cost breakdown and margin behind each sample price.', 1, 61),
+      ('invoices.view', 'View invoices', 'Finance', 'See invoices, incoming payments, and which invoices are paid.', 1, 62),
+      ('finance_options.manage', 'Manage taxes and discounts', 'Finance', 'Add and change the taxes and discounts used on new invoices.', 1, 63),
+      ('payments.approve_exception', 'Approve payment exceptions', 'Finance', 'Accept a partial payment into installments, or keep an overpayment as a client deposit.', 1, 64),
+      ('design.manage', 'Do design work', 'Design', 'Upload mockups, print dummies, and record dummies as sent.', 1, 65),
+      ('mou.manage', 'Manage MoUs', 'Samples', 'Draft MoUs for approved samples, send them, and record the client''s answer.', 1, 60),
+      ('design.override_dummy_limit', 'Override the dummy rejection limit', 'Design', 'Print a dummy again after the client has rejected it as many times as the limit allows.', 1, 66),
       ('password_reset.view', 'View password reset history', 'Operators', 'Review who requested a password recovery, with their verification photo.', 1, 62),
       ('password_reset.delete', 'Delete password reset history', 'Operators', 'Delete password recovery records and their photos.', 1, 64),
       ('two_factor.reset', 'Reset another operator''s 2FA', 'Operators', 'Turn off two-step verification for another operator who lost their phone.', 1, 66),
@@ -635,6 +786,7 @@ export async function initDatabaseSchema(client: Client) {
       ('notifications_cs.view', 'CS notifications', 'Notifications', 'See new leads and leads that went Cold in the notification bell.', 1, 112),
       ('notifications_rnd.view', 'RnD notifications', 'Notifications', 'See sample requests waiting for RnD review in the notification bell.', 1, 114),
       ('notifications_finance.view', 'Finance notifications', 'Notifications', 'See sample fees and revision fees waiting for Finance in the notification bell.', 1, 116),
+      ('notifications_design.view', 'Design notifications', 'Notifications', 'See new design briefs and dummy revisions in the notification bell.', 1, 118),
       ('sync.view', 'View sync status', 'Sync', 'View the sync indicator and queue.', 1, 120),
       ('sync.retry', 'Retry sync and resolve conflicts', 'Sync', 'Trigger a manual sync and resolve conflicts.', 1, 130),
       ('diagnostics.view', 'View system diagnostics', 'Diagnostics', 'View runtime information and database health.', 1, 140);`,
@@ -646,7 +798,8 @@ export async function initDatabaseSchema(client: Client) {
       WHERE permission_key NOT IN (
         'roles.manage', 'operators.manage', 'operators.view', 'diagnostics.view',
         'password_reset.delete', 'two_factor.reset', 'password_reset.approve',
-        'database_backup.restore', 'settings.manage'
+        'database_backup.restore', 'settings.manage', 'finance_options.manage',
+        'payments.approve_exception'
       );`,
     // Operator bawaan bekerja sebagai CS sampai role divisi dibuat (PRD F-02).
     // WAJIB sama dengan `DEFAULT_ROLE_PERMISSIONS.operator` di `catalog.ts` dan
@@ -656,7 +809,7 @@ export async function initDatabaseSchema(client: Client) {
       WHERE permission_key IN (
         'home.view', 'dashboard.view', 'clients.view', 'clients.manage',
         'leads.view', 'leads.manage', 'samples.view', 'samples.manage',
-        'notifications_cs.view', 'sync.view'
+        'notifications_cs.view', 'sync.view', 'mou.manage'
       );`,
 
     // `rbac_revision` WAJIB ada: nilainya yang dipakai Web dan perangkat untuk
@@ -677,6 +830,12 @@ export async function initDatabaseSchema(client: Client) {
     ...RND_PERMISSION_SEED_SQL,
     // Izin Finance (v2.2), sekali saja.
     ...FINANCE_PERMISSION_SEED_SQL,
+    // Izin melihat tagihan (v2.3a), sekali saja.
+    ...INVOICE_PERMISSION_SEED_SQL,
+    // Izin Desain (v2.4), sekali saja.
+    ...DESIGN_PERMISSION_SEED_SQL,
+    // Izin MoU (v2.5a), sekali saja.
+    ...MOU_PERMISSION_SEED_SQL,
 
     // Angka 1 di sini disengaja dan TIDAK boleh diikatkan ke
     // `CURRENT_SCHEMA_VERSION`: baris ini menandai fondasi versi 1, sedangkan

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-desktop-create-design-ticket"
+description = "Enables the desktop_create_design_ticket command without any pre-configured scope."
+commands.allow = ["desktop_create_design_ticket"]
+
+[[permission]]
+identifier = "deny-desktop-create-design-ticket"
+description = "Denies the desktop_create_design_ticket command without any pre-configured scope."
+commands.deny = ["desktop_create_design_ticket"]

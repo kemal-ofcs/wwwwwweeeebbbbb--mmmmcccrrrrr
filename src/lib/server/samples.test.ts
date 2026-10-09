@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type Client, createClient } from "@libsql/client";
 import {
+  DESIGN_PERMISSION_SEED_SQL,
   FINANCE_PERMISSION_SEED_SQL,
   initDatabaseSchema,
   RND_PERMISSION_SEED_SQL,
@@ -19,6 +20,9 @@ const CS = { id: 7, role: "CS" };
 const clients = await import("@/lib/server/clients");
 const samples = await import("@/lib/server/samples");
 const business = await import("@/lib/server/business-settings");
+const finance = await import("@/lib/server/finance");
+const media = await import("@/lib/server/media");
+const design = await import("@/lib/validations/design");
 
 let client: Client;
 let directory: string;
@@ -99,6 +103,30 @@ const COSTS = {
   margin_bp: 4000,
   notes: "10k pcs",
 };
+
+// Tagihan yang dibayar penuh (v2.3a): buat, catat uang masuk, alokasikan.
+async function settle(id: string, refType: string, amount: number) {
+  const invoice = await finance.createInvoice(
+    client,
+    {
+      ref_type: refType,
+      sample_request_id: id,
+      subtotal_idr: amount,
+      tax_option_ids: [],
+    },
+    FINANCE,
+  );
+  const fund = await finance.recordIncomingFund(
+    client,
+    { received_on: "2026-10-08", amount_idr: invoice.total_idr },
+    FINANCE,
+  );
+  await finance.allocateFund(
+    client,
+    { fund_id: fund.id, invoice_id: invoice.id, amount_idr: invoice.total_idr },
+    FINANCE,
+  );
+}
 
 // Harga Finance untuk iterasi yang sedang `SAMPLE_READY` (v2.2, gerbang D-27).
 async function price(id: string, overrides = {}) {
@@ -184,6 +212,7 @@ describe("tiket sampel, jalur Web", () => {
       ...SAMPLE_PERMISSION_SEED_SQL,
       ...RND_PERMISSION_SEED_SQL,
       ...FINANCE_PERMISSION_SEED_SQL,
+      ...DESIGN_PERMISSION_SEED_SQL,
     ]) {
       expect(tursoRs).toContain(`"${sql}"`);
     }
@@ -206,9 +235,25 @@ describe("tiket sampel, jalur Web", () => {
         telegram_chat_id_rnd: "",
         telegram_chat_id_finance: "",
         offline_login_max_days: 7,
+        default_sample_fee_idr: 150_000,
+        default_test_fee_idr: 250_000,
+        invoice_due_days: 14,
+        invoice_payment_instructions: "BCA 123",
+        telegram_chat_id_design: "",
+        default_dummy_fee_idr: 0,
+        max_dummy_rejections: 0,
+        dp_percentage_bp: 5000,
       },
       ADMIN,
     );
+    // Setiap kunci tersimpan, termasuk setelan invoice (pernah tertinggal).
+    expect(await business.loadBusinessSettings(client)).toMatchObject({
+      default_free_revision_limit: 2,
+      default_sample_fee_idr: 150_000,
+      default_test_fee_idr: 250_000,
+      invoice_due_days: 14,
+      invoice_payment_instructions: "BCA 123",
+    });
     const after = await newClient("081200000002");
     expect(await lifecycle(after.id)).toMatchObject({ free_revision_limit: 2 });
     expect(await lifecycle(before.id)).toMatchObject({
@@ -248,6 +293,11 @@ describe("tiket sampel, jalur Web", () => {
       status: "WAITING_SAMPLE_PAYMENT",
       revision_index: 0,
     });
+    // Gerbang v2.3a: pembayaran dicatat setelah tagihannya lunas.
+    await expect(step(id, "PAYMENT_RECEIVED")).rejects.toThrow(
+      rules.SAMPLE_FEE_UNPAID,
+    );
+    await settle(id, "SAMPLE_FEE", 250_000);
     await step(id, "PAYMENT_RECEIVED");
     await step(id, "SAMPLE_READY");
     await price(id);
@@ -525,6 +575,7 @@ describe("tiket sampel, jalur Web", () => {
     expect(
       await step(id, "SET_REVISION_FEE", { revision_fee_idr: 750_000 }),
     ).toEqual({ status: "WAITING_REVISION_PAYMENT", revision_index: 1 });
+    await settle(id, "REVISION_FEE", 750_000);
     await step(id, "PAYMENT_RECEIVED");
     await step(id, "SAMPLE_READY");
     // Iterasi baru belum punya harga; harga iterasi 1 tidak berlaku lagi.
@@ -615,6 +666,196 @@ describe("tiket sampel, jalur Web", () => {
     ).toEqual([
       ["crm", "samples.view"],
       ["cs", "samples.manage,samples.view"],
+    ]);
+  });
+  test("desain: gerbang mockup, gerbang bayar dummy, batas penolakan, dan notifikasi", async () => {
+    const DESIGNER = { id: 9, role: "Design" };
+    const TINY_WEBP = "UklGRgwAAABXRUJQVlA4TA==";
+    const owner = await newClient("081200000090");
+    const sample = await samples.createSampleRequest(
+      client,
+      draft(owner.id, { is_dummy_required: true, brand_name: "Aura Box" }),
+      CS,
+    );
+    for (const action of [
+      "SUBMIT_TO_RND",
+      "RND_ACCEPT",
+      "PROCEED",
+      "SAMPLE_READY",
+    ]) {
+      await step(sample.id, action, { lead_time_days: 14 });
+    }
+    await price(sample.id);
+    // Tiket meminta dummy: Sample sent menunggu mockup (D-36, keputusan B).
+    await expect(step(sample.id, "SAMPLE_SENT")).rejects.toThrow(
+      rules.SAMPLE_MOCKUP_MISSING,
+    );
+    await expect(
+      media.uploadSampleMedia(
+        client,
+        { sample_id: sample.id, purpose: "MOCKUP", data_base64: TINY_WEBP },
+        DESIGNER,
+      ),
+    ).rejects.toThrow(
+      "Request a design for this sample before uploading a mockup.",
+    );
+
+    const ticket = await samples.createDesignTicket(
+      client,
+      { sample_id: sample.id, brief: " Box 50 ml, pastel " },
+      CS,
+    );
+    await expect(
+      samples.createDesignTicket(
+        client,
+        { sample_id: sample.id, brief: "Again" },
+        CS,
+      ),
+    ).rejects.toThrow("This sample request already has a design ticket.");
+    await media.uploadSampleMedia(
+      client,
+      { sample_id: sample.id, purpose: "MOCKUP", data_base64: TINY_WEBP },
+      DESIGNER,
+    );
+    await step(sample.id, "SAMPLE_SENT");
+    await step(sample.id, "CLIENT_ACC");
+
+    const designStep = (
+      action: string,
+      extra: Record<string, unknown> = {},
+      canOverride = false,
+    ) =>
+      samples.recordDesignStep(
+        client,
+        { id: ticket.id, action, notes: `Design ${action}`, ...extra },
+        action === "PRINT_DUMMY" || action === "DUMMY_SENT" ? DESIGNER : CS,
+        canOverride,
+      );
+    // Cetak pertama menunggu tagihan dummy lunas (US-17, keputusan D).
+    await expect(designStep("PRINT_DUMMY")).rejects.toThrow(
+      "The dummy invoice for this round is not paid yet.",
+    );
+    await settle(sample.id, "DUMMY_FEE", 75_000);
+    expect(await designStep("PRINT_DUMMY")).toEqual({
+      status: "DUMMY_PRINTING",
+      rejection_count: 0,
+    });
+    await designStep("DUMMY_SENT", { tracking_no: " JNE123 " });
+
+    await client.execute(
+      "INSERT INTO setting_gex_system (key, value) VALUES ('max_dummy_rejections', '1') ON CONFLICT(key) DO UPDATE SET value = excluded.value;",
+    );
+    expect(await designStep("DUMMY_REVISE")).toEqual({
+      status: "DUMMY_REVISION",
+      rejection_count: 1,
+    });
+    // Batas tercapai: hanya pemegang izin override (keputusan E).
+    await expect(designStep("PRINT_DUMMY")).rejects.toThrow(
+      design.DUMMY_LIMIT_REACHED,
+    );
+    // Tagihan dummy putaran ini yang belum lunas menahan cetak ulang.
+    const extra = await finance.createInvoice(
+      client,
+      {
+        ref_type: "DUMMY_FEE",
+        sample_request_id: sample.id,
+        subtotal_idr: 50_000,
+        tax_option_ids: [],
+      },
+      FINANCE,
+    );
+    await expect(designStep("PRINT_DUMMY", {}, true)).rejects.toThrow(
+      "The dummy invoice for this round is not paid yet.",
+    );
+    const fund = await finance.recordIncomingFund(
+      client,
+      { received_on: "2026-10-08", amount_idr: extra.total_idr },
+      FINANCE,
+    );
+    await finance.allocateFund(
+      client,
+      { fund_id: fund.id, invoice_id: extra.id, amount_idr: extra.total_idr },
+      FINANCE,
+    );
+    expect(await designStep("PRINT_DUMMY", {}, true)).toEqual({
+      status: "DUMMY_PRINTING",
+      rejection_count: 1,
+    });
+
+    const row = await client.execute({
+      sql: "SELECT brief, dummy_tracking_no, revision_notes FROM design_tickets WHERE id = ?;",
+      args: [ticket.id],
+    });
+    const saved = row.rows[0];
+    expect([
+      saved?.brief,
+      saved?.dummy_tracking_no,
+      saved?.revision_notes,
+    ]).toEqual(["Box 50 ml, pastel", "JNE123", "Design DUMMY_REVISE"]);
+    const invoices = await client.execute({
+      sql: "SELECT revision_index FROM invoices WHERE sample_request_id = ? AND ref_type = 'DUMMY_FEE' ORDER BY revision_index;",
+      args: [sample.id],
+    });
+    expect(
+      invoices.rows.map((invoice) => Number(invoice.revision_index)),
+    ).toEqual([0, 1]);
+    // Linimasa tiket sampel memuat langkah desain; override tercatat di audit.
+    const detail = await samples.getSampleRequest(client, sample.id, false);
+    expect(detail.design?.status).toBe("DUMMY_PRINTING");
+    const designLog = detail.status_log
+      .map((entry) => String(entry.action))
+      .filter((action) =>
+        [
+          "REQUEST_DESIGN",
+          "PRINT_DUMMY",
+          "DUMMY_SENT",
+          "DUMMY_REVISE",
+        ].includes(action),
+      )
+      .reverse();
+    expect(designLog).toEqual([
+      "REQUEST_DESIGN",
+      "PRINT_DUMMY",
+      "DUMMY_SENT",
+      "DUMMY_REVISE",
+      "PRINT_DUMMY",
+    ]);
+    const audit = await client.execute(
+      "SELECT summary_json FROM domain_audit_log WHERE action = 'design.step' ORDER BY occurred_at DESC, rowid DESC LIMIT 1;",
+    );
+    expect(JSON.parse(String(audit.rows[0]?.summary_json)).override_limit).toBe(
+      true,
+    );
+    // Grup Desain: brief baru dan dummy direvisi (FR-08), di transaksi yang sama.
+    const notified = await client.execute(
+      "SELECT event_type FROM notification_outbox WHERE target_division = 'DESIGN' ORDER BY event_type;",
+    );
+    expect(notified.rows.map((item) => String(item.event_type))).toEqual([
+      "DESIGN_REQUESTED",
+      "DUMMY_REVISED",
+    ]);
+    await client.execute(
+      "UPDATE setting_gex_system SET value = '0' WHERE key = 'max_dummy_rejections';",
+    );
+  });
+
+  test("izin Desain untuk role Design, sekali saja", async () => {
+    const granted = await client.execute(
+      "SELECT rp.permission_key FROM app_role r JOIN role_permission rp ON rp.role_id = r.id WHERE r.role_key = 'design' AND rp.is_allowed = 1 AND rp.permission_key NOT IN ('home.view', 'dashboard.view', 'sync.view') ORDER BY rp.permission_key;",
+    );
+    expect(granted.rows.map((row) => String(row.permission_key))).toEqual([
+      "clients.view",
+      "design.manage",
+      "notifications_design.view",
+      "samples.view",
+    ]);
+    // Override batas ikut paket Admin, tidak ke role divisi (keputusan E).
+    const override = await client.execute(
+      "SELECT r.role_key FROM app_role r JOIN role_permission rp ON rp.role_id = r.id WHERE rp.permission_key = 'design.override_dummy_limit' ORDER BY r.id;",
+    );
+    expect(override.rows.map((item) => String(item.role_key))).toEqual([
+      "superadmin",
+      "admin",
     ]);
   });
 });

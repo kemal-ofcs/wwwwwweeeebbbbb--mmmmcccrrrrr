@@ -64,6 +64,77 @@ export const SAMPLE_ACTION_PAST: Record<string, string> = {
   CLIENT_REJECT: "recorded the client's rejection",
   CANCEL: "cancelled the request",
   SET_REVISION_FEE: "set the revision fee",
+  // Langkah tiket desain (v2.4) di linimasa yang sama.
+  REQUEST_DESIGN: "requested a design",
+  PRINT_DUMMY: "started printing the dummy",
+  DUMMY_SENT: "sent the dummy to the client",
+  DUMMY_ACC: "recorded the client's dummy approval",
+  DUMMY_REVISE: "recorded a dummy revision request from the client",
+  CANCEL_DESIGN: "cancelled the design",
+  // Langkah MoU (v2.5a) di linimasa yang sama.
+  CREATE_MOU: "drafted the MoU",
+  SEND_MOU: "sent the MoU to the client",
+  MOU_ACCEPT: "recorded the client's MoU acceptance",
+  MOU_REVISE: "recorded MoU changes requested by the client",
+  MOU_REJECT: "recorded the client's MoU rejection",
+  CANCEL_MOU: "cancelled the MoU",
+};
+
+/** Status MoU (v2.5a, PRD F-20). */
+export const MOU_STATUS_LABEL: Record<string, string> = {
+  DRAFT: "Draft",
+  SENT: "Sent to client",
+  ACCEPTED: "Accepted by client",
+  REJECTED: "Rejected by client",
+  CANCELLED: "Cancelled",
+};
+
+export const MOU_STATUS_TONE: Record<string, StatusTone> = {
+  DRAFT: "neutral",
+  SENT: "info",
+  ACCEPTED: "success",
+  REJECTED: "danger",
+  CANCELLED: "neutral",
+};
+
+export const MOU_ACTION_LABEL: Record<string, string> = {
+  SEND_MOU: "Send to client",
+  MOU_ACCEPT: "Client accepted",
+  MOU_REVISE: "Client wants changes",
+  MOU_REJECT: "Client rejected",
+  CANCEL_MOU: "Cancel MoU",
+};
+
+export const REGULATORY_PATH_LABEL: Record<string, string> = {
+  WHITE_LABEL: "White Label",
+  WITH_BPOM: "With BPOM",
+};
+
+/** Status tiket desain (v2.4, PRD F-19). */
+export const DESIGN_STATUS_LABEL: Record<string, string> = {
+  MOCKUP: "Mockup",
+  DUMMY_PRINTING: "Printing dummy",
+  DUMMY_SENT: "Dummy sent to client",
+  DUMMY_REVISION: "Dummy revision requested",
+  DUMMY_ACC: "Dummy approved",
+  CANCELLED: "Cancelled",
+};
+
+export const DESIGN_STATUS_TONE: Record<string, StatusTone> = {
+  MOCKUP: "info",
+  DUMMY_PRINTING: "info",
+  DUMMY_SENT: "info",
+  DUMMY_REVISION: "warning",
+  DUMMY_ACC: "success",
+  CANCELLED: "neutral",
+};
+
+export const DESIGN_ACTION_LABEL: Record<string, string> = {
+  PRINT_DUMMY: "Start printing dummy",
+  DUMMY_SENT: "Dummy sent",
+  DUMMY_ACC: "Client approved dummy",
+  DUMMY_REVISE: "Client wants a dummy revision",
+  CANCEL_DESIGN: "Cancel design",
 };
 
 /** Lama tiket di status sekarang, untuk lencana waktu. Hanya tampilan. */

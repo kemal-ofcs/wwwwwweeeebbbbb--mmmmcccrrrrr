@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-desktop-create-invoice"
+description = "Enables the desktop_create_invoice command without any pre-configured scope."
+commands.allow = ["desktop_create_invoice"]
+
+[[permission]]
+identifier = "deny-desktop-create-invoice"
+description = "Denies the desktop_create_invoice command without any pre-configured scope."
+commands.deny = ["desktop_create_invoice"]

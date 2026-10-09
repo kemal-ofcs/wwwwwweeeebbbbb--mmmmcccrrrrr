@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-desktop-allocate-fund"
+description = "Enables the desktop_allocate_fund command without any pre-configured scope."
+commands.allow = ["desktop_allocate_fund"]
+
+[[permission]]
+identifier = "deny-desktop-allocate-fund"
+description = "Denies the desktop_allocate_fund command without any pre-configured scope."
+commands.deny = ["desktop_allocate_fund"]

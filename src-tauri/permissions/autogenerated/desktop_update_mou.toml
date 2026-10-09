@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-desktop-update-mou"
+description = "Enables the desktop_update_mou command without any pre-configured scope."
+commands.allow = ["desktop_update_mou"]
+
+[[permission]]
+identifier = "deny-desktop-update-mou"
+description = "Denies the desktop_update_mou command without any pre-configured scope."
+commands.deny = ["desktop_update_mou"]

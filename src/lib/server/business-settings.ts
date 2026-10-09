@@ -42,23 +42,12 @@ export async function saveBusinessSettings(
   const settings = checked.settings;
   const transaction = await client.transaction("write");
   try {
-    for (const [field, key] of [
-      [
-        "default_free_revision_limit",
-        BUSINESS_SETTING_KEYS.defaultFreeRevisionLimit,
-      ],
-      ["sample_fee_mode", BUSINESS_SETTING_KEYS.sampleFeeMode],
-      ["lead_hot_max_days", BUSINESS_SETTING_KEYS.leadHotMaxDays],
-      ["lead_warm_max_days", BUSINESS_SETTING_KEYS.leadWarmMaxDays],
-      ["max_photos_per_sample", BUSINESS_SETTING_KEYS.maxPhotosPerSample],
-      ["telegram_chat_id_cs", BUSINESS_SETTING_KEYS.telegramChatIdCs],
-      ["telegram_chat_id_rnd", BUSINESS_SETTING_KEYS.telegramChatIdRnd],
-      ["telegram_chat_id_finance", BUSINESS_SETTING_KEYS.telegramChatIdFinance],
-      ["offline_login_max_days", BUSINESS_SETTING_KEYS.offlineLoginMaxDays],
-    ] as const) {
+    // Nama kunci = nama field; daftar manual pernah tertinggal tiga kunci
+    // invoice v2.3a sehingga setelan itu tidak pernah tersimpan di Web.
+    for (const key of KEYS) {
       await transaction.execute({
         sql: "INSERT INTO setting_gex_system (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value;",
-        args: [key, String(settings[field])],
+        args: [key, String(settings[key])],
       });
     }
     await writeAudit(

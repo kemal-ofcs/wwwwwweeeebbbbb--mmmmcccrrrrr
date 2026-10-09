@@ -188,6 +188,8 @@ describe("role divisi", () => {
       "clients.view",
       "dashboard.view",
       "home.view",
+      // Melihat tagihan dan mengunduh invoice (v2.3a, keputusan M).
+      "invoices.view",
       "leads.manage",
       "leads.view",
       "notifications_cs.view",

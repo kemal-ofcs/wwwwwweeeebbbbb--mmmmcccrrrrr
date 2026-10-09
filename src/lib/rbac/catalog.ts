@@ -38,6 +38,36 @@ export const PERMISSION_CATALOG = [
   // role tanpa izin itu hanya melihat harga jual (keputusan H).
   { key: "finance.manage", name: "Record Finance decisions", group: "Finance" },
   { key: "pricing.view", name: "View cost and margin", group: "Finance" },
+  // Tagihan dan uang masuk (v2.3a, PRD F-17). Membuat tagihan, mencatat uang
+  // masuk, dan alokasi memakai `finance.manage`; daftar pajak dan diskon
+  // mengubah uang setiap tagihan baru, jadi izinnya sensitif (keputusan D).
+  { key: "invoices.view", name: "View invoices", group: "Finance" },
+  {
+    key: "finance_options.manage",
+    name: "Manage taxes and discounts",
+    group: "Finance",
+  },
+  // Menerima pembayaran sebagian menjadi cicilan dan menyimpan lebih bayar
+  // sebagai deposit (v2.3b, D-29): keduanya keputusan uang yang disetujui
+  // sadar, jadi sensitif dan tidak di-seed ke role mana pun.
+  {
+    key: "payments.approve_exception",
+    name: "Approve payment exceptions",
+    group: "Finance",
+  },
+  // Desain (v2.4, PRD F-19): unggah mockup, cetak dan kirim dummy. Respons
+  // klien atas dummy dicatat CS (`samples.manage`). Override batas penolakan
+  // membuka gerbang, tidak menghapus apa pun, jadi ikut paket Admin
+  // (keputusan E) tetapi tidak di-seed ke role divisi mana pun.
+  { key: "design.manage", name: "Do design work", group: "Design" },
+  // MoU produksi (v2.5a, PRD F-20): CS membuat, mengirim, dan mencatat
+  // jawaban klien. Harga satuan dan persen DP memakai `finance.manage`.
+  { key: "mou.manage", name: "Manage MoUs", group: "Samples" },
+  {
+    key: "design.override_dummy_limit",
+    name: "Override the dummy rejection limit",
+    group: "Design",
+  },
   // MENGAJUKAN reset password dan MENGAKTIFKAN 2FA untuk akun sendiri tidak
   // butuh izin apa pun: yang pertama memang terbuka tanpa sesi, yang kedua hak
   // setiap operator atas akunnya. Yang di-RBAC adalah membaca/menghapus jejak
@@ -112,6 +142,11 @@ export const PERMISSION_CATALOG = [
     group: "Notifications",
   },
   {
+    key: "notifications_design.view",
+    name: "Design notifications",
+    group: "Notifications",
+  },
+  {
     key: "sync.view",
     name: "View sync status",
     group: "Sync",
@@ -153,6 +188,10 @@ export const SENSITIVE_MUTATION_PERMISSIONS = new Set<PermissionKey>([
   // Memulihkan cadangan MENIMPA seluruh data perangkat dalam satu langkah.
   // Tidak ada operasi lain di aplikasi ini yang bisa menghapus sebanyak itu.
   "database_backup.restore",
+  // Pajak dan diskon mengubah nominal setiap tagihan baru (v2.3a, keputusan D).
+  "finance_options.manage",
+  // Pembayaran sebagian dan deposit klien (v2.3b, keputusan B).
+  "payments.approve_exception",
   // Menyetujui pemulihan berarti menyerahkan kendali sebuah akun kepada orang
   // yang sedang berdiri di depan layar. Peninjaunya WAJIB sadar memikul itu.
   "password_reset.approve",
@@ -191,6 +230,7 @@ export const DEFAULT_ROLE_PERMISSIONS: Record<
     "samples.manage",
     "notifications_cs.view",
     "sync.view",
+    "mou.manage",
   ],
 };
 

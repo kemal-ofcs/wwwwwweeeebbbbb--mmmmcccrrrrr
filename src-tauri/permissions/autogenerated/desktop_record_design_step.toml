@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-desktop-record-design-step"
+description = "Enables the desktop_record_design_step command without any pre-configured scope."
+commands.allow = ["desktop_record_design_step"]
+
+[[permission]]
+identifier = "deny-desktop-record-design-step"
+description = "Denies the desktop_record_design_step command without any pre-configured scope."
+commands.deny = ["desktop_record_design_step"]
