@@ -35,6 +35,7 @@ import { onOpenDetail, requestedDetail } from "@/lib/utils/open-detail";
 import {
   CLIENT_NAME_MAX,
   CLIENT_NOTES_MAX,
+  CLIENT_PHONE_SHARED_SUFFIX,
   CLIENT_TEXT_MAX,
   type LeadSegment,
 } from "@/lib/validations/client";
@@ -133,6 +134,8 @@ export function ClientWorkspace() {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [draft, setDraft] = useState<ClientDraft>(EMPTY_DRAFT);
   const [formError, setFormError] = useState("");
+  /** Peringatan nomor yang juga dipakai klien lain; '' = tidak ada. */
+  const [sharedPhone, setSharedPhone] = useState("");
   const [saving, setSaving] = useState(false);
   // Ref, bukan state: dua klik dalam satu tick sama-sama membaca state lama,
   // dan klik ganda di sini berarti dua lead untuk satu klien.
@@ -258,18 +261,25 @@ export function ClientWorkspace() {
     setEditingId(null);
   };
 
-  const submit = async (event: FormEvent) => {
+  const submit = (event: FormEvent) => {
     event.preventDefault();
+    void save(false);
+  };
+
+  /** `confirmShared` = pengguna menekan Save anyway untuk nomor yang sama. */
+  const save = async (confirmShared: boolean) => {
     if (isSubmittingRef.current || editingId === null) return;
     isSubmittingRef.current = true;
     setSaving(true);
     setFormError("");
+    setSharedPhone("");
     try {
       let message = "Client updated.";
+      const payload = { ...draft, confirm_shared_phone: confirmShared };
       if (editingId) {
-        await updateClient(editingId, draft);
+        await updateClient(editingId, payload);
       } else {
-        const saved = await registerClient(draft);
+        const saved = await registerClient(payload);
         message = `Lead registered as ${saved.client_code}.`;
       }
       setEditingId(null);
@@ -278,7 +288,9 @@ export function ClientWorkspace() {
       await refresh();
       setNotice(message);
     } catch (cause) {
-      setFormError(errorText(cause, "The client could not be saved."));
+      const text = errorText(cause, "The client could not be saved.");
+      if (text.endsWith(CLIENT_PHONE_SHARED_SUFFIX)) setSharedPhone(text);
+      else setFormError(text);
     } finally {
       isSubmittingRef.current = false;
       setSaving(false);
@@ -537,6 +549,19 @@ export function ClientWorkspace() {
           <form className="space-y-4" onSubmit={submit}>
             {formError ? (
               <FeedbackBanner tone="error">{formError}</FeedbackBanner>
+            ) : null}
+            {sharedPhone ? (
+              <FeedbackBanner tone="warning">
+                <span className="block">{sharedPhone}</span>
+                <button
+                  type="button"
+                  disabled={saving}
+                  onClick={() => void save(true)}
+                  className="app-btn app-btn-secondary mt-2"
+                >
+                  Save anyway
+                </button>
+              </FeedbackBanner>
             ) : null}
 
             <label className="app-label grid gap-1.5">

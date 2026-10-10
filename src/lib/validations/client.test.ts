@@ -1,5 +1,8 @@
 import { describe, expect, test } from "bun:test";
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import {
+  CLIENT_PHONE_SHARED_SUFFIX,
   companyDateStamp,
   companyDayBoundsUtc,
   daysSinceResponse,
@@ -12,6 +15,7 @@ import {
   normalizeWhatsapp,
   parseStoredTimestamp,
   resolveInteractionTime,
+  sharedPhoneMessage,
   utcTimestamp,
 } from "./client";
 
@@ -208,4 +212,20 @@ describe("companyDayBoundsUtc", () => {
     expect(companyDayBoundsUtc("25-09-2026", "Asia/Jakarta")).toBeNull();
     expect(companyDayBoundsUtc("", "Asia/Jakarta")).toBeNull();
   });
+});
+
+test("pesan nomor bersama identik dengan Rust", () => {
+  expect(sharedPhoneMessage("6281234567890", "KLN-1", "Aura")).toBe(
+    "The WhatsApp number 6281234567890 is also used by client KLN-1 (Aura). Save anyway to keep both clients.",
+  );
+  const path = ["desktop", "mobile"]
+    .map((dir) =>
+      join(import.meta.dir, `../../../src-tauri/src/${dir}/clients.rs`),
+    )
+    .find(existsSync);
+  const rust = readFileSync(path as string, "utf8");
+  expect(rust).toContain(`"${CLIENT_PHONE_SHARED_SUFFIX}"`);
+  expect(rust).toContain(
+    '"The WhatsApp number {phone} is also used by client {code} ({name}). {CLIENT_PHONE_SHARED_SUFFIX}"',
+  );
 });

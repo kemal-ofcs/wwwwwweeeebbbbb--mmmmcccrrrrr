@@ -26,6 +26,7 @@ import {
   normalizeOptionCode,
   normalizeWhatsapp,
   OPTION_LABEL_MAX,
+  sharedPhoneMessage,
 } from "@/lib/validations/client";
 import { NOTIFY_LEAD_NEW_SQL } from "@/lib/validations/notification";
 import { FREE_REVISION_LIMIT_MAX } from "@/lib/validations/sample";
@@ -238,20 +239,25 @@ async function validateClientDraft(
   return { name, phone, address, city, province, channel, category, needs };
 }
 
-/** Padanan `local_phone_owner` + `duplicate_phone` di Rust. */
-async function assertPhoneFree(
+/**
+ * Nomor yang juga dipakai klien lain boleh disimpan setelah dikonfirmasi
+ * (`confirm_shared_phone`). Padanan `local_phone_owner` + `shared_phone` di Rust.
+ */
+async function assertPhoneConfirmed(
   executor: Executor,
   phone: string,
   clientId: string,
+  draftInput: Draft,
 ) {
+  if (draftInput.confirm_shared_phone === true) return;
   const result = await executor.execute({
-    sql: "SELECT client_code FROM clients WHERE phone_normalized = ? AND id <> ? LIMIT 1;",
+    sql: "SELECT client_code, name FROM clients WHERE phone_normalized = ? AND id <> ? ORDER BY created_at LIMIT 1;",
     args: [phone, clientId],
   });
-  const owner = result.rows[0]?.client_code;
-  if (owner != null) {
+  const owner = result.rows[0];
+  if (owner) {
     throw new ApiRequestError(
-      `The WhatsApp number ${phone} is already registered to client ${String(owner)}.`,
+      sharedPhoneMessage(phone, String(owner.client_code), String(owner.name)),
       409,
     );
   }
@@ -306,7 +312,7 @@ export async function registerClient(
   const transaction = await client.transaction("write");
   try {
     const draft = await validateClientDraft(transaction, draftInput);
-    await assertPhoneFree(transaction, draft.phone, "");
+    await assertPhoneConfirmed(transaction, draft.phone, "", draftInput);
 
     const clock = await transaction.execute(
       "SELECT CAST(strftime('%s','now') AS INTEGER) AS epoch, datetime('now') AS stamp;",
@@ -444,7 +450,7 @@ export async function updateClient(
       channel: String(row.channel_option_id),
       category: String(row.product_category_option_id),
     });
-    await assertPhoneFree(transaction, draft.phone, id);
+    await assertPhoneConfirmed(transaction, draft.phone, id, draftInput);
     const freeRevisions = clientFreeRevisionLimit(
       draftInput.free_revision_limit,
       Number(row.free_revision_limit ?? 0),

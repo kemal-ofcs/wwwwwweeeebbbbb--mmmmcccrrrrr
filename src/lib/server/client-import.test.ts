@@ -194,14 +194,21 @@ describe("impor CSV, jalur Web", () => {
             pic_answer: "Sudah kirim pricelist, klien minta sampel",
             pic_cs_id: null,
           }),
-          // Nomor sama di baris berikutnya = dilewati, bukan ditimpa.
+          // Nomor sama boleh dipakai beberapa klien: diimpor dengan catatan.
           row(3, { client_code: "GNI-9001", phone: "0812-9999-0001" }),
           row(4, { client_code: "gni-0002", phone: "0812-9999-0002" }),
         ],
       },
       ADMIN,
     );
-    expect(result).toMatchObject({ added: 1, skipped: 2, invalid: 0 });
+    expect(result).toMatchObject({ added: 2, skipped: 1, invalid: 0 });
+    expect(result.warnings).toEqual([
+      {
+        line: 3,
+        message:
+          "The WhatsApp number 6281299990001 appears more than once in this file.",
+      },
+    ]);
     const imported = await client.execute({
       sql: `SELECT c.client_code, l.pic_cs_id, l.total_followups, l.last_client_response_at,
                    i.direction, i.kind, i.notes, i.occurred_at

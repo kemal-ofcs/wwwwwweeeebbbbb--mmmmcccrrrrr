@@ -12,6 +12,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type Client, createClient } from "@libsql/client";
 import { initDatabaseSchema } from "@/lib/db-schema";
+import { CLIENT_PHONE_SHARED_SUFFIX } from "@/lib/validations/client";
 
 mock.module("server-only", () => ({}));
 
@@ -135,17 +136,23 @@ describe("klien, jalur Web", () => {
     expect(third.client_code).toMatch(/^CUS-\d{8}-W102$/);
   });
 
-  test("nomor WhatsApp yang sama ditolak dengan menyebut pemiliknya", async () => {
+  test("nomor WhatsApp yang sama butuh konfirmasi, lalu boleh disimpan", async () => {
     const first = await domain.registerClient(client, draft(), actor(1));
+    const again = draft({ phone: "+62 812 3456 7890" });
     await expect(
-      domain.registerClient(
-        client,
-        draft({ phone: "+62 812 3456 7890" }),
-        actor(1),
-      ),
+      domain.registerClient(client, again, actor(1)),
     ).rejects.toThrow(
-      `The WhatsApp number 6281234567890 is already registered to client ${first.client_code}.`,
+      `The WhatsApp number 6281234567890 is also used by client ${first.client_code} (`,
     );
+    await expect(
+      domain.registerClient(client, again, actor(1)),
+    ).rejects.toThrow(CLIENT_PHONE_SHARED_SUFFIX);
+    const second = await domain.registerClient(
+      client,
+      { ...again, confirm_shared_phone: true },
+      actor(1),
+    );
+    expect(second.client_code).not.toBe(first.client_code);
   });
 
   test("masukan tidak sah ditolak dengan pesan yang sama seperti Rust", async () => {

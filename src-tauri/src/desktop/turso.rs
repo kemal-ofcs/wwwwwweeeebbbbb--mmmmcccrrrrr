@@ -2699,23 +2699,6 @@ impl TursoClient {
         Ok(check)
     }
 
-    /// Kode klien lain yang sudah memakai nomor WhatsApp ini, bila ada.
-    async fn phone_owner(&self, phone: &str, client_id: &str) -> Result<Option<String>, CommandError> {
-        if phone.is_empty() {
-            return Ok(None);
-        }
-        Ok(self
-            .query_one(
-                "SELECT client_code FROM clients WHERE phone_normalized = ? AND id <> ? LIMIT 1;",
-                vec![json!(phone), json!(client_id)],
-            )
-            .await?
-            .to_objects()
-            .into_iter()
-            .next()
-            .and_then(|row| row.get("client_code").and_then(Value::as_str).map(str::to_owned)))
-    }
-
     async fn device_tag_of(&self, client_id: &str) -> Result<Option<String>, CommandError> {
         Ok(self
             .query_one(
@@ -4391,32 +4374,6 @@ impl TursoClient {
             // ditegakkan SEBELUM mutasi disusun. Tambahkan guard Anda di sini
             // bila domain Anda punya aturan "siapa boleh menimpa siapa".
             //
-            // Nomor WhatsApp unik per database, dijaga aplikasi (bukan UNIQUE).
-            // Dua perangkat offline yang mendaftarkan nomor sama: yang kedua
-            // tiba menjadi konflik yang menyebut pemilik nomornya (PRD E-04).
-            // ponytail: ada jeda sempit antara pemeriksaan ini dan transaksi
-            // mutasinya; bila dua push untuk nomor sama tiba di milidetik yang
-            // sama, keduanya bisa lolos. Pindahkan ke guard di dalam transaksi
-            // bila itu pernah terjadi.
-            if domain == "client" {
-                let phone = parsed_payload
-                    .get("phone_normalized")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default();
-                if let Some(owner) = self.phone_owner(phone, entity_key).await? {
-                    let message = format!(
-                        "The WhatsApp number {phone} is already registered to client {owner}."
-                    );
-                    push_results.push(json!({
-                        "eventId": event_id,
-                        "status": "conflict",
-                        "reason": message.clone(),
-                        "message": message,
-                        "serverRevision": 0
-                    }));
-                    continue;
-                }
-            }
 
             // Tiket sampel: langkah dan suntingan hanya berlaku bila tiket di
             // cloud masih seperti yang dilihat pencatatnya, dan langkahnya

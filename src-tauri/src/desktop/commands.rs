@@ -2098,23 +2098,36 @@ fn local_phone_owner(
     connection: &rusqlite::Connection,
     phone: &str,
     client_id: &str,
-) -> Result<Option<String>, CommandError> {
+) -> Result<Option<(String, String)>, CommandError> {
     use rusqlite::OptionalExtension;
     connection
         .query_row(
-            "SELECT client_code FROM clients WHERE phone_normalized = ? AND id <> ? LIMIT 1;",
+            "SELECT client_code, name FROM clients WHERE phone_normalized = ? AND id <> ? ORDER BY created_at LIMIT 1;",
             rusqlite::params![phone, client_id],
-            |row| row.get::<_, String>(0),
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
         )
         .optional()
         .map_err(|_| CommandError::internal())
 }
 
-fn duplicate_phone(phone: &str, owner: &str) -> CommandError {
-    CommandError::new(
-        "CLIENT_PHONE_TAKEN",
-        format!("The WhatsApp number {phone} is already registered to client {owner}."),
-    )
+/// Nomor yang juga dipakai klien lain: ditolak sampai dikonfirmasi
+/// (`confirm_shared_phone`). Padanan `assertPhoneConfirmed`.
+fn shared_phone(
+    connection: &rusqlite::Connection,
+    client: &Value,
+    phone: &str,
+    client_id: &str,
+) -> Result<(), CommandError> {
+    if client.get("confirm_shared_phone").and_then(Value::as_bool) == Some(true) {
+        return Ok(());
+    }
+    match local_phone_owner(connection, phone, client_id)? {
+        Some((code, name)) => Err(CommandError::new(
+            "CLIENT_PHONE_SHARED",
+            clients::shared_phone_message(phone, &code, &name),
+        )),
+        None => Ok(()),
+    }
 }
 
 fn company_timezone(connection: &rusqlite::Connection) -> String {
@@ -2265,9 +2278,7 @@ pub async fn desktop_register_client(
         let draft = validate_client_draft(&connection, &client, None)?;
         // Disalin saat klien dibuat (FR-06.5, kriteria terima FR-11).
         let free_revisions = business_settings(&connection).default_free_revision_limit;
-        if let Some(owner) = local_phone_owner(&connection, &draft.phone, "")? {
-            return Err(duplicate_phone(&draft.phone, &owner));
-        }
+        shared_phone(&connection, &client, &draft.phone, "")?;
         let stamp = clients::company_date_stamp(now, &company_timezone(&connection));
         let mut statement = connection
             .prepare("SELECT client_code FROM clients WHERE client_code LIKE ?;")
@@ -2457,14 +2468,14 @@ fn plan_import(
             continue;
         }
         let phone = text("phone");
-        if let Some(owner) = phones.get(&phone) {
-            reject("skipped", format!("The WhatsApp number {phone} is already registered to client {owner}."));
-            continue;
-        }
-        if seen_phones.contains(&phone) {
-            reject("skipped", format!("The WhatsApp number {phone} appears more than once in this file."));
-            continue;
-        }
+        // Nomor yang sama boleh dipakai beberapa klien: diimpor dengan catatan.
+        let phone_note = match phones.get(&phone) {
+            Some(owner) => Some(format!("The WhatsApp number {phone} is also used by client {owner}.")),
+            None if seen_phones.contains(&phone) => {
+                Some(format!("The WhatsApp number {phone} appears more than once in this file."))
+            }
+            None => None,
+        };
         let mut code = text("client_code");
         if code.is_empty() {
             let generated = match (&code_source, next_sequence) {
@@ -2490,6 +2501,9 @@ fn plan_import(
         }
         codes.insert(code.to_lowercase());
         seen_phones.insert(phone);
+        if let Some(message) = phone_note {
+            plan.warnings.push(json!({ "line": line, "message": message }));
+        }
         if row["note_truncated"] == true {
             plan.warnings.push(json!({
                 "line": line,
@@ -2948,9 +2962,7 @@ pub async fn desktop_update_client(
                 current["product_category_option_id"].as_str().unwrap_or_default(),
             )),
         )?;
-        if let Some(owner) = local_phone_owner(&connection, &draft.phone, &id)? {
-            return Err(duplicate_phone(&draft.phone, &owner));
-        }
+        shared_phone(&connection, &client, &draft.phone, &id)?;
         (draft, current)
     };
     let free_revisions = client_free_revision_limit(
@@ -6291,7 +6303,7 @@ mod tests_import {
         let plan = plan_import(&connection, &rows, &context, 1, source).expect("rencana");
 
         let codes: Vec<&str> = plan.valid.iter().map(|row| row["client_code"].as_str().unwrap_or_default()).collect();
-        assert_eq!(codes, vec!["GNI-0261", "KLN-20261003-A101"]);
+        assert_eq!(codes, vec!["GNI-0261", "KLN-20261003-A101", "GNI-0300", "GNI-0301"]);
         assert_eq!(plan.valid[1]["pic_cs_id"], json!(1), "PIC kosong = pengimpor");
         let statuses: Vec<(i64, &str)> = plan
             .results
@@ -6300,13 +6312,16 @@ mod tests_import {
             .collect();
         assert_eq!(
             statuses,
-            vec![(4, "skipped"), (5, "skipped"), (6, "skipped"), (7, "invalid"), (8, "invalid"), (9, "invalid")]
+            vec![(4, "skipped"), (7, "invalid"), (8, "invalid"), (9, "invalid")]
         );
         assert_eq!(
-            plan.results[1]["message"],
-            json!("The WhatsApp number 6281100000000 is already registered to client GNI-0001.")
+            plan.warnings,
+            vec![
+                json!({ "line": 5, "message": "The WhatsApp number 6281100000000 is also used by client GNI-0001." }),
+                json!({ "line": 6, "message": "The WhatsApp number 6281222448890 appears more than once in this file." }),
+            ]
         );
         let report = plan.report(true, rows.len());
-        assert_eq!((report["added"].clone(), report["skipped"].clone(), report["invalid"].clone()), (json!(2), json!(3), json!(3)));
+        assert_eq!((report["added"].clone(), report["skipped"].clone(), report["invalid"].clone()), (json!(4), json!(1), json!(3)));
     }
 }

@@ -51,6 +51,18 @@ export const MAX_CLIENT_SEQUENCE = 36 * 36 - 1;
  * awalan `0` menjadi `62`. Nomor yang tidak diawali `0` atau `62` ditolak,
  * karena menebak kode negaranya bisa menggabungkan dua klien berbeda.
  */
+/**
+ * Nomor WhatsApp boleh dipakai beberapa klien (satu pemilik, banyak brand;
+ * keputusan 2026-10-10), tetapi form meminta konfirmasi dulu supaya salah
+ * ketik tidak lolos diam-diam. Form mengenali pesan ini dari akhirannya.
+ * Padanan `CLIENT_PHONE_SHARED_SUFFIX` dan `shared_phone_message`.
+ */
+export const CLIENT_PHONE_SHARED_SUFFIX = "Save anyway to keep both clients.";
+
+export function sharedPhoneMessage(phone: string, code: string, name: string) {
+  return `The WhatsApp number ${phone} is also used by client ${code} (${name}). ${CLIENT_PHONE_SHARED_SUFFIX}`;
+}
+
 export function normalizeWhatsapp(raw: string): string | null {
   let value = raw.replace(/[\s\-.()]/g, "");
   if (value.startsWith("+")) value = value.slice(1);

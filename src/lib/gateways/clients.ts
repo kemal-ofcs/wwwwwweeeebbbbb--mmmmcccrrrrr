@@ -68,6 +68,8 @@ export interface ClientDraft {
    * dari setelan bisnis. Saat edit, nilai klien yang sedang disunting.
    */
   free_revision_limit: number | null;
+  /** `true` = simpan walau nomornya juga dipakai klien lain (Save anyway). */
+  confirm_shared_phone?: boolean;
 }
 
 export interface MasterOptionRecord {

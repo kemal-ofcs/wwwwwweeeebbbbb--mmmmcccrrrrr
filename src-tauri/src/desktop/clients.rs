@@ -33,6 +33,15 @@ const BASE36: &[u8; 36] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
 /// Dua digit basis-36 tanpa nol = 1..1295 kode per tag per tanggal.
 pub const MAX_CLIENT_SEQUENCE: u32 = 36 * 36 - 1;
 
+/// Padanan `CLIENT_PHONE_SHARED_SUFFIX`: nomor yang juga dipakai klien lain
+/// butuh konfirmasi, bukan ditolak (keputusan 2026-10-10).
+pub const CLIENT_PHONE_SHARED_SUFFIX: &str = "Save anyway to keep both clients.";
+
+/// Padanan `sharedPhoneMessage`.
+pub fn shared_phone_message(phone: &str, code: &str, name: &str) -> String {
+    format!("The WhatsApp number {phone} is also used by client {code} ({name}). {CLIENT_PHONE_SHARED_SUFFIX}")
+}
+
 /// Bentuk normal nomor WhatsApp: `62` + digit, 10-15 digit total. Padanan
 /// `normalizeWhatsapp` di TS.
 pub fn normalize_whatsapp(raw: &str) -> Option<String> {

@@ -174,21 +174,14 @@ async function planImport(
       reject("invalid", "The PIC is not an active operator.");
       continue;
     }
+    // Nomor yang sama boleh dipakai beberapa klien: diimpor dengan catatan.
     const owner = phones.get(row.phone);
-    if (owner !== undefined) {
-      reject(
-        "skipped",
-        `The WhatsApp number ${row.phone} is already registered to client ${owner}.`,
-      );
-      continue;
-    }
-    if (seenPhones.has(row.phone)) {
-      reject(
-        "skipped",
-        `The WhatsApp number ${row.phone} appears more than once in this file.`,
-      );
-      continue;
-    }
+    const phoneNote =
+      owner !== undefined
+        ? `The WhatsApp number ${row.phone} is also used by client ${owner}.`
+        : seenPhones.has(row.phone)
+          ? `The WhatsApp number ${row.phone} appears more than once in this file.`
+          : "";
     let code = row.client_code;
     if (code === "") {
       const generated =
@@ -218,6 +211,7 @@ async function planImport(
     }
     codes.add(code.toLowerCase());
     seenPhones.add(row.phone);
+    if (phoneNote) plan.warnings.push({ line: input.line, message: phoneNote });
     if (row.note_truncated) {
       plan.warnings.push({
         line: input.line,

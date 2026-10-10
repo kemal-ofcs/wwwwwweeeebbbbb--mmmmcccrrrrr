@@ -599,7 +599,7 @@ export function ClientImport() {
                                 ? "Rejected"
                                 : row.status === "skipped"
                                   ? "Skipped"
-                                  : "Imported, note shortened"}
+                                  : "Imported with a note"}
                             </td>
                             <td className="py-2">{row.message}</td>
                           </tr>
