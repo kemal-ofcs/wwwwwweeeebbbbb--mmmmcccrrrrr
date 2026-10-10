@@ -5,6 +5,7 @@ import { FeedbackBanner } from "@/components/ui/FeedbackBanner";
 import { PageHeader } from "@/components/ui/PageHeader";
 import { hasPermission } from "@/lib/auth/access";
 import { useAuth } from "@/lib/context/AuthContext";
+import { readXlsx } from "@/lib/documents/xlsx";
 import {
   importSheet,
   type SheetImportReport,
@@ -24,6 +25,7 @@ import {
   type SheetRowInput,
   sheetImportPermission,
 } from "@/lib/validations/sheet-import";
+import { ImportColumnGuide } from "./ImportColumnGuide";
 
 /**
  * Impor CSV Data Uang Masuk, Database Formulasi, dan Database Desain (PRD
@@ -52,10 +54,30 @@ const DATE_ORDER_LABEL: Record<DateOrder, string> = {
   MDY: "Month/Day/Year (12/31/2026)",
 };
 
+const TEMPLATE_NAME: Record<SheetKind, string> = {
+  FUNDS: "template-incoming-payments.xlsx",
+  FORMULA: "template-formulas.xlsx",
+  DESIGN: "template-designs.xlsx",
+};
+
 interface SheetFile {
   name: string;
   headers: string[];
   rows: string[][];
+}
+
+/** Berkas impor → baris teks: .xlsx (Excel) atau .csv (v2.8). */
+async function readSheetFile(file: File): Promise<string[][]> {
+  const name = file.name.toLowerCase();
+  if (name.endsWith(".xlsx")) {
+    return readXlsx(new Uint8Array(await file.arrayBuffer()));
+  }
+  if (name.endsWith(".xls")) {
+    throw new Error(
+      "Old .xls files are not supported. In Excel, use Save As › Excel Workbook (.xlsx).",
+    );
+  }
+  return parseCsv(await file.text());
 }
 
 export function SheetImport() {
@@ -102,10 +124,19 @@ export function SheetImport() {
   const chooseFile = async (file: File | undefined) => {
     load(kind, null);
     if (!file) return;
-    const [headers, ...rows] = parseCsv(await file.text());
+    let table: string[][];
+    try {
+      table = await readSheetFile(file);
+    } catch (cause) {
+      setError(
+        cause instanceof Error ? cause.message : "The file could not be read.",
+      );
+      return;
+    }
+    const [headers, ...rows] = table;
     if (!headers || rows.length === 0) {
       setError(
-        "The file has no data rows. Export the sheet with File › Download › CSV.",
+        "The file has no data rows. Put the headers in row 1 of the first sheet.",
       );
       return;
     }
@@ -209,12 +240,15 @@ export function SheetImport() {
             </label>
           ))}
         </fieldset>
+        <ImportColumnGuide
+          fields={SHEET_FIELDS[kind]}
+          templateName={TEMPLATE_NAME[kind]}
+        />
         <label className="app-label mt-3 grid gap-1.5">
-          CSV file (File › Download › Comma-separated values, at most{" "}
-          {IMPORT_MAX_ROWS} rows)
+          Excel (.xlsx) or CSV file, first sheet, at most {IMPORT_MAX_ROWS} rows
           <input
             type="file"
-            accept=".csv,text/csv"
+            accept=".xlsx,.csv,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             onChange={(event) => void chooseFile(event.target.files?.[0])}
             className="app-input font-normal"
           />

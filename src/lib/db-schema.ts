@@ -14,7 +14,7 @@ import { runDatabaseMigrations } from "./db-migrations";
  * Rust DAN migrasi `ALTER TABLE` di `db-migrations.ts`, supaya klien mana pun
  * bisa menyembuhkan database buatan klien lain.
  */
-export const CURRENT_SCHEMA_VERSION = 16;
+export const CURRENT_SCHEMA_VERSION = 17;
 
 /** Tabel yang wajib ada sebelum database dianggap siap dipakai. */
 export const REQUIRED_TABLES = [
@@ -846,6 +846,7 @@ export async function initDatabaseSchema(client: Client) {
       ('two_factor.reset', 'Reset another operator''s 2FA', 'Operators', 'Turn off two-step verification for another operator who lost their phone.', 1, 66),
       ('password_reset.approve', 'Approve password recovery', 'System', 'Review the requester''s photo, then hand over a password recovery code.', 1, 65),
       ('database_backup.export', 'Export database backup', 'System', 'Export the entire database into one backup file.', 1, 66),
+      ('data.export', 'Export lists to CSV', 'System', 'Export the client, sample, invoice, and incoming payment lists to CSV files. Every export is recorded in the audit log.', 1, 66),
       ('database_backup.restore', 'Restore database from backup', 'System', 'Replace all device data with the contents of a backup file.', 1, 67),
       ('operators.view', 'View operators', 'Operators', 'View operator and user account data.', 1, 70),
       ('sessions.manage', 'Manage active sessions', 'Operators', 'View every operator''s active sessions and end them.', 1, 72),

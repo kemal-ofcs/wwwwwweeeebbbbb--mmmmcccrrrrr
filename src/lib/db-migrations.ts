@@ -354,4 +354,12 @@ export async function runDatabaseMigrations(client: Client) {
           VALUES (16, 'imported-records', ?);`,
     args: [new Date().toISOString()],
   });
+
+  // Versi 17: izin `data.export` (v2.8, D-41). Nomor dan nama WAJIB sama
+  // dengan `turso.rs`.
+  await client.execute({
+    sql: `INSERT OR IGNORE INTO schema_migration (version, name, applied_at)
+          VALUES (17, 'data-export', ?);`,
+    args: [new Date().toISOString()],
+  });
 }

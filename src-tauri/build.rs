@@ -47,6 +47,7 @@ const DESKTOP_COMMANDS: &[&str] = &[
     "desktop_accept_partial_payment",
     "desktop_confirm_deposit",
     "desktop_save_document",
+    "desktop_save_xlsx",
     "desktop_upload_sample_media",
     "desktop_get_media",
     "desktop_get_session",

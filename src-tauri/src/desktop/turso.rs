@@ -1468,6 +1468,7 @@ impl TursoClient {
                 ('two_factor.reset', 'Reset another operator''s 2FA', 'Operators', 'Turn off two-step verification for another operator who lost their phone.', 1, 66),
                 ('password_reset.approve', 'Approve password recovery', 'System', 'Review the requester''s photo, then hand over a password recovery code.', 1, 65),
                 ('database_backup.export', 'Export database backup', 'System', 'Export the entire database into one backup file.', 1, 66),
+                ('data.export', 'Export lists to CSV', 'System', 'Export the client, sample, invoice, and incoming payment lists to CSV files. Every export is recorded in the audit log.', 1, 66),
                 ('database_backup.restore', 'Restore database from backup', 'System', 'Replace all device data with the contents of a backup file.', 1, 67),
                 ('operators.view', 'View operators', 'Operators', 'View operator and user account data.', 1, 70),
                 ('sessions.manage', 'Manage active sessions', 'Operators', 'View every operator''s active sessions and end them.', 1, 72),
@@ -1649,7 +1650,8 @@ impl TursoClient {
                 (13, 'production-mou', datetime('now')),
                 (14, 'approval-tokens', datetime('now')),
                 (15, 'legal-documents', datetime('now')),
-                (16, 'imported-records', datetime('now'));"#,
+                (16, 'imported-records', datetime('now')),
+                (17, 'data-export', datetime('now'));"#,
                 vec![],
             ),
             // ============ DOMAIN MAKLONOS ============
@@ -2398,6 +2400,11 @@ impl TursoClient {
             vec![],
         )
         .await?;
+        self.query_one(
+            "INSERT OR IGNORE INTO schema_migration (version, name, applied_at) VALUES (-2025, 'data-export-v1', datetime('now'));",
+            vec![],
+        )
+        .await?;
 
         Ok(())
     }
@@ -2566,7 +2573,7 @@ impl TursoClient {
             .query_one(
                 // Sentinel WAJIB dinaikkan setiap kali ensure_schema menambah
                 // tabel atau kolom — nilainya di sini dan pada INSERT harus sama.
-                "SELECT COUNT(*) AS total FROM schema_migration WHERE version = -2024;",
+                "SELECT COUNT(*) AS total FROM schema_migration WHERE version = -2025;",
                 vec![],
             )
             .await

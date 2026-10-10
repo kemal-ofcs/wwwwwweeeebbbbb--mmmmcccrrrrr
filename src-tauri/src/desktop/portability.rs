@@ -69,11 +69,16 @@ const MAX_BACKUP_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 pub fn public_output_dirs() -> Vec<std::path::PathBuf> {
     let mut dirs = Vec::new();
 
-    // 1. Direktori publik Android
-    dirs.push(std::path::PathBuf::from("/storage/emulated/0/Download"));
-    dirs.push(std::path::PathBuf::from("/sdcard/Download"));
-    dirs.push(std::path::PathBuf::from("/storage/emulated/0/Pictures"));
-    dirs.push(std::path::PathBuf::from("/storage/emulated/0/DCIM"));
+    // 1. Direktori publik Android, HANYA di build Android. Di Windows path
+    //    absolut `/storage/...` dibaca sebagai `C:\storage\...`: foldernya
+    //    dibuat diam-diam dan berkasnya "tersimpan" di tempat yang tidak pernah
+    //    dicari pengguna (invoice PDF v2.3c, ditemukan saat uji perangkat).
+    if cfg!(target_os = "android") {
+        dirs.push(std::path::PathBuf::from("/storage/emulated/0/Download"));
+        dirs.push(std::path::PathBuf::from("/sdcard/Download"));
+        dirs.push(std::path::PathBuf::from("/storage/emulated/0/Pictures"));
+        dirs.push(std::path::PathBuf::from("/storage/emulated/0/DCIM"));
+    }
 
     // 2. Folder Unduhan standar Windows / Linux / macOS
     if let Ok(user_profile) = std::env::var("USERPROFILE") {
@@ -526,6 +531,14 @@ fn import_payload(
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn desktop_tidak_pernah_memilih_folder_android() {
+        let dirs = public_output_dirs();
+        assert!(dirs
+            .iter()
+            .all(|dir| !dir.starts_with("/storage") && !dir.starts_with("/sdcard")));
+    }
 
     /// Database hub minimal yang lolos pemeriksaan `inspect_candidate`.
     fn buat_hub(path: &Path) {

@@ -71,7 +71,7 @@ const LICENSE_KEYS: [&str; 10] = [
 /// Sinkronisasi harus tetap jalan supaya data yang masih tertahan di outbox
 /// sampai ke cloud, dan ekspor harus tetap jalan karena datanya milik klien —
 /// lisensi yang habis tidak boleh menyandera data absensi dan gaji mereka.
-const READ_ONLY_EXTRA_PERMISSIONS: [&str; 2] = ["sync.retry", "database_backup.export"];
+const READ_ONLY_EXTRA_PERMISSIONS: [&str; 3] = ["sync.retry", "database_backup.export", "data.export"];
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -1196,6 +1196,7 @@ mod tests {
         assert!(read_only_allows("payroll.view"));
         assert!(read_only_allows("sync.retry"));
         assert!(read_only_allows("database_backup.export"));
+        assert!(read_only_allows("data.export"));
         assert!(!read_only_allows("scanner.use"));
         assert!(!read_only_allows("payroll.run.create"));
         assert!(!read_only_allows("database_backup.restore"));

@@ -136,6 +136,7 @@ pub fn run() {
             desktop::commands::desktop_accept_partial_payment,
             desktop::commands::desktop_confirm_deposit,
             desktop::commands::desktop_save_document,
+            desktop::commands::desktop_save_xlsx,
             desktop::commands::desktop_upload_sample_media,
             desktop::commands::desktop_get_media,
         ])

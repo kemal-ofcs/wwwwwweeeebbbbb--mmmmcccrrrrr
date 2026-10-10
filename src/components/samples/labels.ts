@@ -1,4 +1,5 @@
 import type { StatusTone } from "@/components/ui/StatusBadge";
+import type { SampleRequestRecord } from "@/lib/gateways/samples";
 import type { SampleAction } from "@/lib/validations/sample";
 
 /** Label tampilan status dan langkah tiket sampel (PRD FR-06.4). */
@@ -176,4 +177,68 @@ export function timeInStatus(changedAt: string, nowMs = Date.now()) {
   const days = Math.floor(hours / 24);
   if (days < 14) return `${days} d`;
   return `${Math.floor(days / 7)} wk`;
+}
+
+/**
+ * Giliran siapa berikutnya (temuan uji perangkat v2: setelah "Accepted by
+ * RnD" tidak terlihat bahwa CS yang harus Proceed). Hanya tampilan; aturan
+ * dan gerbangnya tetap di `applySampleAction`, desain, dan MoU. `null` =
+ * tiket selesai.
+ */
+export function nextSampleStep(row: SampleRequestRecord): string | null {
+  const payment = (fee: string) =>
+    row.fee_paid === 1
+      ? "Finance: mark Payment received."
+      : `Finance: create the ${fee} invoice and allocate the client's payment to it, then mark Payment received.`;
+  switch (row.status) {
+    case "DRAFT":
+      return "CS: submit the request to RnD.";
+    case "RND_REVIEW":
+      return "RnD: accept or reject the request.";
+    case "RND_ACCEPTED":
+      return "CS: proceed once the client confirms.";
+    case "WAITING_SAMPLE_PAYMENT":
+      return payment("Sample fee");
+    case "IN_RND":
+      return "RnD: make the sample, then mark it ready.";
+    case "SAMPLE_READY":
+      if (row.unit_price_idr == null)
+        return "Finance: record the price of this sample.";
+      if (row.is_test_requested === 1 && row.test_paid !== 1)
+        return "Finance: the Testing fee invoice must be paid before the sample is sent.";
+      if (row.mockup_ready !== 1)
+        return "Design: upload the mockup before the sample is sent.";
+      return "CS: mark the sample as sent.";
+    case "SAMPLE_SENT":
+      return "CS: record the client's answer, or send an approval link.";
+    case "PENDING_FEE_ASSESSMENT":
+      return "Finance: set the revision fee (0 waives it).";
+    case "WAITING_REVISION_PAYMENT":
+      return payment("Revision fee");
+    case "CLIENT_ACC":
+      break;
+    default:
+      return null;
+  }
+  if (row.design_status && row.design_status !== "DUMMY_ACC") {
+    if (
+      row.design_status === "MOCKUP" ||
+      row.design_status === "DUMMY_REVISION"
+    )
+      return "Design: print the dummy once the Dummy fee invoice is paid.";
+    if (row.design_status === "DUMMY_PRINTING")
+      return "Design: send the dummy to the client.";
+    if (row.design_status === "DUMMY_SENT")
+      return "CS: record the client's answer on the dummy.";
+  }
+  if (!row.mou_status)
+    return "CS: draft the MoU when the client is ready to produce.";
+  if (row.mou_status === "DRAFT") return "CS: send the MoU to the client.";
+  if (row.mou_status === "SENT")
+    return "CS: record the client's answer on the MoU.";
+  if (row.dp_paid !== 1)
+    return "Finance: create the Down payment invoice and allocate the client's payment to it.";
+  if ((row.legal_open ?? 0) > 0)
+    return "Legal and RnD: record the legal documents.";
+  return "All documents are done. Production planning comes next.";
 }

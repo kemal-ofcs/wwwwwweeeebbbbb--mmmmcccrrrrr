@@ -1282,10 +1282,48 @@ pub async fn desktop_sync_now(
     result
 }
 
+/// Perubahan yang ditolak cloud. Pemegang `sync.retry` melihat semua entri
+/// di perangkat ini; operator lain hanya miliknya sendiri.
 #[tauri::command]
 pub fn desktop_get_sync_conflicts(state: State<'_, DesktopState>) -> Result<Value, CommandError> {
-    require_permission(&state, "sync.view")?;
-    sync::conflicts(&state)
+    let actor = require_permission(&state, "sync.view")?;
+    sync::conflicts(&state, actor.id, operator_can(&actor, "sync.retry"))
+}
+
+/// Selesaikan perubahan yang ditolak cloud: buang (pakai versi cloud) atau
+/// kirim ulang. Pemilik perubahan boleh menyelesaikan miliknya sendiri;
+/// milik orang lain menuntut `sync.retry`. Tercatat di log audit.
+fn resolve_rejected(
+    state: &DesktopState,
+    actor: &OperatorUser,
+    event_id: Option<&str>,
+    retry: bool,
+) -> Result<(), CommandError> {
+    let see_all = operator_can(actor, "sync.retry");
+    let client_id = sync::ensure_client_id(state)?;
+    let mut connection = storage::database(&state.data_dir)?;
+    let transaction = connection.transaction().map_err(|_| CommandError::internal())?;
+    let entries = if retry {
+        sync::resolve_conflicts_local(&transaction, event_id, actor.id, see_all)?
+    } else {
+        sync::resolve_conflicts(&transaction, event_id, actor.id, see_all)?
+    };
+    if entries.is_empty() {
+        return Err(CommandError::new("OPERATIONAL_NOT_FOUND", "The rejected change was not found."));
+    }
+    write_audit(
+        &transaction,
+        &client_id,
+        AuditEntry {
+            actor,
+            action: if retry { "sync.conflict_retry" } else { "sync.conflict_discard" },
+            entity_type: "sync",
+            entity_id: &client_id,
+            summary: json!({ "count": entries.len(), "entries": entries }),
+            on_behalf_of: None,
+        },
+    )?;
+    transaction.commit().map_err(|_| CommandError::internal())
 }
 
 #[tauri::command]
@@ -1303,8 +1341,8 @@ pub async fn desktop_resolve_sync_conflicts(
     state: State<'_, DesktopState>,
     event_id: Option<String>,
 ) -> Result<DesktopSyncStatus, CommandError> {
-    require_permission(&state, "sync.retry")?;
-    sync::resolve_conflicts(&state, event_id.as_deref())?;
+    let actor = require_permission(&state, "sync.view")?;
+    resolve_rejected(&state, &actor, event_id.as_deref(), false)?;
     desktop_sync_now(state).await
 }
 
@@ -1313,8 +1351,8 @@ pub async fn desktop_resolve_sync_conflicts_local(
     state: State<'_, DesktopState>,
     event_id: Option<String>,
 ) -> Result<DesktopSyncStatus, CommandError> {
-    require_permission(&state, "sync.retry")?;
-    sync::resolve_conflicts_local(&state, event_id.as_deref())?;
+    let actor = require_permission(&state, "sync.view")?;
+    resolve_rejected(&state, &actor, event_id.as_deref(), true)?;
     desktop_sync_now(state).await
 }
 
@@ -5783,16 +5821,135 @@ pub(crate) const DOCUMENT_MAX_BYTES: usize = 10 * 1024 * 1024;
 /// Nama berkas dokumen yang aman: tanpa karakter path, berakhiran `.pdf`,
 /// paling panjang 120 karakter. `None` = tidak sah.
 pub(crate) fn document_file_name(raw: &str) -> Option<String> {
+    safe_file_name(raw, ".pdf")
+}
+
+/// Aturan `document_file_name` untuk ekstensi lain (.xlsx v2.8).
+pub(crate) fn safe_file_name(raw: &str, extension: &str) -> Option<String> {
     let name: String = raw
         .trim()
         .chars()
         .map(|char| if matches!(char, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') || char.is_control() { '_' } else { char })
         .collect();
-    let valid = name.to_ascii_lowercase().ends_with(".pdf")
-        && name.len() > 4
+    let valid = name.to_ascii_lowercase().ends_with(extension)
+        && name.len() > extension.len()
         && name.chars().count() <= 120
         && !name.starts_with('.');
     valid.then_some(name)
+}
+
+/// Daftar yang boleh diekspor (v2.8, PRD D-41); `template` = contoh impor.
+pub(crate) const EXPORT_SUBJECTS: &[&str] = &["clients", "samples", "invoices", "funds", "template"];
+
+/// Template impor .xlsx paling besar sekian: header + satu baris contoh
+/// berukuran beberapa KB, jadi jalur tanpa `data.export` ini tidak bisa
+/// membawa daftar data keluar. Isi .xlsx (zip) tidak dibaca di Rust.
+pub(crate) const TEMPLATE_MAX_BYTES: usize = 16 * 1024;
+
+/// Izin yang dituntut `require_permission` untuk menyimpan .xlsx: ekspor data
+/// menuntut `data.export`; template impor hanya dasar sesi, lalu diperiksa
+/// `checked_xlsx`.
+pub(crate) fn export_permission(purpose: &str) -> &'static str {
+    if purpose == "template" {
+        "sync.view"
+    } else {
+        "data.export"
+    }
+}
+
+/// Periksa .xlsx buatan webview sebelum disimpan: nama aman, isi berupa zip,
+/// template hanya untuk pemegang izin impor dan sekecil `TEMPLATE_MAX_BYTES`.
+pub(crate) fn checked_xlsx(
+    actor: &OperatorUser,
+    file_name: &str,
+    data_base64: &str,
+    purpose: &str,
+    subject: &str,
+) -> Result<(String, Vec<u8>), CommandError> {
+    let invalid = |message: &str| CommandError::new("DOCUMENT_INVALID", message.to_owned());
+    let template = purpose == "template";
+    if !(template || purpose == "export") || !EXPORT_SUBJECTS.contains(&subject) || template != (subject == "template") {
+        return Err(invalid("Choose what to export."));
+    }
+    if template
+        && !["clients.manage", "finance.manage", "rnd.manage", "design.manage"]
+            .iter()
+            .any(|permission| operator_can(actor, permission))
+    {
+        return Err(CommandError::new("DESKTOP_ACCESS_DENIED", "Access denied for this action."));
+    }
+    let name = safe_file_name(file_name, ".xlsx").ok_or_else(|| invalid("The file name is invalid."))?;
+    let limit = if template { TEMPLATE_MAX_BYTES } else { DOCUMENT_MAX_BYTES };
+    let bytes = BASE64_STANDARD
+        .decode(data_base64.as_bytes())
+        .ok()
+        .filter(|bytes| bytes.starts_with(b"PK\x03\x04") && bytes.len() <= limit)
+        .ok_or_else(|| invalid("The file is invalid or too large. Narrow the list with the filters first."))?;
+    Ok((name, bytes))
+}
+
+/// Catat satu ekspor data di log audit (keputusan C v2.8). Template tidak
+/// dicatat karena tidak membawa data. `rows` dari webview, hanya untuk dibaca.
+pub(crate) fn record_export(
+    state: &DesktopState,
+    actor: &OperatorUser,
+    subject: &str,
+    file_name: &str,
+    rows: i64,
+) -> Result<(), CommandError> {
+    if subject == "template" {
+        return Ok(());
+    }
+    let client_id = sync::ensure_client_id(state)?;
+    let mut connection = storage::database(&state.data_dir)?;
+    let transaction = connection.transaction().map_err(|_| CommandError::internal())?;
+    write_audit(
+        &transaction,
+        &client_id,
+        AuditEntry {
+            actor,
+            action: "data.export",
+            entity_type: "export",
+            entity_id: subject,
+            summary: json!({ "subject": subject, "file_name": file_name, "rows": rows.max(0) }),
+            on_behalf_of: None,
+        },
+    )?;
+    transaction.commit().map_err(|_| CommandError::internal())
+}
+
+/// Simpan .xlsx (ekspor daftar atau template impor, v2.8) ke folder
+/// Downloads tanpa menimpa berkas yang ada. Android memakai `mobile_save_xlsx`.
+#[tauri::command]
+pub fn desktop_save_xlsx(
+    state: State<'_, DesktopState>,
+    file_name: String,
+    data_base64: String,
+    purpose: String,
+    subject: String,
+    rows: i64,
+) -> Result<Value, CommandError> {
+    let actor = require_permission(&state, export_permission(&purpose))?;
+    let (name, bytes) = checked_xlsx(&actor, &file_name, &data_base64, &purpose, &subject)?;
+    for dir in portability::public_output_dirs() {
+        if !dir.exists() && std::fs::create_dir_all(&dir).is_err() {
+            continue;
+        }
+        let Some(target) = (1..=999)
+            .map(|n| dir.join(numbered_file_name(&name, n)))
+            .find(|candidate| !candidate.exists())
+        else {
+            continue;
+        };
+        if std::fs::write(&target, &bytes).is_ok() {
+            record_export(&state, &actor, &subject, &name, rows)?;
+            return Ok(json!({ "path": target.to_string_lossy() }));
+        }
+    }
+    Err(CommandError::new(
+        "DOCUMENT_SAVE_FAILED",
+        "The file could not be saved to the Downloads folder.",
+    ))
 }
 
 /// `INV.pdf` → `INV (2).pdf` untuk `n = 2`; `n = 1` = nama asli (keputusan E).

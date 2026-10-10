@@ -45,6 +45,7 @@ import {
   DESIGN_STATUS_LABEL,
   LEGAL_STATUS_LABEL,
   MOU_STATUS_LABEL,
+  nextSampleStep,
   SAMPLE_ACTION_LABEL,
   SAMPLE_ACTION_PAST,
   SAMPLE_STATUS_LABEL,
@@ -303,6 +304,12 @@ export function SampleDetail({
                 {request.client_code} · {request.client_name}
               </span>
             </div>
+            {nextSampleStep(request) ? (
+              <p className="rounded-md bg-surface-container-low px-3 py-2 text-body-sm text-on-surface">
+                <span className="font-semibold">Next step:</span>{" "}
+                {nextSampleStep(request)}
+              </p>
+            ) : null}
 
             <section
               aria-label="Revision quota"

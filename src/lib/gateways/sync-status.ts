@@ -76,10 +76,13 @@ export function requestSyncNow() {
   window.dispatchEvent(new CustomEvent(SYNC_REQUEST_EVENT));
 }
 
+/** Perubahan yang ditolak cloud; hanya milik sendiri tanpa `sync.retry`. */
 export interface SyncConflict {
   eventId: string;
   domain: string;
+  operation: string;
   entityKey: string;
+  /** Pesan penolakan dari cloud, mis. "This invoice is already paid." */
   reason: string;
   createdAt: number;
 }

@@ -23,7 +23,7 @@ use super::{
 /// `CURRENT_SCHEMA_VERSION` di `web-desktop/src/lib/db-schema.ts` setiap kali
 /// migrasi baru ditambahkan, karena keduanya membaca tabel `schema_migration`
 /// yang sama di Turso.
-pub const CLIENT_SCHEMA_VERSION: i64 = 16;
+pub const CLIENT_SCHEMA_VERSION: i64 = 17;
 
 /// Hanya `cloud > client` yang berbahaya; `cloud <= client` adalah kondisi normal.
 fn is_client_schema_outdated(cloud_version: i64) -> bool {
@@ -2073,8 +2073,8 @@ pub fn release_quarantine(
 }
 
 /// Buang: hapus entri karantina dari outbox di transaksi yang sama dengan
-/// catatan auditnya (`apply`). Data di tabel lokal TIDAK disentuh; pull
-/// berikutnya menyamakannya dengan cloud. Mengembalikan entri yang dibuang.
+/// catatan auditnya (`apply`), lalu samakan barisnya dengan cloud
+/// (`forget_local_entity`). Mengembalikan entri yang dibuang.
 pub fn discard_quarantine(
     transaction: &Transaction<'_>,
     event_ids: &[String],
@@ -2104,6 +2104,13 @@ pub fn discard_quarantine(
                 .map_err(|_| CommandError::internal())?;
             discarded.push(row);
         }
+    }
+    for row in &discarded {
+        forget_local_entity(
+            transaction,
+            row["domain"].as_str().unwrap_or_default(),
+            row["entityKey"].as_str().unwrap_or_default(),
+        )?;
     }
     Ok(discarded)
 }
@@ -2249,28 +2256,33 @@ pub fn status(state: &DesktopState) -> Result<DesktopSyncStatus, CommandError> {
     })
 }
 
-pub fn conflicts(state: &DesktopState) -> Result<Value, CommandError> {
+/// Perubahan yang ditolak cloud (konflik), terbaru dulu. Pemegang
+/// `sync.retry` melihat semua entri di perangkat ini; operator lain hanya
+/// miliknya sendiri (temuan uji perangkat v2: role Finance tidak bisa
+/// menyelesaikan konflik alokasinya sendiri).
+pub fn conflicts(state: &DesktopState, operator_id: i64, see_all: bool) -> Result<Value, CommandError> {
     let connection = storage::database(&state.data_dir)?;
     let mut statement = connection
         .prepare(
             r#"
-      SELECT event_id, domain, entity_key, local_payload_json,
-             server_payload_json, reason, created_at
-      FROM desktop_sync_conflict WHERE resolved_at IS NULL
-      ORDER BY created_at DESC LIMIT 100;
+      SELECT c.event_id, c.domain, o.operation, c.entity_key, c.reason, c.created_at
+      FROM desktop_sync_conflict c
+      JOIN desktop_sync_outbox o ON o.event_id = c.event_id
+      WHERE c.resolved_at IS NULL AND o.status = 'conflict'
+        AND (?1 = 1 OR o.operator_id = ?2)
+      ORDER BY c.created_at DESC LIMIT 100;
       "#,
         )
         .map_err(|_| CommandError::internal())?;
     let rows = statement
-        .query_map([], |row| {
+        .query_map(params![i64::from(see_all), operator_id], |row| {
             Ok(json!({
                 "eventId": row.get::<_, String>(0)?,
                 "domain": row.get::<_, String>(1)?,
-                "entityKey": row.get::<_, String>(2)?,
-                "localPayload": serde_json::from_str::<Value>(&row.get::<_, String>(3)?).unwrap_or(Value::Null),
-                "serverPayload": row.get::<_, Option<String>>(4)?.and_then(|value| serde_json::from_str::<Value>(&value).ok()),
-                "reason": row.get::<_, String>(5)?,
-                "createdAt": row.get::<_, i64>(6)?,
+                "operation": row.get::<_, String>(2)?,
+                "entityKey": row.get::<_, String>(3)?,
+                "reason": row.get::<_, String>(4)?,
+                "createdAt": row.get::<_, i64>(5)?,
             }))
         })
         .map_err(|_| CommandError::internal())?;
@@ -2302,79 +2314,139 @@ pub fn retry_failed(state: &DesktopState, event_id: Option<&str>) -> Result<(), 
     Ok(())
 }
 
-pub fn resolve_conflicts(state: &DesktopState, event_id: Option<&str>) -> Result<(), CommandError> {
-    let mut connection = storage::database(&state.data_dir)?;
-    let transaction = connection
-        .transaction()
+/// Konflik yang boleh disentuh operator ini: satu (`event_id`) atau semua.
+fn owned_conflicts(
+    transaction: &Transaction<'_>,
+    event_id: Option<&str>,
+    operator_id: i64,
+    see_all: bool,
+) -> Result<Vec<(String, String, String, String)>, CommandError> {
+    let mut statement = transaction
+        .prepare(
+            r#"
+      SELECT c.event_id, c.domain, o.operation, c.entity_key
+      FROM desktop_sync_conflict c
+      JOIN desktop_sync_outbox o ON o.event_id = c.event_id
+      WHERE c.resolved_at IS NULL AND o.status = 'conflict'
+        AND (?1 IS NULL OR c.event_id = ?1)
+        AND (?2 = 1 OR o.operator_id = ?3);
+      "#,
+        )
         .map_err(|_| CommandError::internal())?;
-    let now = storage::now_epoch_seconds();
-    if let Some(event_id) = event_id {
-        transaction
-            .execute(
-                "UPDATE desktop_sync_conflict SET resolved_at = ? WHERE event_id = ? AND resolved_at IS NULL;",
-                params![now, event_id],
-            )
-            .map_err(|_| CommandError::internal())?;
-        transaction
-            .execute(
-                "UPDATE desktop_sync_outbox SET status = 'synced', next_retry_at = NULL, updated_at = ? WHERE event_id = ? AND status = 'conflict';",
-                params![now, event_id],
-            )
-            .map_err(|_| CommandError::internal())?;
-    } else {
-        transaction
-            .execute(
-                "UPDATE desktop_sync_conflict SET resolved_at = ? WHERE resolved_at IS NULL;",
-                [now],
-            )
-            .map_err(|_| CommandError::internal())?;
-        transaction
-            .execute(
-                "UPDATE desktop_sync_outbox SET status = 'synced', next_retry_at = NULL, updated_at = ? WHERE status = 'conflict';",
-                [now],
-            )
-            .map_err(|_| CommandError::internal())?;
-    }
-    transaction.commit().map_err(|_| CommandError::internal())
+    let rows = statement
+        .query_map(params![event_id, i64::from(see_all), operator_id], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })
+        .map_err(|_| CommandError::internal())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| CommandError::internal());
+    rows
 }
 
-pub fn resolve_conflicts_local(
-    state: &DesktopState,
+fn conflict_summary(entries: &[(String, String, String, String)]) -> Vec<Value> {
+    entries
+        .iter()
+        .map(|(event_id, domain, operation, entity_key)| {
+            json!({ "eventId": event_id, "domain": domain, "operation": operation, "entityKey": entity_key })
+        })
+        .collect()
+}
+
+/// Pakai versi cloud: buang perubahan yang ditolak dari outbox, lalu samakan
+/// barisnya dengan cloud (`forget_local_entity`). Mengembalikan entri yang
+/// dibuang untuk log audit.
+pub fn resolve_conflicts(
+    transaction: &Transaction<'_>,
     event_id: Option<&str>,
-) -> Result<(), CommandError> {
-    let mut connection = storage::database(&state.data_dir)?;
-    let transaction = connection
-        .transaction()
-        .map_err(|_| CommandError::internal())?;
-    let now = storage::now_epoch_seconds();
-    if let Some(event_id) = event_id {
+    operator_id: i64,
+    see_all: bool,
+) -> Result<Vec<Value>, CommandError> {
+    let entries = owned_conflicts(transaction, event_id, operator_id, see_all)?;
+    for (event_id, _, _, _) in &entries {
+        // Baris konflik merujuk outbox (FOREIGN KEY), jadi dihapus lebih dulu.
         transaction
-            .execute(
-                "DELETE FROM desktop_sync_conflict WHERE event_id = ?;",
-                params![event_id],
-            )
+            .execute("DELETE FROM desktop_sync_conflict WHERE event_id = ?1;", [event_id])
+            .map_err(|_| CommandError::internal())?;
+        transaction
+            .execute("DELETE FROM desktop_sync_outbox WHERE event_id = ?1;", [event_id])
+            .map_err(|_| CommandError::internal())?;
+    }
+    for (_, domain, _, entity_key) in &entries {
+        forget_local_entity(transaction, domain, entity_key)?;
+    }
+    Ok(conflict_summary(&entries))
+}
+
+/// Kirim ulang perubahan yang ditolak apa adanya, tanpa `base_revision`.
+pub fn resolve_conflicts_local(
+    transaction: &Transaction<'_>,
+    event_id: Option<&str>,
+    operator_id: i64,
+    see_all: bool,
+) -> Result<Vec<Value>, CommandError> {
+    let entries = owned_conflicts(transaction, event_id, operator_id, see_all)?;
+    let now = storage::now_epoch_seconds();
+    for (event_id, _, _, _) in &entries {
+        transaction
+            .execute("DELETE FROM desktop_sync_conflict WHERE event_id = ?1;", [event_id])
             .map_err(|_| CommandError::internal())?;
         transaction
             .execute(
-                "UPDATE desktop_sync_outbox SET status = 'pending', base_revision = NULL, attempt_count = 0, last_error = NULL, updated_at = ? WHERE event_id = ? AND status = 'conflict';",
+                "UPDATE desktop_sync_outbox SET status = 'pending', base_revision = NULL, attempt_count = 0, last_error = NULL, next_retry_at = NULL, updated_at = ?1 WHERE event_id = ?2 AND status = 'conflict';",
                 params![now, event_id],
             )
             .map_err(|_| CommandError::internal())?;
-    } else {
+    }
+    Ok(conflict_summary(&entries))
+}
+
+/// Samakan satu entitas dengan cloud setelah perubahan lokalnya dibuang
+/// (konflik atau karantina). Baris yang pernah datang dari cloud kehilangan
+/// jejak hash-nya, jadi pull berikutnya menimpanya dengan versi cloud; baris
+/// buatan perangkat yang tidak pernah diterima cloud dihapus (tanpa ini
+/// alokasi yang ditolak tetap terhitung di perangkat selamanya). Dilewati
+/// selama entri lain untuk entitas yang sama masih mengantre.
+/// ponytail: hanya baris berkunci `entity_key`; baris pendamping (lead dari
+/// `client/register`, linimasa tiket) tertinggal sampai ada pembersih per rute.
+pub fn forget_local_entity(
+    transaction: &Transaction<'_>,
+    domain: &str,
+    entity_key: &str,
+) -> Result<(), CommandError> {
+    let queued: bool = transaction
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM desktop_sync_outbox WHERE domain = ?1 AND entity_key = ?2 AND status IN ('pending', 'failed', 'conflict'));",
+            params![domain, entity_key],
+            |row| row.get(0),
+        )
+        .map_err(|_| CommandError::internal())?;
+    if queued {
+        return Ok(());
+    }
+    let traced = transaction
+        .execute(
+            "DELETE FROM desktop_entity_revision WHERE domain = ?1 AND entity_key = ?2;",
+            params![domain, entity_key],
+        )
+        .map_err(|_| CommandError::internal())?;
+    if traced > 0 {
+        return Ok(());
+    }
+    for table in SNAPSHOT_TABLES
+        .iter()
+        .filter(|table| table.domain == domain && !table.read_only)
+    {
         transaction
             .execute(
-                "DELETE FROM desktop_sync_conflict;",
-                [],
-            )
-            .map_err(|_| CommandError::internal())?;
-        transaction
-            .execute(
-                "UPDATE desktop_sync_outbox SET status = 'pending', base_revision = NULL, attempt_count = 0, last_error = NULL, updated_at = ? WHERE status = 'conflict';",
-                [now],
+                &format!(
+                    "DELETE FROM {} WHERE CAST({} AS TEXT) = ?1;",
+                    table.table, table.entity_column
+                ),
+                [entity_key],
             )
             .map_err(|_| CommandError::internal())?;
     }
-    transaction.commit().map_err(|_| CommandError::internal())
+    Ok(())
 }
 
 pub fn clear_failed(state: &DesktopState, event_id: Option<&str>) -> Result<(), CommandError> {
@@ -2572,6 +2644,110 @@ mod tests {
         let status = super::status(&state).expect("status");
         assert_eq!((status.pending, status.quarantined), (2, 0));
         super::clear_session_ended();
+    }
+
+    /// Konflik dari dua perangkat offline (uji perangkat v2): pemilik boleh
+    /// membuang perubahannya sendiri, dan Buang menyamakan data lokal dengan
+    /// cloud: alokasi yang tidak pernah diterima cloud dihapus, baris yang
+    /// berasal dari cloud kehilangan jejak hash supaya pull menimpanya.
+    #[test]
+    fn buang_konflik_menyamakan_data_lokal_dengan_cloud() {
+        let directory = tempdir().expect("direktori sementara");
+        storage::initialize(directory.path()).expect("skema lokal");
+        let state = DesktopState {
+            server_origin: RwLock::new(
+                crate::desktop::app_identity::DEFAULT_SERVER_ORIGIN.to_owned(),
+            ),
+            offline_max_age_hours: 24,
+            data_dir: directory.path().to_path_buf(),
+            http: Client::new(),
+            turso_config: RwLock::new(None),
+            session: Mutex::new(None),
+            vault_lock: Mutex::new(()),
+        };
+        let client_id = super::ensure_client_id(&state).expect("client id");
+        let conflicted = |operator: i64, operation: &str, key: &str| {
+            let mut connection = storage::database(&state.data_dir).expect("db");
+            let transaction = connection.transaction().expect("tx");
+            super::set_current_actor(Some(operator), None);
+            let id = super::enqueue(
+                &transaction,
+                &client_id,
+                "fund",
+                operation,
+                key,
+                &serde_json::json!({ "id": key }),
+                None,
+            )
+            .expect("enqueue");
+            transaction
+                .execute("UPDATE desktop_sync_outbox SET status = 'conflict' WHERE event_id = ?1;", [&id])
+                .expect("konflik");
+            transaction
+                .execute(
+                    "INSERT INTO desktop_sync_conflict (event_id, domain, entity_key, local_payload_json, reason, created_at) VALUES (?1, 'fund', ?2, '{}', 'This invoice is already paid.', 1);",
+                    [&id, key],
+                )
+                .expect("catat konflik");
+            transaction.commit().expect("commit");
+            id
+        };
+        {
+            let connection = storage::database(&state.data_dir).expect("db");
+            connection
+                .execute_batch(
+                    "INSERT INTO incoming_funds (id, received_on, amount_idr, created_at, updated_at) VALUES ('f1', '2026-10-10', 200000, '2026-10-10 01:00:00', '2026-10-10 01:00:00');
+                     INSERT INTO desktop_entity_revision (domain, entity_key, server_revision, payload_hash, updated_at) VALUES ('fund', 'f1', 1, 'hash-cloud', 1);
+                     INSERT INTO fund_allocations (id, fund_id, invoice_id, amount_idr, recorded_at) VALUES ('a-hp', 'f1', 'i1', 200000, '2026-10-10 02:00:00');",
+                )
+                .expect("seed");
+        }
+        let alokasi = conflicted(7, "allocate", "a-hp");
+        let batal = conflicted(9, "void", "f1");
+        super::set_current_actor(None, None);
+
+        let count = |sql: &str| -> i64 {
+            storage::database(&state.data_dir)
+                .expect("db")
+                .query_row(sql, [], |row| row.get(0))
+                .expect("hitung")
+        };
+        // Operator 7 hanya melihat dan membuang miliknya sendiri.
+        let milik_7 = super::conflicts(&state, 7, false).expect("daftar");
+        assert_eq!(milik_7.as_array().map(Vec::len), Some(1));
+        assert_eq!(milik_7[0]["reason"], "This invoice is already paid.");
+        let mut connection = storage::database(&state.data_dir).expect("db");
+        let transaction = connection.transaction().expect("tx");
+        let dibuang = super::resolve_conflicts(&transaction, None, 7, false).expect("buang");
+        transaction.commit().expect("commit");
+        assert_eq!(dibuang.len(), 1);
+        assert_eq!(dibuang[0]["eventId"], alokasi.as_str());
+        assert_eq!(count("SELECT COUNT(*) FROM fund_allocations;"), 0);
+        assert_eq!(count("SELECT COUNT(*) FROM desktop_sync_conflict;"), 1);
+
+        // Kirim ulang milik operator 9 oleh pemegang `sync.retry`.
+        let transaction = connection.transaction().expect("tx");
+        super::resolve_conflicts_local(&transaction, Some(&batal), 1, true).expect("ulang");
+        transaction.commit().expect("commit");
+        assert_eq!(count("SELECT COUNT(*) FROM desktop_sync_outbox WHERE status = 'pending';"), 1);
+
+        // Buang baris yang berasal dari cloud: barisnya tetap, jejak hash hilang.
+        connection
+            .execute("UPDATE desktop_sync_outbox SET status = 'conflict' WHERE event_id = ?1;", [&batal])
+            .expect("konflik lagi");
+        connection
+            .execute(
+                "INSERT INTO desktop_sync_conflict (event_id, domain, entity_key, local_payload_json, reason, created_at) VALUES (?1, 'fund', 'f1', '{}', 'x', 2);",
+                [&batal],
+            )
+            .expect("catat");
+        let transaction = connection.transaction().expect("tx");
+        assert_eq!(super::resolve_conflicts(&transaction, None, 7, false).expect("bukan miliknya").len(), 0);
+        assert_eq!(super::resolve_conflicts(&transaction, None, 1, true).expect("buang").len(), 1);
+        transaction.commit().expect("commit");
+        assert_eq!(count("SELECT COUNT(*) FROM incoming_funds;"), 1);
+        assert_eq!(count("SELECT COUNT(*) FROM desktop_entity_revision WHERE entity_key = 'f1';"), 0);
+        assert_eq!(count("SELECT COUNT(*) FROM desktop_sync_outbox;"), 0);
     }
 
     #[test]

@@ -10,6 +10,7 @@ import {
   useState,
 } from "react";
 import { describeDays, LeadDetail } from "@/components/clients/LeadDetail";
+import { ExportButton } from "@/components/imports/ExportButton";
 import { FeedbackBanner } from "@/components/ui/FeedbackBanner";
 import { Icon } from "@/components/ui/Icon";
 import { Modal } from "@/components/ui/Modal";
@@ -17,6 +18,7 @@ import { PageHeader } from "@/components/ui/PageHeader";
 import { StatusBadge, type StatusTone } from "@/components/ui/StatusBadge";
 import { hasPermission } from "@/lib/auth/access";
 import { useAuth } from "@/lib/context/AuthContext";
+import { excelDateTime } from "@/lib/documents/xlsx";
 import {
   type ClientDraft,
   type ClientRecord,
@@ -36,6 +38,7 @@ import {
   CLIENT_TEXT_MAX,
   type LeadSegment,
 } from "@/lib/validations/client";
+import { IMPORT_FIELDS } from "@/lib/validations/client-import";
 
 /**
  * Workspace CS: pipeline lead, Antrian Cold, dan form intake (PRD FR-04,
@@ -415,6 +418,34 @@ export function ClientWorkspace() {
           </select>
         </label>
       </div>
+
+      {/* Kolom = kolom impor, jadi berkasnya bisa diimpor ulang (v2.8). */}
+      <ExportButton
+        subject="clients"
+        rows={() => {
+          const code = (id: string) =>
+            options.find((option) => option.id === id)?.code ?? "";
+          return [
+            IMPORT_FIELDS.map((field) => field.header),
+            ...filtered.map((client) => [
+              excelDateTime(client.created_at),
+              code(client.channel_option_id),
+              client.pic_cs_name ?? "",
+              client.client_code,
+              client.name,
+              client.phone_normalized,
+              client.address,
+              client.city,
+              client.province,
+              client.needs_notes,
+              code(client.product_category_option_id),
+              excelDateTime(client.last_client_response_at),
+              client.total_followups,
+              "",
+            ]),
+          ];
+        }}
+      />
 
       <section className="app-panel overflow-hidden">
         {loading ? (

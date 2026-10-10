@@ -1,12 +1,14 @@
 "use client";
 
 import { type FormEvent, useMemo, useRef, useState } from "react";
+import { SAMPLE_STATUS_LABEL } from "@/components/samples/labels";
 import { FeedbackBanner } from "@/components/ui/FeedbackBanner";
 import { Modal } from "@/components/ui/Modal";
 import type { ClientRecord } from "@/lib/gateways/clients";
 import { createInvoice, type FinanceOverview } from "@/lib/gateways/finance";
 import type { SampleRequestRecord } from "@/lib/gateways/samples";
 import { requestSyncNow } from "@/lib/gateways/sync-status";
+import { formatDateTime } from "@/lib/utils/format";
 import {
   computeInvoice,
   INVOICE_DESCRIPTION_MAX,
@@ -181,8 +183,10 @@ export function InvoiceForm({
             >
               <option value="">None (other charge)</option>
               {clientSamples.map((row) => (
+                // Brand bisa sama di beberapa tiket: status dan waktu
+                // dibuat membedakannya (temuan uji perangkat v2).
                 <option key={row.id} value={row.id}>
-                  {row.brand_name}
+                  {`${row.brand_name} · ${SAMPLE_STATUS_LABEL[row.status] ?? row.status} · ${formatDateTime(row.created_at)}`}
                 </option>
               ))}
             </select>

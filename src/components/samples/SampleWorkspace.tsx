@@ -2,11 +2,13 @@
 
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { ExportButton } from "@/components/imports/ExportButton";
 import { FeedbackBanner } from "@/components/ui/FeedbackBanner";
 import { PageHeader } from "@/components/ui/PageHeader";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import { hasPermission } from "@/lib/auth/access";
 import { useAuth } from "@/lib/context/AuthContext";
+import { excelDateTime, excelDay } from "@/lib/documents/xlsx";
 import {
   type ClientRecord,
   listClients,
@@ -378,6 +380,36 @@ export function SampleWorkspace() {
           />
         </label>
       </div>
+
+      <ExportButton
+        subject="samples"
+        rows={() => [
+          [
+            "Client code",
+            "Client",
+            "Brand",
+            "Status",
+            "Product type",
+            "Quantity",
+            "Deadline",
+            "Revision",
+            "Unit price (IDR)",
+            "Created",
+          ],
+          ...visible.map((row) => [
+            row.client_code,
+            row.client_name,
+            row.brand_name,
+            SAMPLE_STATUS_LABEL[row.status] ?? row.status,
+            optionLabel(row.product_category_option_id),
+            row.sample_qty,
+            excelDay(row.deadline_at.slice(0, 10)),
+            row.revision_index,
+            row.unit_price_idr,
+            excelDateTime(row.created_at),
+          ]),
+        ]}
+      />
 
       <section className="app-panel overflow-hidden">
         {loading ? (

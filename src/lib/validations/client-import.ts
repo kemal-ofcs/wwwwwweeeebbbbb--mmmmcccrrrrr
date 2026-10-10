@@ -29,22 +29,96 @@ export const IMPORT_NOTE_PREFIX = "Imported from sheet: ";
 export const DATE_ORDERS = ["DMY", "MDY"] as const;
 export type DateOrder = (typeof DATE_ORDERS)[number];
 
-/** Kolom sheet menurut `Alur Maklon.pdf`, dalam urutan aslinya. */
+/**
+ * Kolom sheet menurut `Alur Maklon.pdf`, dalam urutan aslinya. `rule` dan
+ * `example` hanya untuk tabel kolom dan template di layar (v2.8); aturan
+ * sebenarnya tetap `validateImportRow`.
+ */
 export const IMPORT_FIELDS = [
-  { key: "lead_created_at", header: "Timelapse Input Data Lead" },
-  { key: "channel", header: "Kode Asal Lead" },
-  { key: "pic", header: "PIC Customer Service" },
-  { key: "client_code", header: "Kode Klien" },
-  { key: "name", header: "Nama Klien" },
-  { key: "phone", header: "Nomor Klien" },
-  { key: "address", header: "Alamat Klien" },
-  { key: "city", header: "Kota / Kabupaten" },
-  { key: "province", header: "Provinsi" },
-  { key: "needs_notes", header: "Kebutuhan" },
-  { key: "category", header: "Kategori Produk" },
-  { key: "last_update", header: "Tanggal Terakhir Update" },
-  { key: "total_followups", header: "Jumlah FU" },
-  { key: "pic_answer", header: "Jawaban PIC" },
+  {
+    key: "lead_created_at",
+    header: "Timelapse Input Data Lead",
+    rule: "Optional. Empty = the import time.",
+    example: "5/10/2026 09:30",
+  },
+  {
+    key: "channel",
+    header: "Kode Asal Lead",
+    rule: "Required unless you choose a default. A Master Data lead channel code or name.",
+    example: "IG",
+  },
+  {
+    key: "pic",
+    header: "PIC Customer Service",
+    rule: "Optional. An operator name or username; empty = you.",
+    example: "Rina",
+  },
+  {
+    key: "client_code",
+    header: "Kode Klien",
+    rule: "Optional. Empty = a new code is made.",
+    example: "KLN-20261005-0101",
+  },
+  {
+    key: "name",
+    header: "Nama Klien",
+    rule: "Required, 2-120 characters.",
+    example: "Aura Cosmetics",
+  },
+  {
+    key: "phone",
+    header: "Nomor Klien",
+    rule: "Required. A WhatsApp number starting with 0, 62, or 8.",
+    example: "081234567890",
+  },
+  {
+    key: "address",
+    header: "Alamat Klien",
+    rule: "Optional.",
+    example: "Jl. Melati 1",
+  },
+  {
+    key: "city",
+    header: "Kota / Kabupaten",
+    rule: "Optional.",
+    example: "Bandung",
+  },
+  {
+    key: "province",
+    header: "Provinsi",
+    rule: "Optional.",
+    example: "Jawa Barat",
+  },
+  {
+    key: "needs_notes",
+    header: "Kebutuhan",
+    rule: "Optional.",
+    example: "Brightening serum 30 ml",
+  },
+  {
+    key: "category",
+    header: "Kategori Produk",
+    rule: "Required unless you choose a default. A Master Data product category code or name.",
+    example: "SKIN",
+  },
+  {
+    key: "last_update",
+    header: "Tanggal Terakhir Update",
+    rule: "Optional. The client's last reply.",
+    example: "8/10/2026",
+  },
+  {
+    key: "total_followups",
+    header: "Jumlah FU",
+    rule: "Optional. A whole number.",
+    example: "2",
+  },
+  {
+    key: "pic_answer",
+    header: "Jawaban PIC",
+    rule: "Optional. Saved as one lead contact note.",
+    example: "Asked for the price list",
+  },
 ] as const;
 export type ImportFieldKey = (typeof IMPORT_FIELDS)[number]["key"];
 

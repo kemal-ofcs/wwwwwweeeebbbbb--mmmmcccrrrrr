@@ -8,12 +8,14 @@ import {
   useRef,
   useState,
 } from "react";
+import { ExportButton } from "@/components/imports/ExportButton";
 import { FeedbackBanner } from "@/components/ui/FeedbackBanner";
 import { Modal } from "@/components/ui/Modal";
 import { PageHeader } from "@/components/ui/PageHeader";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import { hasPermission } from "@/lib/auth/access";
 import { useAuth } from "@/lib/context/AuthContext";
+import { excelDay } from "@/lib/documents/xlsx";
 import { type ClientRecord, listClients } from "@/lib/gateways/clients";
 import {
   allocateFund,
@@ -40,12 +42,23 @@ import { FundForm } from "./FundForm";
 import { InvoiceForm } from "./InvoiceForm";
 import { downloadInvoicePdf } from "./invoice-download";
 import {
+  FUND_FILTERS,
+  type FundFilter,
+  INVOICE_FILTERS,
   INVOICE_TYPE_LABEL,
+  type InvoiceFilter,
   invoiceStatusLabel,
   invoiceTone,
   isOverdue,
   localToday,
+  matchesFundFilter,
+  matchesInvoiceFilter,
+  matchesSearch,
 } from "./labels";
+
+/** Baris pertama yang dirender; sisanya lewat "Show more". */
+const PAGE_SIZE = 100;
+
 import { PartialPaymentForm } from "./PartialPaymentForm";
 
 /**
@@ -86,6 +99,10 @@ export function FinanceWorkspace() {
   const [depositFund, setDepositFund] = useState<FundRecord | null>(null);
   const [depositClient, setDepositClient] = useState("");
   const [busy, setBusy] = useState(false);
+  const [invoiceFilter, setInvoiceFilter] = useState<InvoiceFilter>("UNPAID");
+  const [fundFilter, setFundFilter] = useState<FundFilter>("UNALLOCATED");
+  const [search, setSearch] = useState("");
+  const [shown, setShown] = useState(PAGE_SIZE);
   const isSubmittingRef = useRef(false);
 
   const refresh = useCallback(async () => {
@@ -388,7 +405,62 @@ export function FinanceWorkspace() {
     );
   };
 
-  const list = tab === "invoices" ? overview?.invoices : overview?.funds;
+  const term = search.trim();
+  const searchedInvoices = (overview?.invoices ?? []).filter((invoice) =>
+    matchesSearch(term, [
+      invoice.invoice_number,
+      invoice.client_code,
+      invoice.client_name,
+      invoice.brand_name,
+      invoice.description,
+    ]),
+  );
+  const searchedFunds = (overview?.funds ?? []).filter((fund) =>
+    matchesSearch(term, [
+      fund.received_on,
+      fund.description,
+      fund.client_code,
+      fund.client_name,
+    ]),
+  );
+  const invoices = searchedInvoices.filter((invoice) =>
+    matchesInvoiceFilter(invoiceFilter, invoice, today),
+  );
+  const funds = searchedFunds.filter((fund) =>
+    matchesFundFilter(fundFilter, fund),
+  );
+  const filters =
+    tab === "invoices"
+      ? INVOICE_FILTERS.map(([value, label]) => ({
+          value,
+          label,
+          count: searchedInvoices.filter((invoice) =>
+            matchesInvoiceFilter(value, invoice, today),
+          ).length,
+        }))
+      : FUND_FILTERS.map(([value, label]) => ({
+          value,
+          label,
+          count: searchedFunds.filter((fund) => matchesFundFilter(value, fund))
+            .length,
+        }));
+  const sum = (values: number[]) => values.reduce((a, b) => a + b, 0);
+  const outstanding = sum(
+    (overview?.invoices ?? [])
+      .filter((invoice) => matchesInvoiceFilter("UNPAID", invoice, today))
+      .map((invoice) => invoice.total_idr - invoice.paid_idr),
+  );
+  const overdue = sum(
+    (overview?.invoices ?? [])
+      .filter((invoice) => isOverdue(invoice, today))
+      .map((invoice) => invoice.total_idr - invoice.paid_idr),
+  );
+  const unallocatedTotal = sum(
+    (overview?.funds ?? [])
+      .filter((fund) => matchesFundFilter("UNALLOCATED", fund))
+      .map((fund) => fund.amount_idr - fund.allocated_idr),
+  );
+  const rows = tab === "invoices" ? invoices.length : funds.length;
 
   return (
     <div className="space-y-4">
@@ -448,7 +520,10 @@ export function FinanceWorkspace() {
             type="button"
             role="tab"
             aria-selected={tab === value}
-            onClick={() => setTab(value)}
+            onClick={() => {
+              setTab(value);
+              setShown(PAGE_SIZE);
+            }}
             className={`-mb-px min-h-11 border-b-2 px-3 text-body-md font-semibold ${
               tab === value
                 ? "border-primary text-on-surface"
@@ -479,23 +554,166 @@ export function FinanceWorkspace() {
         </section>
       ) : null}
 
+      {overview ? (
+        <section
+          aria-label="Totals"
+          className="flex flex-wrap gap-x-6 gap-y-1 text-body-md text-on-surface"
+        >
+          {tab === "invoices" ? (
+            <>
+              <span>
+                Outstanding:{" "}
+                <span className="font-semibold">
+                  {formatRupiah(outstanding)}
+                </span>
+              </span>
+              <span>
+                Overdue:{" "}
+                <span className="font-semibold text-error">
+                  {formatRupiah(overdue)}
+                </span>
+              </span>
+            </>
+          ) : (
+            <span>
+              Unallocated:{" "}
+              <span className="font-semibold">
+                {formatRupiah(unallocatedTotal)}
+              </span>
+            </span>
+          )}
+        </section>
+      ) : null}
+
+      <div className="grid gap-3">
+        <input
+          type="search"
+          value={search}
+          onChange={(event) => {
+            setSearch(event.target.value);
+            setShown(PAGE_SIZE);
+          }}
+          placeholder={
+            tab === "invoices"
+              ? "Search invoice number, client, or brand"
+              : "Search date, description, or client"
+          }
+          aria-label="Search"
+          className="app-input"
+        />
+        <fieldset className="flex flex-wrap gap-2">
+          <legend className="sr-only">Filter by status</legend>
+          {filters.map((filter) => {
+            const active =
+              (tab === "invoices" ? invoiceFilter : fundFilter) ===
+              filter.value;
+            return (
+              <button
+                key={filter.value}
+                type="button"
+                aria-pressed={active}
+                onClick={() => {
+                  if (tab === "invoices")
+                    setInvoiceFilter(filter.value as InvoiceFilter);
+                  else setFundFilter(filter.value as FundFilter);
+                  setShown(PAGE_SIZE);
+                }}
+                className={`app-btn ${active ? "app-btn-primary" : "app-btn-secondary"}`}
+              >
+                {filter.label} ({filter.count})
+              </button>
+            );
+          })}
+        </fieldset>
+      </div>
+
+      {tab === "invoices" ? (
+        <ExportButton
+          subject="invoices"
+          rows={() => [
+            [
+              "Invoice number",
+              "Issued on",
+              "Due on",
+              "Client code",
+              "Client",
+              "Brand",
+              "For",
+              "Total (IDR)",
+              "Paid (IDR)",
+              "Remaining (IDR)",
+              "Status",
+            ],
+            ...invoices.map((invoice) => [
+              invoice.invoice_number,
+              excelDay(invoice.issued_on),
+              excelDay(invoice.due_on),
+              invoice.client_code,
+              invoice.client_name,
+              invoice.brand_name,
+              INVOICE_TYPE_LABEL[invoice.ref_type] ?? invoice.ref_type,
+              invoice.total_idr,
+              invoice.paid_idr,
+              Math.max(0, invoice.total_idr - invoice.paid_idr),
+              invoiceStatusLabel(invoice),
+            ]),
+          ]}
+        />
+      ) : (
+        // Empat kolom pertama = kolom impor Data Uang Masuk (v2.8).
+        <ExportButton
+          subject="funds"
+          rows={() => [
+            [
+              "Tanggal",
+              "Nominal",
+              "Keterangan",
+              "Kode Klien",
+              "Allocated (IDR)",
+              "Status",
+            ],
+            ...funds.map((fund) => [
+              excelDay(fund.received_on),
+              fund.amount_idr,
+              fund.description,
+              fund.client_code,
+              fund.allocated_idr,
+              FUND_FILTERS.find(
+                ([value]) => value !== "ALL" && matchesFundFilter(value, fund),
+              )?.[1] ?? fund.status,
+            ]),
+          ]}
+        />
+      )}
+
       <section className="app-panel overflow-hidden">
         {!overview ? (
           <p className="p-4 text-body-md text-on-surface-variant">Loading…</p>
-        ) : !list || list.length === 0 ? (
+        ) : rows === 0 ? (
           <p className="p-4 text-body-md text-on-surface-variant">
-            {tab === "invoices"
-              ? "No invoices yet."
-              : "No incoming payments recorded yet."}
+            {term
+              ? "Nothing matches this search."
+              : tab === "invoices"
+                ? "No invoices in this view."
+                : "No incoming payments in this view."}
           </p>
         ) : (
           <ul className="divide-y divide-surface-container">
             {tab === "invoices"
-              ? overview.invoices.map(invoiceRow)
-              : overview.funds.map(fundRow)}
+              ? invoices.slice(0, shown).map(invoiceRow)
+              : funds.slice(0, shown).map(fundRow)}
           </ul>
         )}
       </section>
+      {rows > shown ? (
+        <button
+          type="button"
+          onClick={() => setShown(shown + PAGE_SIZE)}
+          className="app-btn app-btn-secondary w-full"
+        >
+          Show more ({rows - shown} left)
+        </button>
+      ) : null}
 
       {partialFund ? (
         <PartialPaymentForm

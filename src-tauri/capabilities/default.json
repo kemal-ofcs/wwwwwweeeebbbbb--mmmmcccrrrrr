@@ -52,6 +52,7 @@
     "allow-desktop-accept-partial-payment",
     "allow-desktop-confirm-deposit",
     "allow-desktop-save-document",
+    "allow-desktop-save-xlsx",
     "allow-desktop-upload-sample-media",
     "allow-desktop-get-media",
     "allow-desktop-get-session",

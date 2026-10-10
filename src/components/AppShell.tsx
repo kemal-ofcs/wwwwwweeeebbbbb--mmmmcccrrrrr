@@ -9,6 +9,7 @@ import { AutoSyncRunner } from "./AutoSyncRunner";
 import { LicenseHolderLabel, LicenseNotice } from "./license/LicenseNotice";
 import { NotificationBell } from "./NotificationBell";
 import { QuarantineBanner } from "./QuarantineBanner";
+import { RejectedChangesBanner } from "./RejectedChangesBanner";
 import { SyncIndicator } from "./SyncIndicator";
 import { Icon, type IconName } from "./ui/Icon";
 
@@ -136,6 +137,7 @@ export function AppShell({ children, contentClassName = "" }: AppShellProps) {
       </header>
       <LicenseNotice />
       <QuarantineBanner />
+      <RejectedChangesBanner />
 
       <div className="flex flex-1">
         {drawerOpen ? (

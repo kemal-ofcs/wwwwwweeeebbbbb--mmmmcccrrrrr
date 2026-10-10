@@ -21,31 +21,114 @@ export const ARCHIVE_CODE_MAX = 100;
 export const ARCHIVE_TITLE_MAX = 200;
 export const ARCHIVE_NOTES_MAX = 1000;
 
-/** Kolom bawaan per sheet; admin membetulkan pemetaannya di layar (OQ-24). */
+/**
+ * Kolom bawaan per sheet; admin membetulkan pemetaannya di layar (OQ-24).
+ * `rule` dan `example` hanya untuk tabel kolom dan template (v2.8).
+ */
 export const SHEET_FIELDS: Record<
   SheetKind,
-  readonly { key: SheetFieldKey; header: string }[]
+  readonly {
+    key: SheetFieldKey;
+    header: string;
+    rule: string;
+    example: string;
+  }[]
 > = {
   FUNDS: [
-    { key: "date", header: "Tanggal" },
-    { key: "amount", header: "Nominal" },
-    { key: "notes", header: "Keterangan" },
-    { key: "client_code", header: "Kode Klien" },
+    {
+      key: "date",
+      header: "Tanggal",
+      rule: "Required. The day the money arrived.",
+      example: "5/10/2026",
+    },
+    {
+      key: "amount",
+      header: "Nominal",
+      rule: "Required. Whole rupiah; Rp, dots, and commas are fine.",
+      example: "Rp 1.500.000",
+    },
+    {
+      key: "notes",
+      header: "Keterangan",
+      rule: "Optional, up to 300 characters.",
+      example: "Transfer BCA Aura Cosmetics",
+    },
+    {
+      key: "client_code",
+      header: "Kode Klien",
+      rule: "Optional. Must match a client in the app.",
+      example: "KLN-20261005-0101",
+    },
   ],
   FORMULA: [
-    { key: "date", header: "Tanggal" },
-    { key: "client_code", header: "Kode Klien" },
-    { key: "code", header: "Kode Formula" },
-    { key: "title", header: "Nama Produk" },
-    { key: "amount", header: "Harga Jual" },
-    { key: "notes", header: "Catatan" },
+    {
+      key: "date",
+      header: "Tanggal",
+      rule: "Optional.",
+      example: "1/9/2026",
+    },
+    {
+      key: "client_code",
+      header: "Kode Klien",
+      rule: "Required. Must match a client in the app.",
+      example: "KLN-20261005-0101",
+    },
+    {
+      key: "code",
+      header: "Kode Formula",
+      rule: "Optional, up to 100 characters.",
+      example: "F-SER-01",
+    },
+    {
+      key: "title",
+      header: "Nama Produk",
+      rule: "Required, up to 200 characters.",
+      example: "Brightening serum",
+    },
+    {
+      key: "amount",
+      header: "Harga Jual",
+      rule: "Optional. Whole rupiah per unit.",
+      example: "32.500",
+    },
+    {
+      key: "notes",
+      header: "Catatan",
+      rule: "Optional, up to 1000 characters.",
+      example: "Niacinamide 5%",
+    },
   ],
   DESIGN: [
-    { key: "date", header: "Tanggal" },
-    { key: "client_code", header: "Kode Klien" },
-    { key: "code", header: "Kode Desain" },
-    { key: "title", header: "Brand" },
-    { key: "notes", header: "Catatan" },
+    {
+      key: "date",
+      header: "Tanggal",
+      rule: "Optional.",
+      example: "1/9/2026",
+    },
+    {
+      key: "client_code",
+      header: "Kode Klien",
+      rule: "Required. Must match a client in the app.",
+      example: "KLN-20261005-0101",
+    },
+    {
+      key: "code",
+      header: "Kode Desain",
+      rule: "Optional, up to 100 characters.",
+      example: "D-AURA-01",
+    },
+    {
+      key: "title",
+      header: "Brand",
+      rule: "Required, up to 200 characters.",
+      example: "Aura",
+    },
+    {
+      key: "notes",
+      header: "Catatan",
+      rule: "Optional, up to 1000 characters.",
+      example: "Box 30 ml, matte",
+    },
   ],
 };
 export type SheetFieldKey =

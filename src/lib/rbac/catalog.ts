@@ -103,6 +103,9 @@ export const PERMISSION_CATALOG = [
     name: "Export database backup",
     group: "System",
   },
+  // Ekspor daftar ke CSV (v2.8, D-41): ikut paket Admin, tidak di-seed ke
+  // role divisi; setiap ekspor tercatat di log audit.
+  { key: "data.export", name: "Export lists to CSV", group: "System" },
   {
     key: "database_backup.restore",
     name: "Restore database from backup",

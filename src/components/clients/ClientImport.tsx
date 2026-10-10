@@ -2,9 +2,11 @@
 
 import Link from "next/link";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { ImportColumnGuide } from "@/components/imports/ImportColumnGuide";
 import { FeedbackBanner } from "@/components/ui/FeedbackBanner";
 import { Icon } from "@/components/ui/Icon";
 import { PageHeader } from "@/components/ui/PageHeader";
+import { readXlsx } from "@/lib/documents/xlsx";
 import {
   type ClientImportReport,
   importClients,
@@ -90,6 +92,20 @@ function suggestValue(
 
 function message(error: unknown, fallback: string) {
   return error instanceof Error ? error.message : fallback;
+}
+
+/** Berkas impor → baris teks: .xlsx (Excel) atau .csv (v2.8). */
+async function readSheetFile(file: File): Promise<string[][]> {
+  const name = file.name.toLowerCase();
+  if (name.endsWith(".xlsx")) {
+    return readXlsx(new Uint8Array(await file.arrayBuffer()));
+  }
+  if (name.endsWith(".xls")) {
+    throw new Error(
+      "Old .xls files are not supported. In Excel, use Save As › Excel Workbook (.xlsx).",
+    );
+  }
+  return parseCsv(await file.text());
 }
 
 export function ClientImport() {
@@ -179,11 +195,19 @@ export function ClientImport() {
     setSheet(null);
     setMapping(null);
     if (!file) return;
-    const table = parseCsv(await file.text());
+    let table: string[][];
+    try {
+      table = await readSheetFile(file);
+    } catch (cause) {
+      setError(
+        cause instanceof Error ? cause.message : "The file could not be read.",
+      );
+      return;
+    }
     const [headers, ...rows] = table;
     if (!headers || rows.length === 0) {
       setError(
-        "The file has no data rows. Export the sheet with File › Download › CSV.",
+        "The file has no data rows. Put the headers in row 1 of the first sheet.",
       );
       return;
     }
@@ -310,14 +334,18 @@ export function ClientImport() {
       <section className="app-panel p-4 sm:p-5">
         <h2 className="text-headline-md text-on-surface">1. Choose the file</h2>
         <p className="mt-1 text-body-md text-on-surface-variant">
-          In Google Sheets: File › Download › Comma-separated values (.csv). One
-          file holds at most {IMPORT_MAX_ROWS} rows.
+          An Excel workbook (.xlsx) or a CSV file; only the first sheet is read.
+          One file holds at most {IMPORT_MAX_ROWS} rows.
         </p>
+        <ImportColumnGuide
+          fields={IMPORT_FIELDS}
+          templateName="template-clients.xlsx"
+        />
         <label className="app-label mt-3 grid gap-1.5">
-          CSV file
+          Excel or CSV file
           <input
             type="file"
-            accept=".csv,text/csv"
+            accept=".xlsx,.csv,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             onChange={(event) => void chooseFile(event.target.files?.[0])}
             className="app-input font-normal"
           />

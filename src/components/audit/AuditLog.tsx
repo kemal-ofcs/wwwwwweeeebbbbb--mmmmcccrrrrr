@@ -97,6 +97,8 @@ function describe(entry: AuditEntry, operatorName: (id: number) => string) {
       return `The client (${String(s.responder_name ?? "")}) answered ${String(s.entity_type ?? "").toLowerCase()} for ${code} through the approval link: ${String(s.decision ?? "").toLowerCase()}`;
     case "approval.invalid":
       return "Someone opened an approval link that is not valid or has expired";
+    case "data.export":
+      return `Exported ${String(s.rows ?? 0)} ${String(s.subject ?? "")} rows to ${String(s.file_name ?? "a CSV file")}`;
     case "sheet.import":
       return `Imported ${String(s.added ?? 0)} ${s.kind === "FUNDS" ? "incoming payments" : s.kind === "FORMULA" ? "formula records" : "design records"} from ${String(s.file_name ?? "a CSV file")} (skipped ${String(s.skipped ?? 0)}, rejected ${String(s.invalid ?? 0)})`;
     case "legal.record": {
