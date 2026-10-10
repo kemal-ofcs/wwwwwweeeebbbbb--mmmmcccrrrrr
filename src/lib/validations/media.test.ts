@@ -27,6 +27,7 @@ describe("validateMediaUpload", () => {
       ["MOCKUP", TINY_WEBP, { byte_size: 16 }],
       ["CLIENT_RESPONSE", TINY_WEBP, { byte_size: 16 }],
       ["LEGAL_DOCUMENT", TINY_WEBP, { byte_size: 16 }],
+      ["DUMMY_ARTWORK", TINY_WEBP, { byte_size: 16 }],
       ["INVOICE", TINY_WEBP, { error: MEDIA_PURPOSE_INVALID }],
       ["REFERENCE", PNG, { error: MEDIA_NOT_WEBP }],
       ["REFERENCE", "not base64!", { error: MEDIA_NOT_WEBP }],

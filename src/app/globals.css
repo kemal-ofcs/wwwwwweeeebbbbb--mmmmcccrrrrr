@@ -275,3 +275,10 @@ samp {
     transition-duration: 0.01ms;
   }
 }
+
+/* Ikon mata bawaan Edge/WebView2 di kolom password menumpuk dengan tombol
+   Show/Hide aplikasi (temuan uji perangkat v2). */
+input::-ms-reveal,
+input::-ms-clear {
+  display: none;
+}

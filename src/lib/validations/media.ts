@@ -14,6 +14,8 @@ export const SAMPLE_MEDIA_PURPOSES = [
   "CLIENT_RESPONSE",
   // Foto dokumen legal, opsional saat mencatatnya (v2.6, keputusan F).
   "LEGAL_DOCUMENT",
+  // Desain cetak dummy, opsional saat Start printing (v2.8).
+  "DUMMY_ARTWORK",
 ] as const;
 export type SampleMediaPurpose = (typeof SAMPLE_MEDIA_PURPOSES)[number];
 
@@ -32,7 +34,9 @@ export const MEDIA_PURPOSE_INVALID = "Choose what the photo is for.";
 
 /** Izin unggah per jenis (keputusan F). Padanan `media_purpose_permission`. */
 export function mediaPurposePermission(purpose: unknown) {
-  return purpose === "MOCKUP" ? "design.manage" : "samples.manage";
+  return purpose === "MOCKUP" || purpose === "DUMMY_ARTWORK"
+    ? "design.manage"
+    : "samples.manage";
 }
 
 export function isSampleMediaPurpose(

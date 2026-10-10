@@ -86,6 +86,11 @@ export interface SampleRequestRecord {
   dp_paid: number;
   /** Dokumen legal wajib yang belum final (v2.6); null = belum ada MoU disetujui. */
   legal_open: number | null;
+  /**
+   * 1 = tagihan dummy putaran berjalan lunas (aturan `DESIGN_LIST_SQL`);
+   * null = tidak ada tiket desain aktif.
+   */
+  dummy_paid: number | null;
 }
 
 /**
@@ -162,7 +167,7 @@ export interface SampleFeedbackEntry {
 /** Data ringkas satu foto; isinya diambil terpisah lewat `getMedia`. */
 export interface SampleMediaEntry {
   id: string;
-  purpose: "REFERENCE" | "PAYMENT_PROOF" | "MOCKUP";
+  purpose: string;
   byte_size: number;
   created_by: number | null;
   created_by_name: string | null;

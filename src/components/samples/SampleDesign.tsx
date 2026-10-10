@@ -12,7 +12,10 @@ import {
   type SampleRequestRecord,
 } from "@/lib/gateways/samples";
 import { requestSyncNow } from "@/lib/gateways/sync-status";
-import { isClientDecisionAction } from "@/lib/validations/approval";
+import {
+  isClientDecisionAction,
+  stepEvidencePurpose,
+} from "@/lib/validations/approval";
 import {
   applyDesignAction,
   DESIGN_ACTIONS,
@@ -136,7 +139,7 @@ export function SampleDesign({
         action,
         notes,
         tracking_no: action === "DUMMY_SENT" ? tracking : "",
-        evidence_base64: isClientDecisionAction(action) ? evidence : "",
+        evidence_base64: stepEvidencePurpose(action) ? evidence : "",
       }),
     );
   };
@@ -291,6 +294,13 @@ export function SampleDesign({
           ) : null}
           {isClientDecisionAction(action) ? (
             <EvidencePicker value={evidence} onChange={setEvidence} />
+          ) : action === "PRINT_DUMMY" ? (
+            <EvidencePicker
+              value={evidence}
+              onChange={setEvidence}
+              label="Print-ready design (optional)"
+              hint="The artwork this dummy is printed from."
+            />
           ) : null}
           <label htmlFor="design-notes" className="app-label">
             {action === "DUMMY_REVISE"

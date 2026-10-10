@@ -309,7 +309,7 @@ export function ClientWorkspace() {
                   className="app-btn app-btn-secondary w-full sm:w-auto"
                 >
                   <Icon name="upload" className="size-4" />
-                  Import CSV
+                  Import Excel
                 </Link>
               ) : null}
               <button

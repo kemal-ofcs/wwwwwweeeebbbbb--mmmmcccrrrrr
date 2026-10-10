@@ -6022,7 +6022,15 @@ async fn apply_event_to_turso(
                     ],
                 )
                 .await?;
-            insert_client_evidence(turso, "CLIENT_RESPONSE", payload, &sample_id, recorded_by_evidence, &changed_at).await?;
+            insert_client_evidence(
+                turso,
+                approval::step_evidence_purpose(&action).unwrap_or("CLIENT_RESPONSE"),
+                payload,
+                &sample_id,
+                recorded_by_evidence,
+                &changed_at,
+            )
+            .await?;
             turso
                 .query_one(notifications::NOTIFY_DESIGN_SQL, vec![json!(log_id), json!(entity_key)])
                 .await?;

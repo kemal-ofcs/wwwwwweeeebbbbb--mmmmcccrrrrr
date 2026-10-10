@@ -7,6 +7,7 @@ import {
   approvalStepAction,
   approvalUrl,
   isClientDecisionAction,
+  stepEvidencePurpose,
   validateApprovalResponse,
 } from "./approval";
 
@@ -23,6 +24,11 @@ test("izin dan jawaban klien (izin_dan_jawaban_klien)", () => {
   for (const action of ["SAMPLE_SENT", "PRINT_DUMMY", "SEND_MOU", "CANCEL"]) {
     expect(isClientDecisionAction(action)).toBe(false);
   }
+  expect(
+    ["CLIENT_ACC", "DUMMY_REVISE", "PRINT_DUMMY", "DUMMY_SENT"].map(
+      stepEvidencePurpose,
+    ),
+  ).toEqual(["CLIENT_RESPONSE", "CLIENT_RESPONSE", "DUMMY_ARTWORK", null]);
   expect(approvalUrl("https://crm.company.id", "abc_DEF-123")).toBe(
     "https://crm.company.id/approve?t=abc_DEF-123",
   );

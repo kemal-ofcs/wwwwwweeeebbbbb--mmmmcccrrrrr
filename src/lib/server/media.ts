@@ -6,7 +6,7 @@ import { loadBusinessSettings } from "@/lib/server/business-settings";
 import { ApiRequestError } from "@/lib/server/http/api-response";
 import {
   CLIENT_EVIDENCE_REQUIRED,
-  isClientDecisionAction,
+  stepEvidencePurpose,
 } from "@/lib/validations/approval";
 import { DESIGN_ACTIVE_SQL } from "@/lib/validations/design";
 import {
@@ -145,6 +145,7 @@ export async function uploadSampleMedia(
 }
 
 export interface ClientEvidence {
+  purpose: "CLIENT_RESPONSE" | "DUMMY_ARTWORK";
   data_base64: string;
   byte_size: number;
 }
@@ -159,13 +160,16 @@ export function clientEvidence(
   data: unknown,
   viaLink: boolean,
 ): ClientEvidence | null {
-  if (viaLink || !isClientDecisionAction(action)) return null;
+  const purpose = stepEvidencePurpose(action);
+  if (viaLink || purpose === null) return null;
   if (typeof data !== "string" || !data) {
+    // Desain cetak dummy opsional (v2.8); balasan klien wajib.
+    if (purpose === "DUMMY_ARTWORK") return null;
     throw new ApiRequestError(CLIENT_EVIDENCE_REQUIRED, 400);
   }
-  const checked = validateMediaUpload("CLIENT_RESPONSE", data);
+  const checked = validateMediaUpload(purpose, data);
   if ("error" in checked) throw new ApiRequestError(checked.error, 400);
-  return { data_base64: data, byte_size: checked.byte_size };
+  return { purpose, data_base64: data, byte_size: checked.byte_size };
 }
 
 /** Simpan tangkapan layar jawaban klien di transaksi langkahnya. */
@@ -181,7 +185,7 @@ export async function insertClientEvidence(
     args: [
       crypto.randomUUID(),
       sampleId,
-      "CLIENT_RESPONSE",
+      evidence.purpose,
       evidence.byte_size,
       evidence.data_base64,
       actorId,

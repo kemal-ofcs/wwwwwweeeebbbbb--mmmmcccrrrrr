@@ -78,6 +78,18 @@ export function isClientDecisionAction(action: unknown) {
   );
 }
 
+/**
+ * Foto yang ikut sebuah langkah: balasan klien (wajib, `CLIENT_RESPONSE`)
+ * atau desain cetak dummy (opsional, `DUMMY_ARTWORK`, v2.8). `null` = langkah
+ * tanpa foto. Padanan `step_evidence_purpose`.
+ */
+export function stepEvidencePurpose(
+  action: unknown,
+): "CLIENT_RESPONSE" | "DUMMY_ARTWORK" | null {
+  if (isClientDecisionAction(action)) return "CLIENT_RESPONSE";
+  return action === "PRINT_DUMMY" ? "DUMMY_ARTWORK" : null;
+}
+
 export const CLIENT_EVIDENCE_REQUIRED =
   "Attach a screenshot of the client's reply.";
 export const APPROVAL_LINK_UNAVAILABLE =

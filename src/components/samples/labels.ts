@@ -225,7 +225,9 @@ export function nextSampleStep(row: SampleRequestRecord): string | null {
       row.design_status === "MOCKUP" ||
       row.design_status === "DUMMY_REVISION"
     )
-      return "Design: print the dummy once the Dummy fee invoice is paid.";
+      return row.dummy_paid === 1
+        ? "Design: print the dummy."
+        : "Finance: create the Dummy fee invoice and allocate the client's payment to it.";
     if (row.design_status === "DUMMY_PRINTING")
       return "Design: send the dummy to the client.";
     if (row.design_status === "DUMMY_SENT")

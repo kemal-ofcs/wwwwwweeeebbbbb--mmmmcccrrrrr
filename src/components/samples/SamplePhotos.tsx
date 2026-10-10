@@ -19,10 +19,13 @@ import { formatDateTime } from "@/lib/utils/format";
  * tetap terlihat saat offline.
  */
 
-const PURPOSE_LABEL: Record<SampleMediaEntry["purpose"], string> = {
+const PURPOSE_LABEL: Record<string, string> = {
   REFERENCE: "Reference",
   PAYMENT_PROOF: "Payment proof",
   MOCKUP: "Mockup",
+  CLIENT_RESPONSE: "Client reply",
+  LEGAL_DOCUMENT: "Legal document",
+  DUMMY_ARTWORK: "Dummy artwork",
 };
 
 interface SamplePhotosProps {

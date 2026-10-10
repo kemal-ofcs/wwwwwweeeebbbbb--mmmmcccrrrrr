@@ -4455,7 +4455,14 @@ pub async fn desktop_record_design_step(
         on_behalf_of: None,
     };
     commit_with_outbox(&state, "design", "transition", &id, payload, Some(audit), |transaction| {
-        insert_evidence(transaction, "CLIENT_RESPONSE", &evidence, &sample_id, operator.id, &now)?;
+        insert_evidence(
+            transaction,
+            approval::step_evidence_purpose(&action).unwrap_or("CLIENT_RESPONSE"),
+            &evidence,
+            &sample_id,
+            operator.id,
+            &now,
+        )?;
         let changed = transaction
             .execute(
                 design::DESIGN_TRANSITION_SQL,
@@ -4499,13 +4506,18 @@ pub async fn desktop_record_design_step(
 /// Padanan `clientEvidence`: jawaban klien yang dicatat staf WAJIB membawa
 /// tangkapan layar balasannya (v2.5b, keputusan N). `(id, data, ukuran)`.
 fn client_evidence(action: &str, data: Option<String>) -> Result<Option<(String, String, i64)>, CommandError> {
-    if !approval::is_client_decision_action(action) {
+    let Some(purpose) = approval::step_evidence_purpose(action) else {
         return Ok(None);
-    }
-    let data = data
-        .filter(|data| !data.is_empty())
-        .ok_or_else(|| sample_invalid(approval::CLIENT_EVIDENCE_REQUIRED))?;
-    let size = samples::validate_media_upload("CLIENT_RESPONSE", &data).map_err(sample_invalid)?;
+    };
+    let Some(data) = data.filter(|data| !data.is_empty()) else {
+        // Desain cetak dummy opsional (v2.8); balasan klien wajib.
+        return if approval::is_client_decision_action(action) {
+            Err(sample_invalid(approval::CLIENT_EVIDENCE_REQUIRED))
+        } else {
+            Ok(None)
+        };
+    };
+    let size = samples::validate_media_upload(purpose, &data).map_err(sample_invalid)?;
     Ok(Some((clients::new_uuid(), data, size as i64)))
 }
 
@@ -4998,7 +5010,14 @@ pub async fn desktop_record_mou_step(
         on_behalf_of: None,
     };
     commit_with_outbox(&state, "mou", "transition", &id, payload, Some(audit), |transaction| {
-        insert_evidence(transaction, "CLIENT_RESPONSE", &evidence, &sample_id, operator.id, &now)?;
+        insert_evidence(
+            transaction,
+            approval::step_evidence_purpose(&action).unwrap_or("CLIENT_RESPONSE"),
+            &evidence,
+            &sample_id,
+            operator.id,
+            &now,
+        )?;
         let changed = transaction
             .execute(
                 mou::MOU_TRANSITION_SQL,

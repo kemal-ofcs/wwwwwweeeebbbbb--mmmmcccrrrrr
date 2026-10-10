@@ -33,6 +33,17 @@ pub fn is_client_decision_action(action: &str) -> bool {
     CLIENT_DECISION_ACTIONS.contains(&action)
 }
 
+/// Padanan `stepEvidencePurpose`.
+pub fn step_evidence_purpose(action: &str) -> Option<&'static str> {
+    if is_client_decision_action(action) {
+        Some("CLIENT_RESPONSE")
+    } else if action == "PRINT_DUMMY" {
+        Some("DUMMY_ARTWORK")
+    } else {
+        None
+    }
+}
+
 pub const CLIENT_EVIDENCE_REQUIRED: &str = "Attach a screenshot of the client's reply.";
 pub const APPROVAL_LINK_UNAVAILABLE: &str =
     "The client cannot answer this yet. Sync first, and check that it was sent to the client.";
@@ -63,6 +74,10 @@ mod tests {
         for action in ["SAMPLE_SENT", "PRINT_DUMMY", "SEND_MOU", "CANCEL"] {
             assert!(!is_client_decision_action(action), "{action}");
         }
+        assert_eq!(
+            ["CLIENT_ACC", "DUMMY_REVISE", "PRINT_DUMMY", "DUMMY_SENT"].map(step_evidence_purpose),
+            [Some("CLIENT_RESPONSE"), Some("CLIENT_RESPONSE"), Some("DUMMY_ARTWORK"), None]
+        );
         assert_eq!(
             approval_url("https://crm.company.id", "abc_DEF-123"),
             "https://crm.company.id/approve?t=abc_DEF-123"

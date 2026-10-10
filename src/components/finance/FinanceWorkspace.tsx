@@ -486,7 +486,7 @@ export function FinanceWorkspace() {
               </button>
               {/* Data Uang Masuk lama (v2.7, PRD F-22). */}
               <Link href="/import" className="app-btn app-btn-secondary">
-                Import CSV
+                Import Excel
               </Link>
             </div>
           ) : null

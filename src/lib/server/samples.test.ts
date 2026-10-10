@@ -759,7 +759,13 @@ describe("tiket sampel, jalur Web", () => {
     await expect(designStep("PRINT_DUMMY")).rejects.toThrow(
       "The dummy invoice for this round is not paid yet.",
     );
+    // Next step dan Finance queue membaca `dummy_paid` dari daftar tiket.
+    const dummyPaid = async () =>
+      (await samples.getSampleRequest(client, sample.id, false)).request
+        .dummy_paid;
+    expect(await dummyPaid()).toBe(0);
     await settle(sample.id, "DUMMY_FEE", 75_000);
+    expect(await dummyPaid()).toBe(1);
     expect(await designStep("PRINT_DUMMY")).toEqual({
       status: "DUMMY_PRINTING",
       rejection_count: 0,
@@ -805,6 +811,12 @@ describe("tiket sampel, jalur Web", () => {
       status: "DUMMY_PRINTING",
       rejection_count: 1,
     });
+    // Desain cetak dummy opsional tersimpan per putaran (v2.8).
+    const artwork = await client.execute({
+      sql: "SELECT COUNT(*) AS total FROM media_asset WHERE owner_id = ? AND purpose = 'DUMMY_ARTWORK';",
+      args: [sample.id],
+    });
+    expect(Number(artwork.rows[0]?.total)).toBe(2);
 
     const row = await client.execute({
       sql: "SELECT brief, dummy_tracking_no, revision_notes FROM design_tickets WHERE id = ?;",
