@@ -233,6 +233,8 @@ export function nextSampleStep(row: SampleRequestRecord): string | null {
     if (row.design_status === "DUMMY_SENT")
       return "CS: record the client's answer on the dummy.";
   }
+  if (!row.mou_status && row.mou_closed === 1)
+    return "Order stopped: the MoU was rejected or cancelled. Draft a new MoU to continue.";
   if (!row.mou_status)
     return "CS: draft the MoU when the client is ready to produce.";
   if (row.mou_status === "DRAFT") return "CS: send the MoU to the client.";

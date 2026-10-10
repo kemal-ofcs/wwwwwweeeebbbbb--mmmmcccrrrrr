@@ -99,6 +99,8 @@ export function FinanceWorkspace() {
   const [depositFund, setDepositFund] = useState<FundRecord | null>(null);
   const [depositClient, setDepositClient] = useState("");
   const [busy, setBusy] = useState(false);
+  /** Foto bukti yang sedang dilihat (data URL); null = tertutup. */
+  const [proof, setProof] = useState<string | null>(null);
   const [invoiceFilter, setInvoiceFilter] = useState<InvoiceFilter>("UNPAID");
   const [fundFilter, setFundFilter] = useState<FundFilter>("UNALLOCATED");
   const [search, setSearch] = useState("");
@@ -219,9 +221,11 @@ export function FinanceWorkspace() {
     deposits.set(fund.client_id, entry);
   }
 
+  // Ditampilkan di dialog: Desktop/Android memblokir jendela baru, dan
+  // browser menolak membuka alamat `data:` di tab baru (temuan uji v2).
   const showProof = async (mediaId: string) => {
     try {
-      window.open(await getMediaDataUrl(mediaId), "_blank", "noopener");
+      setProof(await getMediaDataUrl(mediaId));
     } catch (cause) {
       setError(
         cause instanceof Error
@@ -713,6 +717,21 @@ export function FinanceWorkspace() {
         >
           Show more ({rows - shown} left)
         </button>
+      ) : null}
+
+      {proof ? (
+        <Modal
+          title="Payment proof"
+          titleId="finance-proof-title"
+          onClose={() => setProof(null)}
+        >
+          {/* biome-ignore lint/performance/noImgElement: data URL lokal, bukan aset Next. */}
+          <img
+            src={proof}
+            alt="Payment proof"
+            className="max-h-[70vh] w-full rounded-md border border-surface-container object-contain"
+          />
+        </Modal>
       ) : null}
 
       {partialFund ? (

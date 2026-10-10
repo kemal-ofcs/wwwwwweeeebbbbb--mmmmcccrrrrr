@@ -76,7 +76,12 @@ async function checkMediaAllowed(
         400,
       );
     }
-  } else if (SAMPLE_TERMINAL_STATUSES.includes(sample.status as SampleStatus)) {
+  } else if (
+    SAMPLE_TERMINAL_STATUSES.includes(sample.status as SampleStatus) &&
+    // Setelah klien ACC order masih berjalan: foto referensi (hanya-tambah)
+    // tetap boleh untuk produksi (audit sisa aturan MVP, keputusan B).
+    !(sample.status === "CLIENT_ACC" && purpose === "REFERENCE")
+  ) {
     throw new ApiRequestError("This sample request is closed.", 400);
   }
   if (purpose === "PAYMENT_PROOF" && sample.is_paid_sample !== 1) {

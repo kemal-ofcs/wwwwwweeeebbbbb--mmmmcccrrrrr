@@ -91,6 +91,11 @@ export interface SampleRequestRecord {
    * null = tidak ada tiket desain aktif.
    */
   dummy_paid: number | null;
+  /**
+   * 1 = MoU terakhir ditolak atau dibatalkan (order berhenti setelah ACC);
+   * null = belum pernah ada MoU.
+   */
+  mou_closed: number | null;
 }
 
 /**

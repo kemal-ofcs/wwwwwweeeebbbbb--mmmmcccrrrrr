@@ -36,7 +36,9 @@ import {
   PRODUCT_KNOWLEDGE_MAX,
   SAMPLE_ACTIONS,
   SAMPLE_NOTES_MAX,
+  SAMPLE_TERMINAL_STATUSES,
   type SampleAction,
+  type SampleStatus,
   sampleActionPermission,
 } from "@/lib/validations/sample";
 import { ClientApproval } from "./ClientApproval";
@@ -266,12 +268,11 @@ export function SampleDetail({
     .filter((key) => special[key])
     .map((key) => `${key}: ${special[key]}`)
     .join(" · ");
-  const closed = [
-    "RND_REJECTED",
-    "CLIENT_ACC",
-    "CLIENT_REJECT",
-    "CANCELLED",
-  ].includes(request?.status ?? "");
+  const closed = SAMPLE_TERMINAL_STATUSES.includes(
+    (request?.status ?? "") as SampleStatus,
+  );
+  // Setelah klien ACC hanya foto referensi yang masih boleh ditambah.
+  const accepted = request?.status === "CLIENT_ACC";
 
   return (
     <Modal
@@ -532,8 +533,8 @@ export function SampleDetail({
             <SamplePhotos
               sampleId={request.id}
               media={data.media}
-              canUpload={canManage && !closed}
-              canUploadPaymentProof={request.is_paid_sample === 1}
+              canUpload={canManage && (!closed || accepted)}
+              canUploadPaymentProof={request.is_paid_sample === 1 && !closed}
               canUploadMockup={
                 canDesign &&
                 data.design !== null &&

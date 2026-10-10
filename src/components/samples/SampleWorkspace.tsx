@@ -272,9 +272,13 @@ export function SampleWorkspace() {
   const visible = useMemo(() => {
     const term = search.trim().toLowerCase();
     const rows = requests.filter((row) => {
-      const closed = SAMPLE_TERMINAL_STATUSES.includes(
-        row.status as SampleStatus,
-      );
+      // Sejak v2, Client approved bukan akhir: dummy, MoU, DP, dan dokumen
+      // legal masih berjalan (temuan uji v2). Order baru dianggap berhenti
+      // bila MoU terakhirnya ditolak atau dibatalkan; MoU baru membukanya lagi.
+      const closed =
+        row.status === "CLIENT_ACC"
+          ? row.mou_closed === 1 && !row.mou_status
+          : SAMPLE_TERMINAL_STATUSES.includes(row.status as SampleStatus);
       if (view === "rnd" && !RND_QUEUE_STATUSES.includes(row.status))
         return false;
       if (view === "finance" && !inFinanceQueue(row)) return false;

@@ -1199,6 +1199,68 @@ describe("tiket sampel, jalur Web", () => {
     );
   });
 
+  test("setelah ACC: foto referensi boleh, MoU dibatalkan = order berhenti", async () => {
+    const owner = await newClient("081200000094");
+    const sample = await samples.createSampleRequest(
+      client,
+      draft(owner.id, { brand_name: "Aura Stop" }),
+      CS,
+    );
+    for (const action of [
+      "SUBMIT_TO_RND",
+      "RND_ACCEPT",
+      "PROCEED",
+      "SAMPLE_READY",
+    ]) {
+      await step(sample.id, action, { lead_time_days: 14 });
+    }
+    await price(sample.id);
+    await step(sample.id, "SAMPLE_SENT");
+    await step(sample.id, "CLIENT_ACC");
+    // Audit sisa aturan MVP (keputusan B): foto referensi tetap boleh.
+    await media.uploadSampleMedia(
+      client,
+      {
+        sample_id: sample.id,
+        purpose: "REFERENCE",
+        data_base64: "UklGRgwAAABXRUJQVlA4TA==",
+      },
+      CS,
+    );
+    const created = await mou.createMou(
+      client,
+      {
+        sample_id: sample.id,
+        terms: {
+          total_units: 100,
+          unit_price_idr: 1,
+          production_lead_time_days: 30,
+          regulatory_path: "WHITE_LABEL",
+          dp_bp: 5000,
+          notes: "",
+        },
+      },
+      CS,
+      false,
+    );
+    const request = async () =>
+      (await samples.getSampleRequest(client, sample.id, false)).request;
+    expect([
+      (await request()).mou_status,
+      (await request()).mou_closed,
+    ]).toEqual(["DRAFT", 0]);
+    await mou.recordMouStep(
+      client,
+      { id: created.id, action: "CANCEL_MOU", notes: "Client stopped" },
+      CS,
+    );
+    // Keputusan C: MoU terakhir dibatalkan dan tidak ada yang aktif.
+    expect([
+      (await request()).mou_status,
+      (await request()).mou_closed,
+    ]).toEqual([null, 1]);
+  });
+
   test("dokumen legal: terkunci sampai DP lunas, SIG sebelum BPOM, satu baris per jenis", async () => {
     const RND = { id: 3, role: "RnD" };
     const LEGAL = { id: 4, role: "Legal" };

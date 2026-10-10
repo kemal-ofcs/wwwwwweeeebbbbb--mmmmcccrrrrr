@@ -6105,7 +6105,10 @@ fn check_media_allowed(
         if active == 0 {
             return Err(sample_invalid("Request a design for this sample before uploading a mockup."));
         }
-    } else if samples::SAMPLE_TERMINAL_STATUSES.contains(&status) {
+    } else if samples::SAMPLE_TERMINAL_STATUSES.contains(&status)
+        // Padanan `uploadSampleMedia`: foto referensi tetap boleh setelah klien ACC.
+        && !(status == "CLIENT_ACC" && purpose == "REFERENCE")
+    {
         return Err(sample_invalid("This sample request is closed."));
     }
     if purpose == "PAYMENT_PROOF" && sample["is_paid_sample"].as_i64() != Some(1) {
