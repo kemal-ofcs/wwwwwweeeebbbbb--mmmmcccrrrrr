@@ -14,7 +14,7 @@ import { runDatabaseMigrations } from "./db-migrations";
  * Rust DAN migrasi `ALTER TABLE` di `db-migrations.ts`, supaya klien mana pun
  * bisa menyembuhkan database buatan klien lain.
  */
-export const CURRENT_SCHEMA_VERSION = 18;
+export const CURRENT_SCHEMA_VERSION = 20;
 
 /** Tabel yang wajib ada sebelum database dianggap siap dipakai. */
 export const REQUIRED_TABLES = [
@@ -79,6 +79,8 @@ export const REQUIRED_TABLES = [
   // sinkronisasi.
   "production_batches",
   "batch_purchase_orders",
+  // Pengiriman dan Surat Jalan (v3.4, PRD F-27), ikut sinkronisasi.
+  "shipments",
   // Foto (PRD F-07). Isi gambar tidak pernah ikut snapshot perangkat.
   "media_asset",
   // Notifikasi divisi (PRD FR-08). Ketiganya cloud-only.
@@ -223,6 +225,15 @@ export const LEGAL_PERMISSION_SEED_SQL = [
 export const PRODUCTION_PERMISSION_SEED_SQL = [
   "INSERT OR IGNORE INTO role_permission (role_id, permission_key, is_allowed, updated_at, updated_by) SELECT r.id, p.permission_key, 1, datetime('now'), 'system' FROM app_role r JOIN app_permission p ON (r.role_key IN ('ppic', 'production_spv', 'qc', 'logistics') AND p.permission_key IN ('production.view', 'notifications_production.view')) OR (r.role_key IN ('cs', 'crm', 'finance') AND p.permission_key = 'production.view') OR (r.role_key = 'ppic' AND p.permission_key = 'ppic.manage') OR (r.role_key = 'production_spv' AND p.permission_key = 'production.manage') WHERE r.role_key IN ('ppic', 'production_spv', 'qc', 'logistics', 'cs', 'crm', 'finance') AND NOT EXISTS (SELECT 1 FROM setting_gex_system WHERE key = 'production_permissions_seeded');",
   "INSERT OR IGNORE INTO setting_gex_system (key, value) VALUES ('production_permissions_seeded', '1');",
+];
+
+/**
+ * Izin pengiriman (v3.4, PRD F-27) untuk role Logistik dan SPV, sekali saja.
+ * WAJIB identik dengan seed yang sama di `turso.rs` (dites per karakter).
+ */
+export const SHIPPING_PERMISSION_SEED_SQL = [
+  "INSERT OR IGNORE INTO role_permission (role_id, permission_key, is_allowed, updated_at, updated_by) SELECT r.id, p.permission_key, 1, datetime('now'), 'system' FROM app_role r JOIN app_permission p ON p.permission_key = 'shipping.manage' WHERE r.role_key IN ('logistics', 'production_spv') AND NOT EXISTS (SELECT 1 FROM setting_gex_system WHERE key = 'shipping_permissions_seeded');",
+  "INSERT OR IGNORE INTO setting_gex_system (key, value) VALUES ('shipping_permissions_seeded', '1');",
 ];
 
 export async function initDatabaseSchema(client: Client) {
@@ -741,6 +752,10 @@ export async function initDatabaseSchema(client: Client) {
       sched_packing_on TEXT NOT NULL DEFAULT '',
       needs_reschedule INTEGER NOT NULL DEFAULT 0,
       schedule_updated_at TEXT NOT NULL DEFAULT '',
+      stages_done INTEGER NOT NULL DEFAULT 0,
+      packed_at TEXT NOT NULL DEFAULT '',
+      carton_count INTEGER NOT NULL DEFAULT 0,
+      produced_units INTEGER NOT NULL DEFAULT 0,
       created_by INTEGER,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
@@ -754,6 +769,33 @@ export async function initDatabaseSchema(client: Client) {
       eta_on TEXT NOT NULL,
       status TEXT NOT NULL DEFAULT 'OPEN',
       late_reason TEXT NOT NULL DEFAULT '',
+      created_by INTEGER,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+      );`,
+    // Pengiriman (v3.4, PRD F-27): satu aktif per work order, tanpa UNIQUE
+    // (`SHIPMENT_ACTIVE_SQL`); langkah dijaga `updated_at`.
+    `CREATE TABLE IF NOT EXISTS shipments (
+      id TEXT PRIMARY KEY,
+      batch_id TEXT NOT NULL,
+      sample_request_id TEXT NOT NULL,
+      client_id TEXT NOT NULL,
+      delivery_note_no TEXT NOT NULL,
+      method TEXT NOT NULL,
+      carrier_option_id TEXT NOT NULL DEFAULT '',
+      tracking_no TEXT NOT NULL DEFAULT '',
+      driver_name TEXT NOT NULL DEFAULT '',
+      driver_phone TEXT NOT NULL DEFAULT '',
+      vehicle_plate TEXT NOT NULL DEFAULT '',
+      carton_count INTEGER NOT NULL,
+      unit_count INTEGER NOT NULL,
+      ship_on TEXT NOT NULL,
+      ship_to_address TEXT NOT NULL DEFAULT '',
+      notes TEXT NOT NULL DEFAULT '',
+      status TEXT NOT NULL DEFAULT 'PREPARED',
+      cancel_reason TEXT NOT NULL DEFAULT '',
+      shipped_at TEXT NOT NULL DEFAULT '',
+      forwarded_at TEXT NOT NULL DEFAULT '',
       created_by INTEGER,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
@@ -853,6 +895,7 @@ export async function initDatabaseSchema(client: Client) {
     `CREATE INDEX IF NOT EXISTS idx_imported_records_client ON imported_records(client_id);`,
     `CREATE INDEX IF NOT EXISTS idx_production_batches_mou ON production_batches(mou_id);`,
     `CREATE INDEX IF NOT EXISTS idx_batch_purchase_orders_batch ON batch_purchase_orders(batch_id);`,
+    `CREATE INDEX IF NOT EXISTS idx_shipments_batch ON shipments(batch_id);`,
     `CREATE INDEX IF NOT EXISTS idx_approval_tokens_entity ON approval_tokens(entity_type, entity_id);`,
     `CREATE INDEX IF NOT EXISTS idx_media_asset_owner ON media_asset(owner_type, owner_id);`,
     `CREATE INDEX IF NOT EXISTS idx_notification_outbox_due ON notification_outbox(status, next_attempt_at);`,
@@ -890,6 +933,7 @@ export async function initDatabaseSchema(client: Client) {
       ('legal.manage', 'Record legal documents', 'Legal', 'Record BPOM, halal, and trademark (HKI) filings and certificates.', 1, 67),
       ('production.view', 'View production', 'Production', 'See work orders, materials, purchase orders, and production schedules.', 1, 68),
       ('ppic.manage', 'Plan production materials', 'Production', 'Create work orders, record purchase orders, and confirm materials are ready.', 1, 69),
+      ('shipping.manage', 'Ship orders', 'Production', 'Issue delivery notes, mark orders as shipped, and record tracking numbers.', 1, 69),
       ('production.manage', 'Schedule production', 'Production', 'Set and change the production schedule of each work order.', 1, 69),
       ('design.override_dummy_limit', 'Override the dummy rejection limit', 'Design', 'Print a dummy again after the client has rejected it as many times as the limit allows.', 1, 66),
       ('password_reset.view', 'View password reset history', 'Operators', 'Review who requested a password recovery, with their verification photo.', 1, 62),
@@ -964,6 +1008,8 @@ export async function initDatabaseSchema(client: Client) {
     ...LEGAL_PERMISSION_SEED_SQL,
     // Izin produksi (v3.1), sekali saja.
     ...PRODUCTION_PERMISSION_SEED_SQL,
+    // Izin pengiriman (v3.4), sekali saja.
+    ...SHIPPING_PERMISSION_SEED_SQL,
 
     // Angka 1 di sini disengaja dan TIDAK boleh diikatkan ke
     // `CURRENT_SCHEMA_VERSION`: baris ini menandai fondasi versi 1, sedangkan

@@ -15,6 +15,7 @@ import {
   companyDateStamp,
   DEFAULT_CLIENT_CODE_PREFIX,
   DEFAULT_CLIENT_CODE_WEB_TAG,
+  DELIVERY_NOTE_PREFIX_SETTING,
   daysSinceResponse,
   formatClientCode,
   INVOICE_PREFIX_SETTING,
@@ -34,7 +35,10 @@ import {
 import { INVOICE_NUMBER_PREFIX } from "@/lib/validations/finance";
 import { MOU_NUMBER_PREFIX } from "@/lib/validations/mou";
 import { NOTIFY_LEAD_NEW_SQL } from "@/lib/validations/notification";
-import { DEFAULT_BATCH_CODE_PREFIX } from "@/lib/validations/production";
+import {
+  DEFAULT_BATCH_CODE_PREFIX,
+  DEFAULT_DELIVERY_NOTE_PREFIX,
+} from "@/lib/validations/production";
 import { FREE_REVISION_LIMIT_MAX } from "@/lib/validations/sample";
 
 /**
@@ -94,6 +98,7 @@ export interface ClientCodeSettings {
   invoice_number_prefix: string;
   mou_number_prefix: string;
   batch_code_prefix: string;
+  delivery_note_prefix: string;
   /** Web tidak punya tag perangkat; kolom ini selalu `null` di jalur Web. */
   device_tag: string | null;
 }
@@ -313,6 +318,10 @@ export async function getClientCodeSettings(
     batch_code_prefix:
       normalizeCodePrefix(await readSetting(executor, BATCH_PREFIX_SETTING)) ??
       DEFAULT_BATCH_CODE_PREFIX,
+    delivery_note_prefix:
+      normalizeCodePrefix(
+        await readSetting(executor, DELIVERY_NOTE_PREFIX_SETTING),
+      ) ?? DEFAULT_DELIVERY_NOTE_PREFIX,
     device_tag: null,
   };
 }
@@ -652,6 +661,9 @@ export async function saveClientCodeSettings(
   const batchPrefix =
     normalizeCodePrefix(text(settings, "batch_code_prefix")) ??
     invalid("The work order prefix must be 2-5 letters.");
+  const deliveryPrefix =
+    normalizeCodePrefix(text(settings, "delivery_note_prefix")) ??
+    invalid("The delivery note prefix must be 2-5 letters.");
 
   const transaction = await client.transaction("write");
   try {
@@ -671,6 +683,7 @@ export async function saveClientCodeSettings(
       [INVOICE_PREFIX_SETTING, invoicePrefix],
       [MOU_PREFIX_SETTING, mouPrefix],
       [BATCH_PREFIX_SETTING, batchPrefix],
+      [DELIVERY_NOTE_PREFIX_SETTING, deliveryPrefix],
     ] as const) {
       await transaction.execute({
         sql: "INSERT INTO setting_gex_system (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value;",
@@ -687,6 +700,7 @@ export async function saveClientCodeSettings(
     invoice_number_prefix: invoicePrefix,
     mou_number_prefix: mouPrefix,
     batch_code_prefix: batchPrefix,
+    delivery_note_prefix: deliveryPrefix,
     device_tag: null,
   };
 }

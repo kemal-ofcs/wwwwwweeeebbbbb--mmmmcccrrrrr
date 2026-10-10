@@ -26,6 +26,7 @@ const PURPOSE_LABEL: Record<string, string> = {
   CLIENT_RESPONSE: "Client reply",
   LEGAL_DOCUMENT: "Legal document",
   DUMMY_ARTWORK: "Dummy artwork",
+  SHIPMENT_PROOF: "Shipment proof",
 };
 
 interface SamplePhotosProps {

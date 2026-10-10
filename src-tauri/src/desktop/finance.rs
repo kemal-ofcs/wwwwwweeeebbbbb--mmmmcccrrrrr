@@ -153,7 +153,7 @@ pub fn compute_invoice(raw: &Value) -> Result<InvoiceTotals, &'static str> {
 // ---------------------------------------------------------------------------
 
 pub const INVOICE_REF_TYPES: &[&str] =
-    &["SAMPLE_FEE", "REVISION_FEE", "TEST_FEE", "DUMMY_FEE", "DP_PRODUCTION_LEGAL", "OTHER"];
+    &["SAMPLE_FEE", "REVISION_FEE", "TEST_FEE", "DUMMY_FEE", "DP_PRODUCTION_LEGAL", "SETTLEMENT", "SHIPPING", "STORAGE_FEE", "OTHER"];
 pub const INVOICE_DESCRIPTION_MAX: usize = 300;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -165,6 +165,10 @@ pub struct InvoiceTicket {
     pub dummy_round: Option<i64>,
     /// MoU aktif tiket itu sudah disetujui klien (v2.5a).
     pub mou_accepted: bool,
+    /// Padanan field v3.3 di `InvoiceTicket` TS.
+    pub batch_packed: bool,
+    pub settlement_cleared: bool,
+    pub storage_fee_idr: i64,
 }
 
 /// Padanan `invoiceTypeError`; `None` = sah.
@@ -186,6 +190,9 @@ pub fn invoice_type_error(ref_type: &str, ticket: Option<&InvoiceTicket>) -> Opt
         }
         "DUMMY_FEE" if ticket.dummy_round.is_none() => Some("Request a design for this sample first."),
         "DP_PRODUCTION_LEGAL" if !ticket.mou_accepted => Some("The client has not accepted the MoU yet."),
+        "SETTLEMENT" | "SHIPPING" if !ticket.batch_packed => Some("Production is not packed yet."),
+        "STORAGE_FEE" if !ticket.settlement_cleared => Some("The settlement invoice is not paid yet."),
+        "STORAGE_FEE" if ticket.storage_fee_idr < 1 => Some("There is no storage fee for this order."),
         _ => None,
     }
 }
@@ -536,9 +543,13 @@ mod tests {
             revision_fee_idr: fee,
             dummy_round: round,
             mou_accepted: paid,
+            batch_packed: paid,
+            settlement_cleared: paid,
+            storage_fee_idr: if paid { 60_000 } else { 0 },
         };
         let paid = ticket(true, true, Some(750_000), Some(0));
         let free = ticket(false, false, None, None);
+        let waived = InvoiceTicket { storage_fee_idr: 0, ..paid };
         let cases: &[(&str, Option<&InvoiceTicket>, Option<&str>)] = &[
             ("SAMPLE_FEE", Some(&paid), None),
             ("TEST_FEE", Some(&paid), None),
@@ -553,6 +564,12 @@ mod tests {
             ("DP_PRODUCTION_LEGAL", Some(&paid), None),
             ("DP_PRODUCTION_LEGAL", Some(&free), Some("The client has not accepted the MoU yet.")),
             ("PRINT_FEE", Some(&paid), Some("Choose what the invoice is for.")),
+            ("SETTLEMENT", Some(&paid), None),
+            ("SETTLEMENT", Some(&free), Some("Production is not packed yet.")),
+            ("SHIPPING", Some(&free), Some("Production is not packed yet.")),
+            ("STORAGE_FEE", Some(&paid), None),
+            ("STORAGE_FEE", Some(&free), Some("The settlement invoice is not paid yet.")),
+            ("STORAGE_FEE", Some(&waived), Some("There is no storage fee for this order.")),
         ];
         for (ref_type, ticket, expected) in cases {
             assert_eq!(invoice_type_error(ref_type, *ticket), *expected, "{ref_type}");

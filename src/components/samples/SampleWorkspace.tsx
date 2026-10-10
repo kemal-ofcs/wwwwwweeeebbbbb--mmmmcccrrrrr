@@ -69,6 +69,8 @@ function inFinanceQueue(row: SampleRequestRecord) {
         row.design_status === "DUMMY_REVISION") &&
       row.dummy_paid !== 1) ||
     (row.mou_status === "ACCEPTED" && row.dp_paid !== 1) ||
+    // Sesudah Packing: pelunasan, ongkir, atau biaya titip belum beres (v3.3).
+    (row.batch_stages === 4 && row.ship_block !== null) ||
     [
       "PENDING_FEE_ASSESSMENT",
       "WAITING_SAMPLE_PAYMENT",

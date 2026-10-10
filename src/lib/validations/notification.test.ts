@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import * as rules from "./notification";
+import { BATCH_LIST_SQL } from "./production";
 
 // Vektor kembar: `mod tests` di `src-tauri/src/desktop/notifications.rs` memakai
 // masukan dan keluaran yang persis sama. Ubah keduanya bersamaan.
@@ -292,6 +293,8 @@ describe("notifikasi divisi", () => {
       reason: "Stock out",
       packing_on: "2026-11-05",
       notes: "",
+      carton_count: 120,
+      produced_units: 9950,
     };
     const at = "2026-10-03 07:05:00";
     expect(renderNotification("BATCH_CREATED", batch, at, "Asia/Jakarta")).toBe(
@@ -300,10 +303,46 @@ describe("notifikasi divisi", () => {
     expect(renderNotification("PO_LATE", batch, at, "Asia/Jakarta")).toBe(
       "Purchase order late: Aura Glow for Aura Beauty (KLN-20261003-WB01)\nWork order BAT-20261010-A101, PO PO-778 from PT Kimia\nNow arriving 2026-10-27: Stock out\nReported 2026-10-03 14:05 WIB",
     );
+    const shipped = {
+      ...batch,
+      delivery_note_no: "SJ-20261120-A101",
+      method: "CARRIER",
+      carrier: "JNE",
+      tracking_no: "JNE123",
+      driver_name: "Budi",
+      vehicle_plate: "D 1234 AB",
+    };
+    expect(
+      renderNotification("SHIPMENT_SHIPPED", shipped, at, "Asia/Jakarta"),
+    ).toBe(
+      "Shipped, forward it to the client: Aura Glow for Aura Beauty (KLN-20261003-WB01)\nDelivery note SJ-20261120-A101, JNE, tracking JNE123\nShipped 2026-10-03 14:05 WIB",
+    );
+    expect(
+      renderNotification(
+        "SHIPMENT_SHIPPED",
+        { ...shipped, method: "FLEET" },
+        at,
+        "Asia/Jakarta",
+      ),
+    ).toBe(
+      "Shipped, forward it to the client: Aura Glow for Aura Beauty (KLN-20261003-WB01)\nDelivery note SJ-20261120-A101, driver Budi (D 1234 AB)\nShipped 2026-10-03 14:05 WIB",
+    );
+    expect(renderNotification("SHIP_CLEARED", batch, at, "Asia/Jakarta")).toBe(
+      "Cleared to ship: Aura Glow for Aura Beauty (KLN-20261003-WB01)\nWork order BAT-20261010-A101: 120 cartons are paid for and can leave the factory.\nCleared 2026-10-03 14:05 WIB",
+    );
+    expect(renderNotification("BATCH_PACKED", batch, at, "Asia/Jakarta")).toBe(
+      "Packing done, issue the settlement invoice: Aura Glow for Aura Beauty (KLN-20261003-WB01)\nWork order BAT-20261010-A101: 120 cartons, 9950 units\nPacked 2026-10-03 14:05 WIB",
+    );
     expect(
       renderNotification("BATCH_SCHEDULED", batch, at, "Asia/Jakarta"),
     ).toBe(
       "Production scheduled, packing on 2026-11-05: Aura Glow for Aura Beauty (KLN-20261003-WB01)\nWork order BAT-20261010-A101: -\nSaved 2026-10-03 14:05 WIB",
+    );
+  });
+
+  test("notifikasi siap kirim memakai aturan BATCH_LIST_SQL yang sama", () => {
+    expect(rules.NOTIFY_SHIP_CLEARED_SQL).toContain(
+      `FROM (${BATCH_LIST_SQL}) z WHERE`,
     );
   });
 

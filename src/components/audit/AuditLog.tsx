@@ -44,6 +44,7 @@ const KIND_LABEL: Record<string, string> = {
   REGISTRATION_CATEGORY: "registration category",
   RND_REJECT_REASON: "RnD rejection reason",
   SUPPLIER: "supplier",
+  CARRIER: "shipping company",
 };
 
 type Summary = Record<string, unknown>;
@@ -119,6 +120,12 @@ function describe(entry: AuditEntry, operatorName: (id: number) => string) {
       return `Work order ${String(s.batch_code ?? "")} for ${code}: ${String(s.notes ?? "")}`;
     case "batch.ready":
       return `Confirmed the materials of work order ${String(s.batch_code ?? "")} for ${code} are ready`;
+    case "shipment.create":
+      return `Issued delivery note ${String(s.delivery_note_no ?? "")} for work order ${String(s.batch_code ?? "")} of ${code}`;
+    case "shipment.step":
+      return `Delivery note ${String(s.delivery_note_no ?? "")} for ${code}: ${String(s.notes ?? "")}`;
+    case "batch.stage":
+      return `Work order ${String(s.batch_code ?? "")} for ${code}: ${String(s.notes ?? "")}`;
     case "batch.schedule": {
       const schedule = (s.schedule ?? {}) as Record<string, unknown>;
       return `Scheduled work order ${String(s.batch_code ?? "")} for ${code}: packing on ${String(schedule.packing_on ?? "")}${schedule.reason ? ` (${String(schedule.reason)})` : ""}`;

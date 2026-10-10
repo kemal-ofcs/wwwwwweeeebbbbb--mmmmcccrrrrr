@@ -2180,6 +2180,7 @@ fn code_settings_json(state: &DesktopState) -> Result<Value, CommandError> {
         "invoice_number_prefix": code_prefix(state, clients::INVOICE_PREFIX_SETTING, finance::INVOICE_NUMBER_PREFIX),
         "mou_number_prefix": code_prefix(state, clients::MOU_PREFIX_SETTING, mou::MOU_NUMBER_PREFIX),
         "batch_code_prefix": code_prefix(state, clients::BATCH_PREFIX_SETTING, production::DEFAULT_BATCH_CODE_PREFIX),
+        "delivery_note_prefix": code_prefix(state, clients::DELIVERY_NOTE_PREFIX_SETTING, production::DEFAULT_DELIVERY_NOTE_PREFIX),
         "device_tag": sync::local_device_tag(state)?,
     }))
 }
@@ -3209,6 +3210,8 @@ pub async fn desktop_save_client_code_settings(
         .ok_or_else(|| invalid("The MoU number prefix must be 2-5 letters."))?;
     let batch_prefix = clients::normalize_code_prefix(&draft_text(&settings, "batch_code_prefix"))
         .ok_or_else(|| invalid("The work order prefix must be 2-5 letters."))?;
+    let delivery_prefix = clients::normalize_code_prefix(&draft_text(&settings, "delivery_note_prefix"))
+        .ok_or_else(|| invalid("The delivery note prefix must be 2-5 letters."))?;
     if web_tag != client_code_web_tag(&state) {
         let turso = state.get_turso_client().map_err(|_| {
             invalid("Changing the Web tag needs a database connection.")
@@ -3237,6 +3240,7 @@ pub async fn desktop_save_client_code_settings(
             (clients::INVOICE_PREFIX_SETTING, invoice_prefix.as_str()),
             (clients::MOU_PREFIX_SETTING, mou_prefix.as_str()),
             (clients::BATCH_PREFIX_SETTING, batch_prefix.as_str()),
+            (clients::DELIVERY_NOTE_PREFIX_SETTING, delivery_prefix.as_str()),
         ] {
             transaction
                 .execute(
@@ -3778,17 +3782,50 @@ fn sample_invalid(message: impl Into<String>) -> CommandError {
     CommandError::new("SAMPLE_INVALID", message)
 }
 
+/// Tempelkan ringkasan kirim work order terbaru ke baris tiket sampel
+/// (v3.3); null bila tiket belum punya work order. Cermin `attachShipState`.
+fn attach_ship_state(connection: &rusqlite::Connection, rows: &mut [Value]) -> Result<(), CommandError> {
+    let batches = query_json(
+        connection,
+        &format!("{} ORDER BY b.created_at, b.id;", production::BATCH_LIST_SQL),
+        &[],
+    )?;
+    let mut latest = std::collections::HashMap::new();
+    for batch in &batches {
+        latest.insert(batch["sample_request_id"].as_str().unwrap_or_default().to_owned(), batch);
+    }
+    for row in rows.iter_mut() {
+        let summary = match latest.get(row["id"].as_str().unwrap_or_default()) {
+            Some(batch) => production::ship_summary(batch),
+            None => json!({
+                "ship_block": null,
+                "settlement_default_idr": null,
+                "storage_fee_idr": null,
+                "settlement_cleared": null,
+            }),
+        };
+        if let (Some(target), Some(extra)) = (row.as_object_mut(), summary.as_object()) {
+            for (key, value) in extra {
+                target.insert(key.clone(), value.clone());
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Tiket sampel, terbaru dulu, beserta mode biaya perusahaan (form butuh
 /// tahu apakah pilihan gratis/berbayar ditampilkan). Cermin `listSampleRequests`.
 #[tauri::command]
 pub fn desktop_list_sample_requests(state: State<'_, DesktopState>) -> Result<Value, CommandError> {
     require_permission(&state, "samples.view")?;
     let connection = storage::database(&state.data_dir)?;
-    let requests = query_json(
+    let mut requests = query_json(
         &connection,
         &format!("{SAMPLE_LIST_SQL} ORDER BY s.created_at DESC, s.id;"),
         &[],
     )?;
+    // Ringkasan kirim work order (v3.3) untuk Next step dan Finance queue.
+    attach_ship_state(&connection, &mut requests)?;
     Ok(json!({
         "requests": requests,
         "sample_fee_mode": business_settings(&connection).sample_fee_mode,
@@ -3800,10 +3837,11 @@ pub fn desktop_list_sample_requests(state: State<'_, DesktopState>) -> Result<Va
 pub fn desktop_get_sample_request(state: State<'_, DesktopState>, id: String) -> Result<Value, CommandError> {
     require_permission(&state, "samples.view")?;
     let connection = storage::database(&state.data_dir)?;
-    let request = query_json(&connection, &format!("{SAMPLE_LIST_SQL} WHERE s.id = ?;"), &[&id])?
+    let mut request = query_json(&connection, &format!("{SAMPLE_LIST_SQL} WHERE s.id = ?;"), &[&id])?
         .into_iter()
         .next()
         .ok_or_else(|| CommandError::new("SAMPLE_NOT_FOUND", "Sample request not found."))?;
+    attach_ship_state(&connection, std::slice::from_mut(&mut request))?;
     let status_log = query_json(
         &connection,
         "SELECT l.*, o.nama_operator AS recorded_by_name FROM sample_status_log l LEFT JOIN master_operator o ON o.id = l.recorded_by WHERE l.sample_request_id = ? ORDER BY l.recorded_at DESC, l.rowid DESC;",
@@ -3867,7 +3905,7 @@ pub fn desktop_get_sample_request(state: State<'_, DesktopState>, id: String) ->
         // Work order dan PO-nya (v3.1); `null` sebelum PPIC membuatnya.
         "batch": query_json(
             &connection,
-            &format!("{} WHERE b.sample_request_id = ? ORDER BY b.created_at DESC, b.rowid DESC LIMIT 1;", production::BATCH_LIST_SQL),
+            &format!("{} WHERE b.sample_request_id = ? ORDER BY b.created_at DESC, b.id DESC LIMIT 1;", production::BATCH_LIST_SQL),
             &[&id],
         )?
         .into_iter()
@@ -3881,6 +3919,13 @@ pub fn desktop_get_sample_request(state: State<'_, DesktopState>, id: String) ->
             &[&id],
         )?,
         "suppliers": query_json(&connection, production::SUPPLIER_LIST_SQL, &[])?,
+        "shipments": query_json(
+            &connection,
+            &format!("{} WHERE h.sample_request_id = ? ORDER BY h.created_at, h.id;", production::SHIPMENT_LIST_SQL),
+            &[&id],
+        )?,
+        "storage_sop_text": business_settings(&connection).storage_sop_text,
+        "carriers": query_json(&connection, production::CARRIER_LIST_SQL, &[])?,
     }))
 }
 
@@ -4786,6 +4831,15 @@ pub fn desktop_list_production(state: State<'_, DesktopState>) -> Result<Value, 
             &[],
         )?,
         "suppliers": query_json(&connection, production::SUPPLIER_LIST_SQL, &[])?,
+        "stage_log": query_json(&connection, production::STAGE_LOG_SQL, &[])?,
+        // Pengiriman (v3.4) dan teks SOP Penyimpanan untuk PDF-nya.
+        "shipments": query_json(
+            &connection,
+            &format!("{} ORDER BY h.created_at, h.id;", production::SHIPMENT_LIST_SQL),
+            &[],
+        )?,
+        "storage_sop_text": business_settings(&connection).storage_sop_text,
+        "carriers": query_json(&connection, production::CARRIER_LIST_SQL, &[])?,
     }))
 }
 
@@ -4903,6 +4957,9 @@ pub async fn desktop_record_purchase_order(
     let (batch, po_id, base_status, base_eta, order, delay, number, supplier) = {
         let connection = storage::database(&state.data_dir)?;
         let batch = find_batch(&connection, &batch_id)?;
+        if batch["stages_done"].as_i64().unwrap_or(0) > 0 {
+            return Err(production_invalid(production::PRODUCTION_STARTED));
+        }
         if action == "PO_ADD" {
             let order = production::validate_purchase_order(step.get("order").unwrap_or(&Value::Null))
                 .map_err(production_invalid)?;
@@ -5094,6 +5151,379 @@ pub async fn desktop_mark_materials_ready(
     Ok(json!({ "id": batch_id, "material_status": "READY" }))
 }
 
+// ---------------------------------------------------------------------------
+// Pengiriman dan Surat Jalan (v3.4, PRD F-27, D-47). Cermin
+// `createShipment`/`recordShipmentStep` di `src/lib/server/production.ts`.
+// ---------------------------------------------------------------------------
+
+/// Alasan batal pengiriman: wajib, paling banyak 500 karakter.
+fn shipment_cancel_reason(step: &Value) -> Result<String, CommandError> {
+    step.get("reason")
+        .and_then(Value::as_str)
+        .map(|reason| reason.trim().to_owned())
+        .filter(|reason| !reason.is_empty() && reason.chars().count() <= production::PRODUCTION_REASON_MAX)
+        .ok_or_else(|| production_invalid(production::SHIPMENT_CANCEL_REASON_INVALID))
+}
+
+/// Terbitkan Surat Jalan untuk work order yang siap kirim (keputusan G).
+/// Cermin `createShipment`.
+#[tauri::command]
+pub async fn desktop_create_shipment(
+    state: State<'_, DesktopState>,
+    batch_id: String,
+    shipment: Value,
+) -> Result<Value, CommandError> {
+    let operator = require_permission(&state, "shipping.manage")?;
+    let tag = sync::local_device_tag(&state)?.ok_or_else(|| {
+        CommandError::new(
+            "DEVICE_TAG_MISSING",
+            "This device has no code tag yet. Connect it to the database once to get one.",
+        )
+    })?;
+    let input = production::validate_shipment(&shipment).map_err(production_invalid)?;
+    let now = storage::now_epoch_seconds();
+    let timestamp = clients::utc_timestamp(now);
+    let prefix = code_prefix(&state, clients::DELIVERY_NOTE_PREFIX_SETTING, production::DEFAULT_DELIVERY_NOTE_PREFIX);
+    let (batch, number) = {
+        let connection = storage::database(&state.data_dir)?;
+        let batch = find_batch(&connection, &batch_id)?;
+        let active: i64 = connection
+            .query_row(production::SHIPMENT_ACTIVE_SQL, [batch_id.as_str(), ""], |row| row.get(0))
+            .map_err(|_| CommandError::internal())?;
+        let gate = production::ship_gate_error(&production::ShipState::from_row(&batch));
+        if let Some(message) = production::shipment_request_error(gate, active) {
+            return Err(production_invalid(message));
+        }
+        if input.method == "CARRIER" && !option_usable(&connection, &input.carrier_option_id, "CARRIER", None)? {
+            return Err(production_invalid("Choose an active shipping company."));
+        }
+        let stamp = clients::company_date_stamp(now, &company_timezone(&connection));
+        let mut statement = connection
+            .prepare("SELECT delivery_note_no FROM shipments WHERE delivery_note_no LIKE ?;")
+            .map_err(|_| CommandError::internal())?;
+        let numbers = statement
+            .query_map([format!("%-{stamp}-{tag}__")], |row| row.get::<_, String>(0))
+            .map_err(|_| CommandError::internal())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| CommandError::internal())?;
+        let number = clients::next_client_sequence(numbers.iter().map(String::as_str), &stamp, &tag)
+            .and_then(|sequence| clients::format_client_code(&prefix, &stamp, &tag, sequence))
+            .ok_or_else(|| production_invalid("This device has used up its delivery note numbers for today."))?;
+        (batch, number)
+    };
+    let id = clients::new_uuid();
+    let log_id = clients::new_uuid();
+    let sample_id = batch["sample_request_id"].as_str().unwrap_or_default().to_owned();
+    let client_id = batch["client_id"].as_str().unwrap_or_default().to_owned();
+    let notes = production::shipment_log_notes(
+        production::SHIPMENT_CREATE_ACTION,
+        &production::ShipmentLogInput {
+            delivery_note_no: &number,
+            method: input.method,
+            carrier_label: "",
+            tracking_no: "",
+            driver_name: &input.driver_name,
+            vehicle_plate: &input.vehicle_plate,
+            reason: "",
+        },
+    );
+    let payload = json!({
+        "id": id,
+        "batch_id": batch_id,
+        "sample_request_id": sample_id,
+        "client_id": client_id,
+        "delivery_note_no": number,
+        "shipment": input.to_json(),
+        "created_by": operator.id,
+        "created_at": timestamp,
+        "log": { "id": log_id },
+    });
+    let audit = AuditEntry {
+        actor: &operator,
+        action: "shipment.create",
+        entity_type: "sample",
+        entity_id: &sample_id,
+        summary: json!({
+            "client_code": batch["client_code"],
+            "brand_name": batch["brand_name"],
+            "batch_code": batch["batch_code"],
+            "delivery_note_no": number,
+        }),
+        on_behalf_of: None,
+    };
+    commit_with_outbox(&state, "shipment", "create", &id, payload, Some(audit), |transaction| {
+        transaction
+            .execute(
+                production::SHIPMENT_INSERT_SQL,
+                rusqlite::params![
+                    &id,
+                    &batch_id,
+                    &sample_id,
+                    &client_id,
+                    &number,
+                    input.method,
+                    &input.carrier_option_id,
+                    &input.driver_name,
+                    &input.driver_phone,
+                    &input.vehicle_plate,
+                    input.carton_count,
+                    input.unit_count,
+                    &input.ship_on,
+                    &input.ship_to_address,
+                    &input.notes,
+                    operator.id,
+                    &timestamp,
+                ],
+            )
+            .map_err(|_| CommandError::internal())?;
+        transaction
+            .execute(
+                samples::SAMPLE_STATUS_LOG_INSERT_SQL,
+                rusqlite::params![
+                    &log_id,
+                    &sample_id,
+                    "",
+                    "PREPARED",
+                    production::SHIPMENT_CREATE_ACTION,
+                    &notes,
+                    "",
+                    operator.id,
+                    &timestamp
+                ],
+            )
+            .map_err(|_| CommandError::internal())?;
+        Ok(())
+    })?;
+    let _ = sync::synchronize(&state).await;
+    Ok(json!({ "id": id, "delivery_note_no": number }))
+}
+
+/// Satu langkah pengiriman: koreksi, batal, kirim, resi, atau diteruskan ke
+/// klien (keputusan A). `step` = `{ action, shipment, tracking_no, reason,
+/// evidence_base64 }`. Cermin `recordShipmentStep`.
+#[tauri::command]
+pub async fn desktop_record_shipment_step(
+    state: State<'_, DesktopState>,
+    shipment_id: String,
+    step: Value,
+) -> Result<Value, CommandError> {
+    let action = step.get("action").and_then(Value::as_str).unwrap_or_default().to_owned();
+    if !production::SHIPMENT_ACTIONS.contains(&action.as_str()) {
+        return Err(production_invalid("This shipment step does not exist."));
+    }
+    let operator = require_permission(&state, production::shipment_action_permission(&action))?;
+    let now = clients::utc_timestamp(storage::now_epoch_seconds());
+    let (current, update) = {
+        let connection = storage::database(&state.data_dir)?;
+        let current = query_json(
+            &connection,
+            &format!("{} WHERE h.id = ?;", production::SHIPMENT_LIST_SQL),
+            &[&shipment_id],
+        )?
+        .into_iter()
+        .next()
+        .ok_or_else(|| CommandError::new("SHIPMENT_NOT_FOUND", "Shipment not found."))?;
+        let update = if action == "SHIP_UPDATE" {
+            let input = production::validate_shipment(step.get("shipment").unwrap_or(&Value::Null))
+                .map_err(production_invalid)?;
+            if input.method == "CARRIER" && !option_usable(&connection, &input.carrier_option_id, "CARRIER", None)? {
+                return Err(production_invalid("Choose an active shipping company."));
+            }
+            Some(input)
+        } else {
+            None
+        };
+        (current, update)
+    };
+    let field = |key: &str| current[key].as_str().unwrap_or_default().to_owned();
+    let base_status = field("status");
+    let status = production::apply_shipment_action(&base_status, &field("method"), &field("tracking_no"), &action)
+        .map_err(production_invalid)?;
+    let tracking = match action.as_str() {
+        "SHIP_DISPATCH" | "SHIP_TRACKING" => production::normalize_tracking(step.get("tracking_no"), action == "SHIP_TRACKING")
+            .ok_or_else(|| production_invalid(production::TRACKING_INVALID))?,
+        _ => String::new(),
+    };
+    let reason = if action == "SHIP_CANCEL" { shipment_cancel_reason(&step)? } else { String::new() };
+    let evidence = match step
+        .get("evidence_base64")
+        .and_then(Value::as_str)
+        .filter(|data| action == "SHIP_DISPATCH" && !data.is_empty())
+    {
+        Some(data) => {
+            let size = samples::validate_media_upload("SHIPMENT_PROOF", data).map_err(sample_invalid)?;
+            Some((clients::new_uuid(), data.to_owned(), size as i64))
+        }
+        None => None,
+    };
+    let sample_id = field("sample_request_id");
+    let base_updated_at = field("updated_at");
+    let tracking_for_log = if tracking.is_empty() { field("tracking_no") } else { tracking.clone() };
+    let notes = production::shipment_log_notes(
+        &action,
+        &production::ShipmentLogInput {
+            delivery_note_no: &field("delivery_note_no"),
+            method: &field("method"),
+            carrier_label: &field("carrier_label"),
+            tracking_no: &tracking_for_log,
+            driver_name: &field("driver_name"),
+            vehicle_plate: &field("vehicle_plate"),
+            reason: &reason,
+        },
+    );
+    let log_id = clients::new_uuid();
+    let payload = json!({
+        "id": shipment_id,
+        "batch_id": field("batch_id"),
+        "sample_request_id": sample_id,
+        "action": action,
+        "base_status": base_status,
+        "status": status,
+        "base_updated_at": base_updated_at,
+        "shipment": update.as_ref().map(production::ShipmentInput::to_json),
+        "tracking_no": tracking,
+        "reason": reason,
+        "updated_at": now,
+        "recorded_by": operator.id,
+        "log": { "id": log_id, "notes": notes },
+    });
+    let payload = with_evidence(payload, &evidence);
+    let audit = AuditEntry {
+        actor: &operator,
+        action: "shipment.step",
+        entity_type: "sample",
+        entity_id: &sample_id,
+        summary: json!({
+            "client_code": current["client_code"],
+            "brand_name": current["brand_name"],
+            "delivery_note_no": current["delivery_note_no"],
+            "action": action,
+            "notes": notes,
+        }),
+        on_behalf_of: None,
+    };
+    commit_with_outbox(&state, "shipment", "transition", &shipment_id, payload, Some(audit), |transaction| {
+        let changed = match &update {
+            Some(input) => transaction.execute(
+                production::SHIPMENT_UPDATE_SQL,
+                rusqlite::params![
+                    &shipment_id,
+                    input.method,
+                    &input.carrier_option_id,
+                    &input.driver_name,
+                    &input.driver_phone,
+                    &input.vehicle_plate,
+                    input.carton_count,
+                    input.unit_count,
+                    &input.ship_on,
+                    &input.ship_to_address,
+                    &input.notes,
+                    &now,
+                    &base_updated_at
+                ],
+            ),
+            None => transaction.execute(
+                production::SHIPMENT_STEP_SQL,
+                rusqlite::params![&shipment_id, status, &tracking, &reason, &now, &base_status, &base_updated_at],
+            ),
+        }
+        .map_err(|_| CommandError::internal())?;
+        if changed == 0 {
+            return Err(production_invalid(production::SHIPMENT_CHANGED_ELSEWHERE));
+        }
+        insert_evidence(transaction, "SHIPMENT_PROOF", &evidence, &sample_id, operator.id, &now)?;
+        transaction
+            .execute(
+                samples::SAMPLE_STATUS_LOG_INSERT_SQL,
+                rusqlite::params![&log_id, &sample_id, &base_status, status, &action, &notes, "", operator.id, &now],
+            )
+            .map_err(|_| CommandError::internal())?;
+        Ok(())
+    })?;
+    let _ = sync::synchronize(&state).await;
+    Ok(json!({ "id": shipment_id, "status": status }))
+}
+
+/// Tandai tahap lantai produksi berikutnya selesai (v3.2, PRD F-25,
+/// keputusan B-D). `stage` = `{ notes, carton_count, produced_units }`; koli
+/// dan unit jadi hanya untuk Packing. Cermin `recordBatchStage`.
+#[tauri::command]
+pub async fn desktop_record_batch_stage(
+    state: State<'_, DesktopState>,
+    batch_id: String,
+    stage: Value,
+) -> Result<Value, CommandError> {
+    let operator = require_permission(&state, "production.manage")?;
+    let now = clients::utc_timestamp(storage::now_epoch_seconds());
+    let batch = {
+        let connection = storage::database(&state.data_dir)?;
+        find_batch(&connection, &batch_id)?
+    };
+    let done = batch["stages_done"].as_i64().unwrap_or(0);
+    if let Some(message) = production::stage_gate_error(
+        done,
+        batch["material_status"].as_str().unwrap_or_default(),
+        !batch["sched_packing_on"].as_str().unwrap_or_default().is_empty(),
+        batch["legal_open"].as_i64().unwrap_or(0),
+    ) {
+        return Err(production_invalid(message));
+    }
+    let record = production::validate_stage_record(&stage, done).map_err(production_invalid)?;
+    let name = production::PRODUCTION_STAGES[done as usize];
+    let previous = if done > 0 { production::PRODUCTION_STAGES[done as usize - 1] } else { "" };
+    let notes = production::stage_log_notes(name, &record);
+    let action = format!("STAGE_{name}");
+    let (cartons, units) = record
+        .packing
+        .as_ref()
+        .map_or((0, 0), |packing| (packing.carton_count, packing.produced_units));
+    let sample_id = batch["sample_request_id"].as_str().unwrap_or_default().to_owned();
+    let log_id = clients::new_uuid();
+    let payload = json!({
+        "id": batch_id,
+        "sample_request_id": sample_id,
+        "base_stages_done": done,
+        "stage": record.to_json(),
+        "updated_at": now,
+        "recorded_by": operator.id,
+        "log": { "id": log_id },
+    });
+    let audit = AuditEntry {
+        actor: &operator,
+        action: "batch.stage",
+        entity_type: "sample",
+        entity_id: &sample_id,
+        summary: json!({
+            "client_code": batch["client_code"],
+            "brand_name": batch["brand_name"],
+            "batch_code": batch["batch_code"],
+            "stage": name,
+            "notes": notes,
+        }),
+        on_behalf_of: None,
+    };
+    commit_with_outbox(&state, "batch", "stage", &batch_id, payload, Some(audit), |transaction| {
+        let changed = transaction
+            .execute(
+                production::BATCH_STAGE_SQL,
+                rusqlite::params![&batch_id, done + 1, &now, cartons, units],
+            )
+            .map_err(|_| CommandError::internal())?;
+        if changed == 0 {
+            return Err(production_invalid(production::BATCH_CHANGED_ELSEWHERE));
+        }
+        transaction
+            .execute(
+                samples::SAMPLE_STATUS_LOG_INSERT_SQL,
+                rusqlite::params![&log_id, &sample_id, previous, name, &action, &notes, "", operator.id, &now],
+            )
+            .map_err(|_| CommandError::internal())?;
+        Ok(())
+    })?;
+    let _ = sync::synchronize(&state).await;
+    Ok(json!({ "id": batch_id, "stages_done": done + 1 }))
+}
+
 /// Jadwal 4 tahap oleh SPV (keputusan K). Cermin `saveBatchSchedule`.
 #[tauri::command]
 pub async fn desktop_save_batch_schedule(
@@ -5109,6 +5539,19 @@ pub async fn desktop_save_batch_schedule(
     };
     let has_schedule = !batch["sched_packing_on"].as_str().unwrap_or_default().is_empty();
     let checked = production::validate_batch_schedule(&schedule, has_schedule).map_err(production_invalid)?;
+    let current = |key: &str| batch[key].as_str().unwrap_or_default().to_owned();
+    if let Some(message) = production::schedule_lock_error(
+        batch["stages_done"].as_i64().unwrap_or(0),
+        &[
+            &current("sched_weighing_on"),
+            &current("sched_mixing_on"),
+            &current("sched_filling_on"),
+            &current("sched_packing_on"),
+        ],
+        &[&checked.weighing_on, &checked.mixing_on, &checked.filling_on, &checked.packing_on],
+    ) {
+        return Err(production_invalid(message));
+    }
     let base = batch["schedule_updated_at"].as_str().unwrap_or_default().to_owned();
     let sample_id = batch["sample_request_id"].as_str().unwrap_or_default().to_owned();
     let notes = production::schedule_log_notes(&checked);
@@ -5765,12 +6208,13 @@ pub async fn desktop_create_invoice(
         let ticket = if sample_id.is_empty() {
             None
         } else {
-            Some(
-                query_json(&connection, &format!("{SAMPLE_LIST_SQL} WHERE s.id = ?;"), &[&sample_id])?
-                    .into_iter()
-                    .next()
-                    .ok_or_else(|| CommandError::new("SAMPLE_NOT_FOUND", "Sample request not found."))?,
-            )
+            let mut row = query_json(&connection, &format!("{SAMPLE_LIST_SQL} WHERE s.id = ?;"), &[&sample_id])?
+                .into_iter()
+                .next()
+                .ok_or_else(|| CommandError::new("SAMPLE_NOT_FOUND", "Sample request not found."))?;
+            // Pelunasan dan biaya titip (v3.3) membaca work order tiket ini.
+            attach_ship_state(&connection, std::slice::from_mut(&mut row))?;
+            Some(row)
         };
         let rules_ticket = ticket.as_ref().map(|row| finance::InvoiceTicket {
             is_paid_sample: row["is_paid_sample"].as_i64() == Some(1),
@@ -5778,6 +6222,9 @@ pub async fn desktop_create_invoice(
             revision_fee_idr: row["revision_fee_idr"].as_i64(),
             dummy_round: row["dummy_round"].as_i64(),
             mou_accepted: row["mou_status"].as_str() == Some("ACCEPTED"),
+            batch_packed: row["batch_stages"].as_i64().unwrap_or(0) >= 4,
+            settlement_cleared: row["settlement_cleared"].as_i64() == Some(1),
+            storage_fee_idr: row["storage_fee_idr"].as_i64().unwrap_or(0),
         });
         if let Some(message) = finance::invoice_type_error(&ref_type, rules_ticket.as_ref()) {
             return Err(finance_invalid(message));
@@ -6474,7 +6921,8 @@ pub fn desktop_save_document(
     file_name: String,
     data_base64: String,
 ) -> Result<Value, CommandError> {
-    require_permission(&state, "invoices.view")?;
+    // Invoice/MoU (v2.3c) dan Surat Jalan/SOP (v3.4).
+    require_permission(&state, "invoices.view").or_else(|_| require_permission(&state, "production.view"))?;
     let name = document_file_name(&file_name)
         .ok_or_else(|| CommandError::new("DOCUMENT_INVALID", "The document name is invalid."))?;
     let bytes = BASE64_STANDARD

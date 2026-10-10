@@ -319,6 +319,44 @@ pub fn render_notification(
             format!("Saved {when}"),
         ]
         .join("\n"),
+        "SHIPMENT_SHIPPED" => {
+            let via = if field(payload, "method") == "FLEET" {
+                format!("driver {} ({})", field(payload, "driver_name"), field(payload, "vehicle_plate"))
+            } else {
+                format!(
+                    "{}, tracking {}",
+                    or_dash(field(payload, "carrier")),
+                    or_dash(field(payload, "tracking_no"))
+                )
+            };
+            [
+                format!("Shipped, forward it to the client: {sample}"),
+                format!("Delivery note {}, {via}", field(payload, "delivery_note_no")),
+                format!("Shipped {when}"),
+            ]
+            .join("\n")
+        }
+        "SHIP_CLEARED" => [
+            format!("Cleared to ship: {sample}"),
+            format!(
+                "Work order {}: {} cartons are paid for and can leave the factory.",
+                field(payload, "batch_code"),
+                field(payload, "carton_count")
+            ),
+            format!("Cleared {when}"),
+        ]
+        .join("\n"),
+        "BATCH_PACKED" => [
+            format!("Packing done, issue the settlement invoice: {sample}"),
+            format!(
+                "Work order {}: {} cartons, {} units",
+                field(payload, "batch_code"),
+                field(payload, "carton_count"),
+                field(payload, "produced_units")
+            ),
+            format!("Packed {when}"),
+        ]
+        .join("\n"),
         "COLD_DIGEST" => {
             let leads = payload
                 .get("leads")
@@ -366,6 +404,15 @@ pub const NOTIFY_BATCH_CREATED_SQL: &str = "INSERT INTO notification_outbox (id,
 
 /// PO terlambat, ke grup CS dan Production (v3.1, E-30). ?1 = id log, ?2 = id PO.
 pub const NOTIFY_PO_LATE_SQL: &str = "INSERT INTO notification_outbox (id, event_type, target_division, payload_json, occurred_at, status, attempts, next_attempt_at, created_at) SELECT 'po-late:' || ?1 || ':' || d.division, 'PO_LATE', d.division, json_object('sample_id', s.id, 'client_code', COALESCE(c.client_code, ''), 'client_name', COALESCE(c.name, ''), 'brand_name', s.brand_name, 'batch_code', b.batch_code, 'po_number', p.po_number, 'supplier', COALESCE(o.label, ''), 'eta_on', p.eta_on, 'reason', p.late_reason), p.updated_at, CASE WHEN EXISTS (SELECT 1 FROM telegram_config t WHERE t.id = 'default' AND t.is_active = 1 AND TRIM(COALESCE(t.bot_token, '')) <> '') AND TRIM(COALESCE((SELECT g.value FROM setting_gex_system g WHERE g.key = CASE d.division WHEN 'CS' THEN 'telegram_chat_id_cs' ELSE 'telegram_chat_id_production' END), '')) <> '' THEN 'PENDING' ELSE 'SKIPPED' END, 0, datetime('now'), datetime('now') FROM batch_purchase_orders p JOIN production_batches b ON b.id = p.batch_id JOIN sample_requests s ON s.id = b.sample_request_id LEFT JOIN clients c ON c.id = b.client_id LEFT JOIN master_option o ON o.id = p.supplier_option_id CROSS JOIN (SELECT 'CS' AS division UNION ALL SELECT 'PRODUCTION') d WHERE p.id = ?2 ON CONFLICT(id) DO NOTHING;";
+
+/// Packing selesai, ke grup CS dan Finance (v3.2). ?1 = id log, ?2 = id work order.
+pub const NOTIFY_BATCH_PACKED_SQL: &str = "INSERT INTO notification_outbox (id, event_type, target_division, payload_json, occurred_at, status, attempts, next_attempt_at, created_at) SELECT 'packed:' || ?1 || ':' || d.division, 'BATCH_PACKED', d.division, json_object('sample_id', s.id, 'client_code', COALESCE(c.client_code, ''), 'client_name', COALESCE(c.name, ''), 'brand_name', s.brand_name, 'batch_code', b.batch_code, 'mou_number', m.mou_number, 'carton_count', b.carton_count, 'produced_units', b.produced_units), b.packed_at, CASE WHEN EXISTS (SELECT 1 FROM telegram_config t WHERE t.id = 'default' AND t.is_active = 1 AND TRIM(COALESCE(t.bot_token, '')) <> '') AND TRIM(COALESCE((SELECT g.value FROM setting_gex_system g WHERE g.key = CASE d.division WHEN 'CS' THEN 'telegram_chat_id_cs' ELSE 'telegram_chat_id_finance' END), '')) <> '' THEN 'PENDING' ELSE 'SKIPPED' END, 0, datetime('now'), datetime('now') FROM production_batches b JOIN production_mou m ON m.id = b.mou_id JOIN sample_requests s ON s.id = b.sample_request_id LEFT JOIN clients c ON c.id = b.client_id CROSS JOIN (SELECT 'CS' AS division UNION ALL SELECT 'FINANCE') d WHERE b.id = ?2 AND b.stages_done = 4 ON CONFLICT(id) DO NOTHING;";
+
+/// Order menjadi siap kirim, ke grup Production (v3.3). ?1 = id tagihan.
+pub const NOTIFY_SHIP_CLEARED_SQL: &str = "INSERT INTO notification_outbox (id, event_type, target_division, payload_json, occurred_at, status, attempts, next_attempt_at, created_at) SELECT 'ship-cleared:' || z.id, 'SHIP_CLEARED', 'PRODUCTION', json_object('sample_id', z.sample_request_id, 'client_code', COALESCE(z.client_code, ''), 'client_name', COALESCE(z.client_name, ''), 'brand_name', z.brand_name, 'batch_code', z.batch_code, 'carton_count', z.carton_count), datetime('now'), CASE WHEN EXISTS (SELECT 1 FROM telegram_config t WHERE t.id = 'default' AND t.is_active = 1 AND TRIM(COALESCE(t.bot_token, '')) <> '') AND TRIM(COALESCE((SELECT g.value FROM setting_gex_system g WHERE g.key = 'telegram_chat_id_production'), '')) <> '' THEN 'PENDING' ELSE 'SKIPPED' END, 0, datetime('now'), datetime('now') FROM (SELECT b.*, CASE WHEN b.stages_done < 4 OR b.packed_at = '' THEN 0 ELSE MAX(0, CAST(julianday(CASE WHEN b.settlement_count > 0 AND b.settlement_unpaid = 0 AND b.settlement_paid_on <> '' THEN b.settlement_paid_on ELSE date('now', b.tz_shift) END) - julianday(date(b.packed_at, b.tz_shift)) AS INTEGER) - b.storage_grace_days) END AS storage_days FROM (SELECT b.*, m.mou_number, m.total_units, m.regulatory_path, m.production_lead_time_days, s.brand_name, c.client_code, c.name AS client_name, (SELECT COUNT(*) FROM batch_purchase_orders p WHERE p.batch_id = b.id AND p.status = 'OPEN') AS open_orders, (SELECT MIN(p.eta_on) FROM batch_purchase_orders p WHERE p.batch_id = b.id AND p.status = 'OPEN') AS next_eta_on, CASE m.regulatory_path WHEN 'WITH_BPOM' THEN 4 ELSE 1 END - (SELECT COUNT(DISTINCT l.kind) FROM legal_documents l WHERE l.mou_id = b.mou_id AND l.status IN ('ISSUED', 'NOT_REQUIRED') AND (m.regulatory_path = 'WITH_BPOM' OR l.kind = 'HALAL')) AS legal_open, s.ship_to_address, m.total_production_cost_idr, m.dp_amount_required_idr, (SELECT COUNT(*) FROM invoices i WHERE i.sample_request_id = b.sample_request_id AND i.ref_type = 'SETTLEMENT' AND i.status <> 'CANCELLED') AS settlement_count, (SELECT COUNT(*) FROM invoices i WHERE i.sample_request_id = b.sample_request_id AND i.ref_type = 'STORAGE_FEE' AND i.status <> 'CANCELLED') AS storage_count, (SELECT COUNT(*) FROM invoices i WHERE i.sample_request_id = b.sample_request_id AND i.status = 'OPEN' AND COALESCE((SELECT p.ref_type FROM invoices p WHERE p.id = i.parent_invoice_id), i.ref_type) = 'SETTLEMENT' AND (SELECT COALESCE(SUM(a.amount_idr), 0) FROM fund_allocations a WHERE a.invoice_id = i.id) < i.total_idr) AS settlement_unpaid, (SELECT COUNT(*) FROM invoices i WHERE i.sample_request_id = b.sample_request_id AND i.status = 'OPEN' AND COALESCE((SELECT p.ref_type FROM invoices p WHERE p.id = i.parent_invoice_id), i.ref_type) IN ('SETTLEMENT', 'SHIPPING', 'STORAGE_FEE') AND (SELECT COALESCE(SUM(a.amount_idr), 0) FROM fund_allocations a WHERE a.invoice_id = i.id) < i.total_idr) AS ship_unpaid, COALESCE((SELECT MAX(f.received_on) FROM invoices i JOIN fund_allocations a ON a.invoice_id = i.id JOIN incoming_funds f ON f.id = a.fund_id WHERE i.sample_request_id = b.sample_request_id AND COALESCE((SELECT p.ref_type FROM invoices p WHERE p.id = i.parent_invoice_id), i.ref_type) = 'SETTLEMENT'), '') AS settlement_paid_on, COALESCE((SELECT CAST(g.value AS INTEGER) FROM setting_gex_system g WHERE g.key = 'storage_grace_days'), 14) AS storage_grace_days, COALESCE((SELECT CAST(g.value AS INTEGER) FROM setting_gex_system g WHERE g.key = 'storage_fee_idr'), 0) AS storage_rate_idr, CASE COALESCE((SELECT z.timezone FROM company_profile z WHERE z.id = 'default_company'), '') WHEN 'Asia/Makassar' THEN '+8 hours' WHEN 'Asia/Jayapura' THEN '+9 hours' ELSE '+7 hours' END AS tz_shift FROM production_batches b JOIN production_mou m ON m.id = b.mou_id JOIN sample_requests s ON s.id = b.sample_request_id LEFT JOIN clients c ON c.id = b.client_id) b) z WHERE z.sample_request_id = (SELECT i.sample_request_id FROM invoices i WHERE i.id = ?1) AND z.stages_done = 4 AND z.settlement_count > 0 AND z.ship_unpaid = 0 AND (z.storage_days * z.carton_count * z.storage_rate_idr = 0 OR z.storage_count > 0) ON CONFLICT(id) DO NOTHING;";
+
+/// Barang keluar, ke grup CS (v3.4). ?1 = id log, ?2 = id pengiriman.
+pub const NOTIFY_SHIPPED_SQL: &str = "INSERT INTO notification_outbox (id, event_type, target_division, payload_json, occurred_at, status, attempts, next_attempt_at, created_at) SELECT 'shipped:' || ?1, 'SHIPMENT_SHIPPED', 'CS', json_object('sample_id', s.id, 'client_code', COALESCE(c.client_code, ''), 'client_name', COALESCE(c.name, ''), 'brand_name', s.brand_name, 'delivery_note_no', h.delivery_note_no, 'method', h.method, 'carrier', COALESCE(o.label, ''), 'tracking_no', h.tracking_no, 'driver_name', h.driver_name, 'vehicle_plate', h.vehicle_plate), h.shipped_at, CASE WHEN EXISTS (SELECT 1 FROM telegram_config t WHERE t.id = 'default' AND t.is_active = 1 AND TRIM(COALESCE(t.bot_token, '')) <> '') AND TRIM(COALESCE((SELECT g.value FROM setting_gex_system g WHERE g.key = 'telegram_chat_id_cs'), '')) <> '' THEN 'PENDING' ELSE 'SKIPPED' END, 0, datetime('now'), datetime('now') FROM shipments h JOIN sample_requests s ON s.id = h.sample_request_id LEFT JOIN clients c ON c.id = h.client_id LEFT JOIN master_option o ON o.id = h.carrier_option_id WHERE h.id = ?2 AND h.status = 'SHIPPED' LIMIT 1 ON CONFLICT(id) DO NOTHING;";
 
 /// Jadwal produksi disimpan, ke grup CS (v3.1). ?1 = id log, ?2 = id work order.
 pub const NOTIFY_BATCH_SCHEDULED_SQL: &str = "INSERT INTO notification_outbox (id, event_type, target_division, payload_json, occurred_at, status, attempts, next_attempt_at, created_at) SELECT 'schedule:' || ?1, 'BATCH_SCHEDULED', 'CS', json_object('sample_id', s.id, 'client_code', COALESCE(c.client_code, ''), 'client_name', COALESCE(c.name, ''), 'brand_name', s.brand_name, 'batch_code', b.batch_code, 'packing_on', b.sched_packing_on, 'notes', COALESCE(l.notes, '')), b.schedule_updated_at, CASE WHEN EXISTS (SELECT 1 FROM telegram_config t WHERE t.id = 'default' AND t.is_active = 1 AND TRIM(COALESCE(t.bot_token, '')) <> '') AND TRIM(COALESCE((SELECT g.value FROM setting_gex_system g WHERE g.key = 'telegram_chat_id_cs'), '')) <> '' THEN 'PENDING' ELSE 'SKIPPED' END, 0, datetime('now'), datetime('now') FROM production_batches b JOIN sample_requests s ON s.id = b.sample_request_id LEFT JOIN clients c ON c.id = b.client_id LEFT JOIN sample_status_log l ON l.id = ?1 WHERE b.id = ?2 LIMIT 1 ON CONFLICT(id) DO NOTHING;";
@@ -978,6 +1025,8 @@ mod tests {
             "reason": "Stock out",
             "packing_on": "2026-11-05",
             "notes": "",
+            "carton_count": 120,
+            "produced_units": 9950,
         });
         let at = "2026-10-03 07:05:00";
         assert_eq!(
@@ -987,6 +1036,34 @@ mod tests {
         assert_eq!(
             render_notification("PO_LATE", &batch, at, "Asia/Jakarta"),
             "Purchase order late: Aura Glow for Aura Beauty (KLN-20261003-WB01)\nWork order BAT-20261010-A101, PO PO-778 from PT Kimia\nNow arriving 2026-10-27: Stock out\nReported 2026-10-03 14:05 WIB"
+        );
+        let mut shipped = batch.clone();
+        for (key, value) in [
+            ("delivery_note_no", "SJ-20261120-A101"),
+            ("method", "CARRIER"),
+            ("carrier", "JNE"),
+            ("tracking_no", "JNE123"),
+            ("driver_name", "Budi"),
+            ("vehicle_plate", "D 1234 AB"),
+        ] {
+            shipped[key] = json!(value);
+        }
+        assert_eq!(
+            render_notification("SHIPMENT_SHIPPED", &shipped, at, "Asia/Jakarta"),
+            "Shipped, forward it to the client: Aura Glow for Aura Beauty (KLN-20261003-WB01)\nDelivery note SJ-20261120-A101, JNE, tracking JNE123\nShipped 2026-10-03 14:05 WIB"
+        );
+        shipped["method"] = json!("FLEET");
+        assert_eq!(
+            render_notification("SHIPMENT_SHIPPED", &shipped, at, "Asia/Jakarta"),
+            "Shipped, forward it to the client: Aura Glow for Aura Beauty (KLN-20261003-WB01)\nDelivery note SJ-20261120-A101, driver Budi (D 1234 AB)\nShipped 2026-10-03 14:05 WIB"
+        );
+        assert_eq!(
+            render_notification("SHIP_CLEARED", &batch, at, "Asia/Jakarta"),
+            "Cleared to ship: Aura Glow for Aura Beauty (KLN-20261003-WB01)\nWork order BAT-20261010-A101: 120 cartons are paid for and can leave the factory.\nCleared 2026-10-03 14:05 WIB"
+        );
+        assert_eq!(
+            render_notification("BATCH_PACKED", &batch, at, "Asia/Jakarta"),
+            "Packing done, issue the settlement invoice: Aura Glow for Aura Beauty (KLN-20261003-WB01)\nWork order BAT-20261010-A101: 120 cartons, 9950 units\nPacked 2026-10-03 14:05 WIB"
         );
         assert_eq!(
             render_notification("BATCH_SCHEDULED", &batch, at, "Asia/Jakarta"),

@@ -186,6 +186,9 @@ describe("jenis tagihan per tiket (jenis_tagihan_per_tiket)", () => {
     revision_fee_idr: 750_000,
     dummy_round: 0,
     mou_accepted: true,
+    batch_packed: true,
+    settlement_cleared: true,
+    storage_fee_idr: 60_000,
   };
   const free = {
     is_paid_sample: false,
@@ -193,7 +196,11 @@ describe("jenis tagihan per tiket (jenis_tagihan_per_tiket)", () => {
     revision_fee_idr: null,
     dummy_round: null,
     mou_accepted: false,
+    batch_packed: false,
+    settlement_cleared: false,
+    storage_fee_idr: 0,
   };
+  const waived = { ...paid, storage_fee_idr: 0 };
   const cases: [string, typeof paid | typeof free | null, string | null][] = [
     ["SAMPLE_FEE", paid, null],
     ["TEST_FEE", paid, null],
@@ -208,6 +215,12 @@ describe("jenis tagihan per tiket (jenis_tagihan_per_tiket)", () => {
     ["DP_PRODUCTION_LEGAL", paid, null],
     ["DP_PRODUCTION_LEGAL", free, "The client has not accepted the MoU yet."],
     ["PRINT_FEE", paid, "Choose what the invoice is for."],
+    ["SETTLEMENT", paid, null],
+    ["SETTLEMENT", free, "Production is not packed yet."],
+    ["SHIPPING", free, "Production is not packed yet."],
+    ["STORAGE_FEE", paid, null],
+    ["STORAGE_FEE", free, "The settlement invoice is not paid yet."],
+    ["STORAGE_FEE", waived, "There is no storage fee for this order."],
   ];
   for (const [refType, ticket, expected] of cases) {
     test(`${refType} ${expected}`, () => {

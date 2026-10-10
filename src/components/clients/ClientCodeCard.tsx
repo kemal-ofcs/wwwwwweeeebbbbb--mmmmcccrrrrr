@@ -15,13 +15,17 @@ import {
 } from "@/lib/validations/client";
 import { INVOICE_NUMBER_PREFIX } from "@/lib/validations/finance";
 import { MOU_NUMBER_PREFIX } from "@/lib/validations/mou";
-import { DEFAULT_BATCH_CODE_PREFIX } from "@/lib/validations/production";
+import {
+  DEFAULT_BATCH_CODE_PREFIX,
+  DEFAULT_DELIVERY_NOTE_PREFIX,
+} from "@/lib/validations/production";
 
 /** Awalan nomor dokumen lain (D-43), aturannya sama dengan awalan kode klien. */
 const DOCUMENT_PREFIXES = [
   ["invoice_number_prefix", "Invoices"],
   ["mou_number_prefix", "MoUs"],
   ["batch_code_prefix", "Work orders"],
+  ["delivery_note_prefix", "Delivery notes"],
 ] as const;
 
 /**
@@ -36,6 +40,7 @@ export function ClientCodeCard() {
     invoice_number_prefix: INVOICE_NUMBER_PREFIX,
     mou_number_prefix: MOU_NUMBER_PREFIX,
     batch_code_prefix: DEFAULT_BATCH_CODE_PREFIX,
+    delivery_note_prefix: DEFAULT_DELIVERY_NOTE_PREFIX,
     device_tag: null,
   });
   const [loading, setLoading] = useState(true);
@@ -84,6 +89,7 @@ export function ClientCodeCard() {
           invoice_number_prefix: settings.invoice_number_prefix,
           mou_number_prefix: settings.mou_number_prefix,
           batch_code_prefix: settings.batch_code_prefix,
+          delivery_note_prefix: settings.delivery_note_prefix,
         }),
       );
       setFeedback({
@@ -122,7 +128,8 @@ export function ClientCodeCard() {
             New clients get a code like{" "}
             <span className="font-mono">{example}</span>: prefix, company date,
             the device code, and a running number. Invoices, MoUs, and work
-            orders follow the same pattern with their own prefix.
+            orders, and delivery notes follow the same pattern with their own
+            prefix.
           </p>
         </div>
       </div>

@@ -98,6 +98,7 @@ export interface ClientCodeSettings {
   invoice_number_prefix: string;
   mou_number_prefix: string;
   batch_code_prefix: string;
+  delivery_note_prefix: string;
   /** Tag perangkat ini. Selalu `null` di Web; `null` di perangkat yang belum pernah tersambung. */
   device_tag: string | null;
 }

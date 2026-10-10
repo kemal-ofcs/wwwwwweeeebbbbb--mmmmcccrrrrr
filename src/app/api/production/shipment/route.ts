@@ -4,7 +4,6 @@ import {
   ensureServerDatabaseInitialized,
   getServerDatabase,
 } from "@/lib/server/db";
-import { allocateFund } from "@/lib/server/finance";
 import {
   noStoreJson,
   readJsonBody,
@@ -12,18 +11,19 @@ import {
 } from "@/lib/server/http/api-response";
 import { assertSameOriginMutation } from "@/lib/server/http/request-security";
 import { dispatchNotificationsQuietly } from "@/lib/server/notifications";
+import { createShipment } from "@/lib/server/production";
 
 export const runtime = "nodejs";
 
-/** Cerminan `desktop_allocate_fund` (PRD F-17, v2.3a). */
+/** Cerminan `desktop_create_shipment` (v3.4, PRD F-27). */
 export async function POST(request: NextRequest) {
   try {
     assertSameOriginMutation(request);
     await ensureServerDatabaseInitialized();
-    const operator = await requireWebPermission(request, "finance.manage");
     const body = await readJsonBody<Record<string, unknown>>(request);
-    const result = await allocateFund(getServerDatabase(), body, operator);
-    // Order siap kirim: grup Production diberi tahu sesudah respons (v3.3).
+    const operator = await requireWebPermission(request, "shipping.manage");
+    const result = await createShipment(getServerDatabase(), body, operator);
+    // Barang keluar: grup CS diberi tahu sesudah respons (keputusan H).
     after(() => dispatchNotificationsQuietly(getServerDatabase()));
     return noStoreJson({ sukses: true, ...result });
   } catch (error) {

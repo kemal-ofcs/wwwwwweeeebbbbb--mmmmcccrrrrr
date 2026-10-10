@@ -5,6 +5,7 @@ import { type AuditActor, writeAudit } from "@/lib/server/audit";
 import { loadBusinessSettings } from "@/lib/server/business-settings";
 import { companyTimezone, getClientCodeSettings } from "@/lib/server/clients";
 import { ApiRequestError } from "@/lib/server/http/api-response";
+import { attachShipState } from "@/lib/server/production";
 import {
   companyDateStamp,
   formatClientCode,
@@ -47,6 +48,7 @@ import {
   validateFundDraft,
 } from "@/lib/validations/finance";
 import { validateMediaUpload } from "@/lib/validations/media";
+import { NOTIFY_SHIP_CLEARED_SQL } from "@/lib/validations/notification";
 import { SAMPLE_LIST_SQL } from "@/lib/validations/sample";
 
 /**
@@ -209,6 +211,8 @@ export async function createInvoice(
       );
       ticket = found[0] ?? null;
       if (!ticket) throw new ApiRequestError("Sample request not found.", 404);
+      // Pelunasan dan biaya titip (v3.3) membaca work order tiket ini.
+      [ticket] = await attachShipState(transaction, [ticket]);
     }
     const typeError = invoiceTypeError(
       refType,
@@ -223,6 +227,9 @@ export async function createInvoice(
             dummy_round:
               ticket.dummy_round == null ? null : Number(ticket.dummy_round),
             mou_accepted: ticket.mou_status === "ACCEPTED",
+            batch_packed: Number(ticket.batch_stages ?? 0) >= 4,
+            settlement_cleared: Number(ticket.settlement_cleared ?? 0) === 1,
+            storage_fee_idr: Number(ticket.storage_fee_idr ?? 0),
           }
         : null,
     );
@@ -333,6 +340,8 @@ export async function createInvoice(
       ref_type: refType,
       total_idr: totals.total_idr,
     });
+    // Tagihan biaya titip yang dibebaskan (total 0) langsung lunas (v3.3).
+    await transaction.execute({ sql: NOTIFY_SHIP_CLEARED_SQL, args: [id] });
     await transaction.commit();
     return { id, invoice_number: number, total_idr: totals.total_idr };
   } finally {
@@ -479,6 +488,11 @@ export async function allocateFund(
     await transaction.execute({
       sql: ALLOCATION_INSERT_SQL,
       args: [id, fundId, invoiceId, amount, actor.id, stamp],
+    });
+    // Pelunasan lunas: Logistik boleh mengirim (v3.3, keputusan H).
+    await transaction.execute({
+      sql: NOTIFY_SHIP_CLEARED_SQL,
+      args: [invoiceId],
     });
     await writeAudit(
       transaction,

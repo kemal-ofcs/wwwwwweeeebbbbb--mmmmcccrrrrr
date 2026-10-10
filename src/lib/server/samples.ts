@@ -9,7 +9,7 @@ import {
   insertClientEvidence,
   listSampleMedia,
 } from "@/lib/server/media";
-import { sampleProduction } from "@/lib/server/production";
+import { attachShipState, sampleProduction } from "@/lib/server/production";
 import {
   applyDesignAction,
   DESIGN_ACTIVE_SQL,
@@ -115,7 +115,8 @@ export async function listSampleRequests(client: Client) {
   );
   const settings = await loadBusinessSettings(client);
   return {
-    requests: result.rows.map(plain),
+    // Ringkasan kirim work order (v3.3) untuk Next step dan Finance queue.
+    requests: await attachShipState(client, result.rows.map(plain)),
     sample_fee_mode: settings.sample_fee_mode,
   };
 }
@@ -145,7 +146,9 @@ export async function getSampleRequest(
   withCosts: boolean,
 ) {
   const key = typeof id === "string" ? id.trim() : "";
-  const request = await findSample(client, key);
+  const [request] = await attachShipState(client, [
+    await findSample(client, key),
+  ]);
   const statusLog = await client.execute({
     sql: "SELECT l.*, o.nama_operator AS recorded_by_name FROM sample_status_log l LEFT JOIN master_operator o ON o.id = l.recorded_by WHERE l.sample_request_id = ? ORDER BY l.recorded_at DESC, l.rowid DESC;",
     args: [key],

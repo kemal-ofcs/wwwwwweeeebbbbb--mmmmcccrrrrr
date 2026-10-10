@@ -21,6 +21,7 @@ export const CLIENT_CODE_WEB_TAG_SETTING = "client_code_web_tag";
 export const INVOICE_PREFIX_SETTING = "invoice_number_prefix";
 export const MOU_PREFIX_SETTING = "mou_number_prefix";
 export const BATCH_PREFIX_SETTING = "batch_code_prefix";
+export const DELIVERY_NOTE_PREFIX_SETTING = "delivery_note_prefix";
 
 /** Siklus hidup klien (PRD D-09). Divalidasi aplikasi, bukan CHECK (keputusan G). */
 export const CLIENT_LIFECYCLE_STATUSES = [
@@ -41,6 +42,8 @@ export const MASTER_OPTION_KINDS = [
   "RND_REJECT_REASON",
   // Supplier bahan dan kemasan untuk PO PPIC (v3.1, PRD FR-12).
   "SUPPLIER",
+  // Ekspedisi rekanan untuk pengiriman (v3.4, PRD FR-12).
+  "CARRIER",
 ] as const;
 export type MasterOptionKind = (typeof MASTER_OPTION_KINDS)[number];
 

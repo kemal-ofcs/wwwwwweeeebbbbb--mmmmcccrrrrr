@@ -16,6 +16,8 @@ export const SAMPLE_MEDIA_PURPOSES = [
   "LEGAL_DOCUMENT",
   // Desain cetak dummy, opsional saat Start printing (v2.8).
   "DUMMY_ARTWORK",
+  // Bukti serah terima pengiriman, opsional saat Shipped (v3.4).
+  "SHIPMENT_PROOF",
 ] as const;
 export type SampleMediaPurpose = (typeof SAMPLE_MEDIA_PURPOSES)[number];
 
@@ -34,6 +36,7 @@ export const MEDIA_PURPOSE_INVALID = "Choose what the photo is for.";
 
 /** Izin unggah per jenis (keputusan F). Padanan `media_purpose_permission`. */
 export function mediaPurposePermission(purpose: unknown) {
+  if (purpose === "SHIPMENT_PROOF") return "shipping.manage";
   return purpose === "MOCKUP" || purpose === "DUMMY_ARTWORK"
     ? "design.manage"
     : "samples.manage";

@@ -36,6 +36,7 @@ const KIND_TITLE: Record<MasterOptionKind, string> = {
   REGISTRATION_CATEGORY: "Registration categories",
   RND_REJECT_REASON: "RnD rejection reasons",
   SUPPLIER: "Suppliers",
+  CARRIER: "Shipping companies",
 };
 
 const KIND_HINT: Record<MasterOptionKind, string> = {
@@ -49,6 +50,7 @@ const KIND_HINT: Record<MasterOptionKind, string> = {
     "Why RnD turns a request down, e.g. CAP · Factory machine capacity.",
   SUPPLIER:
     "Who PPIC orders materials and packaging from, e.g. KIM · PT Kimia Jaya.",
+  CARRIER: "Who delivers the goods to clients, e.g. JNE · JNE Express.",
 };
 
 function emptyDraft(kind: MasterOptionKind): MasterOptionDraft {

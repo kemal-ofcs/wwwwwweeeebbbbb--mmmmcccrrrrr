@@ -20,6 +20,8 @@ import {
   OFFLINE_LOGIN_MAX_DAYS_LIMIT,
   PAYMENT_INSTRUCTIONS_MAX,
   type SampleFeeMode,
+  STORAGE_GRACE_DAYS_LIMIT,
+  STORAGE_SOP_MAX,
 } from "@/lib/validations/sample";
 
 /**
@@ -253,6 +255,48 @@ export function BusinessSettingsCard({ canManage }: { canManage: boolean }) {
               </span>
             </label>
             <label className="app-label grid gap-1.5">
+              Free storage after packing (days)
+              <input
+                required
+                type="number"
+                min={0}
+                max={STORAGE_GRACE_DAYS_LIMIT}
+                step={1}
+                value={settings.storage_grace_days}
+                onChange={(event) =>
+                  setSettings({
+                    ...settings,
+                    storage_grace_days: wholeNumber(event.target.value),
+                  })
+                }
+                className="app-input font-normal"
+              />
+              <span className="text-body-sm font-normal text-on-surface-variant">
+                Goods waiting for the settlement payment are stored free for
+                this many calendar days.
+              </span>
+            </label>
+            <label className="app-label grid gap-1.5">
+              Storage fee per carton per day (IDR)
+              <input
+                required
+                type="number"
+                min={0}
+                step={1}
+                value={settings.storage_fee_idr}
+                onChange={(event) =>
+                  setSettings({
+                    ...settings,
+                    storage_fee_idr: wholeNumber(event.target.value),
+                  })
+                }
+                className="app-input font-normal"
+              />
+              <span className="text-body-sm font-normal text-on-surface-variant">
+                0 means no storage fee.
+              </span>
+            </label>
+            <label className="app-label grid gap-1.5">
               MoU down payment (%)
               <input
                 required
@@ -401,6 +445,25 @@ export function BusinessSettingsCard({ canManage }: { canManage: boolean }) {
                 }
                 className="app-input min-h-24 py-2 font-normal"
               />
+            </label>
+            <label className="app-label grid gap-1.5 sm:col-span-2">
+              Storage SOP printed with each shipment
+              <textarea
+                rows={4}
+                maxLength={STORAGE_SOP_MAX}
+                value={settings.storage_sop_text}
+                placeholder="Store below 25°C, away from direct sunlight. Stack at most 5 cartons."
+                onChange={(event) =>
+                  setSettings({
+                    ...settings,
+                    storage_sop_text: event.target.value,
+                  })
+                }
+                className="app-input min-h-24 py-2 font-normal"
+              />
+              <span className="text-body-sm font-normal text-on-surface-variant">
+                Leave empty to skip the storage SOP document.
+              </span>
             </label>
           </fieldset>
           <fieldset disabled={!canManage} className="grid gap-4 sm:grid-cols-2">

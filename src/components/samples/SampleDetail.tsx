@@ -541,6 +541,18 @@ export function SampleDetail({
                 batch={data.batch}
                 purchaseOrders={data.purchase_orders}
                 suppliers={data.suppliers}
+                shipments={data.shipments}
+                carriers={data.carriers}
+                storageSopText={data.storage_sop_text}
+                stageLog={data.status_log
+                  .filter((entry) => entry.action.startsWith("STAGE_"))
+                  .map((entry) => ({
+                    sample_request_id: request.id,
+                    action: entry.action,
+                    notes: entry.notes,
+                    recorded_at: entry.recorded_at,
+                    recorded_by_name: entry.recorded_by_name,
+                  }))}
                 onChanged={() => {
                   void load();
                   onChanged();

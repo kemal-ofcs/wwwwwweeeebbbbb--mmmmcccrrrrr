@@ -208,6 +208,10 @@ export const INVOICE_REF_TYPES = [
   "DUMMY_FEE",
   // DP Produksi & Legal dari MoU yang disetujui klien (v2.5a, PRD F-20).
   "DP_PRODUCTION_LEGAL",
+  // Pelunasan, ongkir, dan biaya titip (v3.3, PRD F-26/F-31, D-46).
+  "SETTLEMENT",
+  "SHIPPING",
+  "STORAGE_FEE",
   "OTHER",
 ] as const;
 export type InvoiceRefType = (typeof INVOICE_REF_TYPES)[number];
@@ -221,6 +225,12 @@ export interface InvoiceTicket {
   dummy_round: number | null;
   /** MoU aktif tiket itu sudah disetujui klien (v2.5a). */
   mou_accepted: boolean;
+  /** Work order tiket itu sudah selesai Packing (v3.3). */
+  batch_packed: boolean;
+  /** Tagihan pelunasan ada dan lunas seluruhnya, termasuk cicilannya. */
+  settlement_cleared: boolean;
+  /** Biaya titip berjalan (`storageFeeDue`); 0 = tidak ada. */
+  storage_fee_idr: number;
 }
 
 /**
@@ -253,6 +263,18 @@ export function invoiceTypeError(
   }
   if (refType === "DP_PRODUCTION_LEGAL" && !ticket.mou_accepted) {
     return "The client has not accepted the MoU yet.";
+  }
+  if (
+    (refType === "SETTLEMENT" || refType === "SHIPPING") &&
+    !ticket.batch_packed
+  ) {
+    return "Production is not packed yet.";
+  }
+  if (refType === "STORAGE_FEE") {
+    if (!ticket.settlement_cleared)
+      return "The settlement invoice is not paid yet.";
+    if (ticket.storage_fee_idr < 1)
+      return "There is no storage fee for this order.";
   }
   return null;
 }

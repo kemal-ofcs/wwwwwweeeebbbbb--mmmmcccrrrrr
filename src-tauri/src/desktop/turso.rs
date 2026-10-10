@@ -715,6 +715,11 @@ const SNAPSHOT_SOURCES: &[SnapshotSource] = &[
         table: "batch_purchase_orders",
         sql: "SELECT * FROM batch_purchase_orders ORDER BY created_at, id;",
     },
+    SnapshotSource {
+        payload_key: "shipments",
+        table: "shipments",
+        sql: "SELECT * FROM shipments ORDER BY created_at, id;",
+    },
     // Direktori operator hanya-baca untuk nama PIC dan pilihan pindah PIC saat
     // offline. SENGAJA hanya empat kolom: hash password, email, nomor HP, dan
     // rahasia 2FA tidak pernah meninggalkan cloud.
@@ -1475,6 +1480,7 @@ impl TursoClient {
                 ('legal.manage', 'Record legal documents', 'Legal', 'Record BPOM, halal, and trademark (HKI) filings and certificates.', 1, 67),
                 ('production.view', 'View production', 'Production', 'See work orders, materials, purchase orders, and production schedules.', 1, 68),
                 ('ppic.manage', 'Plan production materials', 'Production', 'Create work orders, record purchase orders, and confirm materials are ready.', 1, 69),
+                ('shipping.manage', 'Ship orders', 'Production', 'Issue delivery notes, mark orders as shipped, and record tracking numbers.', 1, 69),
                 ('production.manage', 'Schedule production', 'Production', 'Set and change the production schedule of each work order.', 1, 69),
                 ('design.override_dummy_limit', 'Override the dummy rejection limit', 'Design', 'Print a dummy again after the client has rejected it as many times as the limit allows.', 1, 66),
                 ('password_reset.view', 'View password reset history', 'Operators', 'Review who requested a password recovery, with their verification photo.', 1, 62),
@@ -1616,6 +1622,16 @@ impl TursoClient {
                 "INSERT OR IGNORE INTO setting_gex_system (key, value) VALUES ('production_permissions_seeded', '1');",
                 vec![],
             ),
+            // Izin pengiriman (v3.4, PRD F-27), sekali saja. WAJIB identik
+            // dengan `SHIPPING_PERMISSION_SEED_SQL` di `db-schema.ts`.
+            Statement::new(
+                "INSERT OR IGNORE INTO role_permission (role_id, permission_key, is_allowed, updated_at, updated_by) SELECT r.id, p.permission_key, 1, datetime('now'), 'system' FROM app_role r JOIN app_permission p ON p.permission_key = 'shipping.manage' WHERE r.role_key IN ('logistics', 'production_spv') AND NOT EXISTS (SELECT 1 FROM setting_gex_system WHERE key = 'shipping_permissions_seeded');",
+                vec![],
+            ),
+            Statement::new(
+                "INSERT OR IGNORE INTO setting_gex_system (key, value) VALUES ('shipping_permissions_seeded', '1');",
+                vec![],
+            ),
             // Izin dokumen legal (v2.6, PRD F-21), sekali saja. WAJIB identik
             // dengan `LEGAL_PERMISSION_SEED_SQL` di `db-schema.ts`.
             Statement::new(
@@ -1677,7 +1693,9 @@ impl TursoClient {
                 (15, 'legal-documents', datetime('now')),
                 (16, 'imported-records', datetime('now')),
                 (17, 'data-export', datetime('now')),
-                (18, 'production-batches', datetime('now'));"#,
+                (18, 'production-batches', datetime('now')),
+                (19, 'batch-stages', datetime('now')),
+                (20, 'shipments', datetime('now'));"#,
                 vec![],
             ),
             // ============ DOMAIN MAKLONOS ============
@@ -1991,6 +2009,10 @@ impl TursoClient {
                     sched_packing_on TEXT NOT NULL DEFAULT '',
                     needs_reschedule INTEGER NOT NULL DEFAULT 0,
                     schedule_updated_at TEXT NOT NULL DEFAULT '',
+                    stages_done INTEGER NOT NULL DEFAULT 0,
+                    packed_at TEXT NOT NULL DEFAULT '',
+                    carton_count INTEGER NOT NULL DEFAULT 0,
+                    produced_units INTEGER NOT NULL DEFAULT 0,
                     created_by INTEGER,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
@@ -2006,6 +2028,35 @@ impl TursoClient {
                     eta_on TEXT NOT NULL,
                     status TEXT NOT NULL DEFAULT 'OPEN',
                     late_reason TEXT NOT NULL DEFAULT '',
+                    created_by INTEGER,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );"#,
+                vec![],
+            ),
+            // Pengiriman (v3.4, PRD F-27). WAJIB identik dengan `db-schema.ts`.
+            Statement::new(
+                r#"CREATE TABLE IF NOT EXISTS shipments (
+                    id TEXT PRIMARY KEY,
+                    batch_id TEXT NOT NULL,
+                    sample_request_id TEXT NOT NULL,
+                    client_id TEXT NOT NULL,
+                    delivery_note_no TEXT NOT NULL,
+                    method TEXT NOT NULL,
+                    carrier_option_id TEXT NOT NULL DEFAULT '',
+                    tracking_no TEXT NOT NULL DEFAULT '',
+                    driver_name TEXT NOT NULL DEFAULT '',
+                    driver_phone TEXT NOT NULL DEFAULT '',
+                    vehicle_plate TEXT NOT NULL DEFAULT '',
+                    carton_count INTEGER NOT NULL,
+                    unit_count INTEGER NOT NULL,
+                    ship_on TEXT NOT NULL,
+                    ship_to_address TEXT NOT NULL DEFAULT '',
+                    notes TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL DEFAULT 'PREPARED',
+                    cancel_reason TEXT NOT NULL DEFAULT '',
+                    shipped_at TEXT NOT NULL DEFAULT '',
+                    forwarded_at TEXT NOT NULL DEFAULT '',
                     created_by INTEGER,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
@@ -2229,6 +2280,10 @@ impl TursoClient {
                 vec![],
             ),
             Statement::new(
+                "CREATE INDEX IF NOT EXISTS idx_shipments_batch ON shipments(batch_id);",
+                vec![],
+            ),
+            Statement::new(
                 "CREATE INDEX IF NOT EXISTS idx_media_asset_owner ON media_asset(owner_type, owner_id);",
                 vec![],
             ),
@@ -2331,6 +2386,11 @@ impl TursoClient {
             ("sample_requests", "revision_fee_idr", "ALTER TABLE sample_requests ADD COLUMN revision_fee_idr INTEGER;"),
             // Sampel sekalian diuji (v2.3a, D-30).
             ("sample_requests", "is_test_requested", "ALTER TABLE sample_requests ADD COLUMN is_test_requested INTEGER NOT NULL DEFAULT 0;"),
+            // Progres tahap lantai produksi (v3.2, PRD F-25).
+            ("production_batches", "stages_done", "ALTER TABLE production_batches ADD COLUMN stages_done INTEGER NOT NULL DEFAULT 0;"),
+            ("production_batches", "packed_at", "ALTER TABLE production_batches ADD COLUMN packed_at TEXT NOT NULL DEFAULT '';"),
+            ("production_batches", "carton_count", "ALTER TABLE production_batches ADD COLUMN carton_count INTEGER NOT NULL DEFAULT 0;"),
+            ("production_batches", "produced_units", "ALTER TABLE production_batches ADD COLUMN produced_units INTEGER NOT NULL DEFAULT 0;"),
         ] {
             self.ensure_column(table, column, sql).await?;
         }
@@ -2478,6 +2538,16 @@ impl TursoClient {
         .await?;
         self.query_one(
             "INSERT OR IGNORE INTO schema_migration (version, name, applied_at) VALUES (-2026, 'production-batches-v1', datetime('now'));",
+            vec![],
+        )
+        .await?;
+        self.query_one(
+            "INSERT OR IGNORE INTO schema_migration (version, name, applied_at) VALUES (-2027, 'batch-stages-v1', datetime('now'));",
+            vec![],
+        )
+        .await?;
+        self.query_one(
+            "INSERT OR IGNORE INTO schema_migration (version, name, applied_at) VALUES (-2028, 'shipments-v1', datetime('now'));",
             vec![],
         )
         .await?;
@@ -2649,7 +2719,7 @@ impl TursoClient {
             .query_one(
                 // Sentinel WAJIB dinaikkan setiap kali ensure_schema menambah
                 // tabel atau kolom — nilainya di sini dan pada INSERT harus sama.
-                "SELECT COUNT(*) AS total FROM schema_migration WHERE version = -2026;",
+                "SELECT COUNT(*) AS total FROM schema_migration WHERE version = -2028;",
                 vec![],
             )
             .await
@@ -3503,6 +3573,62 @@ impl TursoClient {
         })
     }
 
+    /// Pemeriksaan cloud untuk pengiriman (v3.4). `Some(pesan)` = konflik:
+    /// gerbang lunas dan satu pengiriman aktif dihitung ulang dengan data
+    /// cloud; langkah dari status atau suntingan basi ditolak.
+    async fn shipment_guard(
+        &self,
+        operation: &str,
+        entity_key: &str,
+        payload: &Value,
+    ) -> Result<Option<String>, CommandError> {
+        let payload_text = |key: &str| payload.get(key).and_then(Value::as_str).unwrap_or_default().to_owned();
+        if operation == "create" {
+            let batch_id = payload_text("batch_id");
+            let batch = self
+                .query_one(format!("{} WHERE b.id = ?;", production::BATCH_LIST_SQL), vec![json!(batch_id)])
+                .await?
+                .to_objects()
+                .into_iter()
+                .next();
+            let Some(batch) = batch else {
+                return Ok(Some("This work order does not exist in the database.".into()));
+            };
+            let active = self
+                .query_one(production::SHIPMENT_ACTIVE_SQL, vec![json!(batch_id), json!(entity_key)])
+                .await?
+                .to_objects()
+                .into_iter()
+                .next()
+                .and_then(|row| row.get("total").and_then(lenient_i64))
+                .unwrap_or(0);
+            let state = production::ShipState::from_row(&Value::Object(batch.into_iter().collect()));
+            return Ok(production::shipment_request_error(production::ship_gate_error(&state), active).map(str::to_owned));
+        }
+        let row = self
+            .query_one("SELECT status, method, tracking_no, updated_at FROM shipments WHERE id = ?;", vec![json!(entity_key)])
+            .await?
+            .to_objects()
+            .into_iter()
+            .next();
+        let Some(row) = row else {
+            return Ok(Some("This shipment does not exist in the database.".into()));
+        };
+        let cloud = |key: &str| row.get(key).and_then(Value::as_str).unwrap_or_default().to_owned();
+        if cloud("status") != payload_text("base_status") || cloud("updated_at") != payload_text("base_updated_at") {
+            return Ok(Some(production::SHIPMENT_CHANGED_ELSEWHERE.to_owned()));
+        }
+        Ok(
+            match production::apply_shipment_action(&cloud("status"), &cloud("method"), &cloud("tracking_no"), &payload_text("action")) {
+                Err(message) => Some(message.to_owned()),
+                Ok(status) if status != payload_text("status") => {
+                    Some("The shipment step does not match the company rules in the database.".to_owned())
+                }
+                Ok(_) => None,
+            },
+        )
+    }
+
     /// Pemeriksaan cloud untuk work order dan PO (v3.1). `Some(pesan)` =
     /// konflik: syarat dihitung ulang dengan MoU, DP, PO, dan jadwal di cloud,
     /// dan langkah yang dicatat dari keadaan basi ditolak.
@@ -3552,6 +3678,24 @@ impl TursoClient {
             return Ok(Some("This work order does not exist in the database.".into()));
         };
         let batch_text = |key: &str| batch.get(key).and_then(Value::as_str).unwrap_or_default().to_owned();
+        let stages_done = batch.get("stages_done").and_then(lenient_i64).unwrap_or(0);
+        if domain == "batch" && operation == "stage" {
+            // E-34: tablet yang menandai dari tahap basi menjadi konflik.
+            if Some(stages_done) != payload.get("base_stages_done").and_then(lenient_i64) {
+                return Ok(changed());
+            }
+            if let Some(message) = production::stage_gate_error(
+                stages_done,
+                &batch_text("material_status"),
+                !batch_text("sched_packing_on").is_empty(),
+                batch.get("legal_open").and_then(lenient_i64).unwrap_or(0),
+            ) {
+                return Ok(Some(message.to_owned()));
+            }
+            return Ok(production::validate_stage_record(payload.get("stage").unwrap_or(&Value::Null), stages_done)
+                .err()
+                .map(str::to_owned));
+        }
         if domain == "batch" && operation == "ready" {
             return Ok(production::materials_ready_error(
                 &batch_text("material_status"),
@@ -3564,7 +3708,25 @@ impl TursoClient {
                 return Ok(changed());
             }
             let has_schedule = !batch_text("sched_packing_on").is_empty();
-            return Ok(production::validate_batch_schedule(payload.get("schedule").unwrap_or(&Value::Null), has_schedule).err());
+            let schedule = match production::validate_batch_schedule(payload.get("schedule").unwrap_or(&Value::Null), has_schedule) {
+                Ok(schedule) => schedule,
+                Err(message) => return Ok(Some(message)),
+            };
+            return Ok(production::schedule_lock_error(
+                stages_done,
+                &[
+                    &batch_text("sched_weighing_on"),
+                    &batch_text("sched_mixing_on"),
+                    &batch_text("sched_filling_on"),
+                    &batch_text("sched_packing_on"),
+                ],
+                &[&schedule.weighing_on, &schedule.mixing_on, &schedule.filling_on, &schedule.packing_on],
+            )
+            .map(str::to_owned));
+        }
+        // PO terkunci setelah Penimbangan (keputusan G v3.2).
+        if stages_done > 0 {
+            return Ok(Some(production::PRODUCTION_STARTED.to_owned()));
         }
         let po = self
             .query_one("SELECT batch_id, status, eta_on FROM batch_purchase_orders WHERE id = ?;", vec![json!(entity_key)])
@@ -4646,6 +4808,21 @@ impl TursoClient {
                 }
             }
 
+            // Pengiriman (v3.4): gerbang lunas, satu aktif per work order, dan
+            // langkah dihitung ulang dengan data cloud.
+            if domain == "shipment" {
+                if let Some(message) = self.shipment_guard(operation, entity_key, &parsed_payload).await? {
+                    push_results.push(json!({
+                        "eventId": event_id,
+                        "status": "conflict",
+                        "reason": message.clone(),
+                        "message": message,
+                        "serverRevision": 0
+                    }));
+                    continue;
+                }
+            }
+
             // Work order dan PO (v3.1): syarat MoU/DP, PO terbuka, dan jadwal
             // dihitung ulang dengan data cloud; keadaan basi = konflik.
             if matches!(domain, "batch" | "purchase-order") {
@@ -5431,6 +5608,7 @@ fn canonical_sync_route(domain: &str, operation: &str) -> Option<(&'static str, 
         "imported-record" | "imported_records" => "imported-record",
         "batch" | "production_batches" => "batch",
         "purchase-order" | "batch_purchase_orders" => "purchase-order",
+        "shipment" | "shipments" => "shipment",
         _ => return None,
     };
     let canonical_operation = match (canonical_domain, operation) {
@@ -5464,7 +5642,10 @@ fn canonical_sync_route(domain: &str, operation: &str) -> Option<(&'static str, 
         ("batch", "create") => "create",
         ("batch", "ready") => "ready",
         ("batch", "schedule") => "schedule",
+        ("batch", "stage") => "stage",
         ("purchase-order", "record") => "record",
+        ("shipment", "create") => "create",
+        ("shipment", "transition") => "transition",
         ("media", "upload") => "upload",
         ("audit", "record") => "record",
         _ => return None,
@@ -6446,6 +6627,223 @@ async fn apply_event_to_turso(
                 .query_one(notifications::NOTIFY_BATCH_SCHEDULED_SQL, vec![json!(log_id), json!(entity_key)])
                 .await?;
         }
+        ("shipment", "create") => {
+            // Gerbang lunas dan satu pengiriman aktif diperiksa `shipment_guard`.
+            let input = production::validate_shipment(payload.get("shipment").unwrap_or(&Value::Null))
+                .map_err(|message| CommandError::new("TURSO_SYNC_PAYLOAD_INVALID", message))?;
+            let created_at = text("created_at");
+            let number = text("delivery_note_no");
+            let sample_id = text("sample_request_id");
+            let log_id = payload
+                .get("log")
+                .and_then(|log| log.get("id"))
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned();
+            let valid = !entity_key.is_empty()
+                && !number.is_empty()
+                && !text("batch_id").is_empty()
+                && !sample_id.is_empty()
+                && !text("client_id").is_empty()
+                && !log_id.is_empty()
+                && clients::parse_stored_timestamp(&created_at).is_some();
+            if !valid {
+                return Err(CommandError::new("TURSO_SYNC_PAYLOAD_INVALID", "The shipment is incomplete or invalid."));
+            }
+            let created_by = payload.get("created_by").filter(|value| value.is_i64()).cloned().unwrap_or(Value::Null);
+            turso
+                .query_one(
+                    production::SHIPMENT_INSERT_SQL,
+                    vec![
+                        json!(entity_key),
+                        json!(text("batch_id")),
+                        json!(sample_id),
+                        json!(text("client_id")),
+                        json!(number),
+                        json!(input.method),
+                        json!(input.carrier_option_id),
+                        json!(input.driver_name),
+                        json!(input.driver_phone),
+                        json!(input.vehicle_plate),
+                        json!(input.carton_count),
+                        json!(input.unit_count),
+                        json!(input.ship_on),
+                        json!(input.ship_to_address),
+                        json!(input.notes),
+                        created_by.clone(),
+                        json!(created_at),
+                    ],
+                )
+                .await?;
+            turso
+                .query_one(
+                    samples::SAMPLE_STATUS_LOG_INSERT_SQL,
+                    vec![
+                        json!(log_id),
+                        json!(sample_id),
+                        json!(""),
+                        json!("PREPARED"),
+                        json!(production::SHIPMENT_CREATE_ACTION),
+                        json!(format!("Delivery note {number}")),
+                        json!(""),
+                        created_by,
+                        json!(created_at),
+                    ],
+                )
+                .await?;
+        }
+        ("shipment", "transition") => {
+            // Kecocokan status dan suntingan diperiksa `shipment_guard`.
+            let action = text("action");
+            let status = text("status");
+            let base_status = text("base_status");
+            let updated_at = text("updated_at");
+            let sample_id = text("sample_request_id");
+            let log = payload.get("log").filter(|value| value.is_object());
+            let notes = log
+                .and_then(|log| log.get("notes"))
+                .and_then(Value::as_str)
+                .and_then(samples::normalize_sample_notes);
+            let log_id = log
+                .and_then(|log| log.get("id"))
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned();
+            let tracking = production::normalize_tracking(payload.get("tracking_no"), action == "SHIP_TRACKING");
+            let reason = text("reason");
+            let valid = !entity_key.is_empty()
+                && !sample_id.is_empty()
+                && !log_id.is_empty()
+                && production::SHIPMENT_ACTIONS.contains(&action.as_str())
+                && production::SHIPMENT_STATUSES.contains(&status.as_str())
+                && (action != "SHIP_CANCEL"
+                    || (!reason.is_empty() && reason.chars().count() <= production::PRODUCTION_REASON_MAX))
+                && clients::parse_stored_timestamp(&updated_at).is_some();
+            let (Some(notes), Some(tracking), true) = (notes, tracking, valid) else {
+                return Err(CommandError::new("TURSO_SYNC_PAYLOAD_INVALID", "The shipment step is incomplete or invalid."));
+            };
+            let recorded_by = payload.get("recorded_by").filter(|value| value.is_i64()).cloned().unwrap_or(Value::Null);
+            if action == "SHIP_UPDATE" {
+                let input = production::validate_shipment(payload.get("shipment").unwrap_or(&Value::Null))
+                    .map_err(|message| CommandError::new("TURSO_SYNC_PAYLOAD_INVALID", message))?;
+                turso
+                    .query_one(
+                        production::SHIPMENT_UPDATE_SQL,
+                        vec![
+                            json!(entity_key),
+                            json!(input.method),
+                            json!(input.carrier_option_id),
+                            json!(input.driver_name),
+                            json!(input.driver_phone),
+                            json!(input.vehicle_plate),
+                            json!(input.carton_count),
+                            json!(input.unit_count),
+                            json!(input.ship_on),
+                            json!(input.ship_to_address),
+                            json!(input.notes),
+                            json!(updated_at),
+                            json!(text("base_updated_at")),
+                        ],
+                    )
+                    .await?;
+            } else {
+                turso
+                    .query_one(
+                        production::SHIPMENT_STEP_SQL,
+                        vec![
+                            json!(entity_key),
+                            json!(status),
+                            json!(tracking),
+                            json!(reason),
+                            json!(updated_at),
+                            json!(base_status),
+                            json!(text("base_updated_at")),
+                        ],
+                    )
+                    .await?;
+            }
+            insert_client_evidence(turso, "SHIPMENT_PROOF", payload, &sample_id, recorded_by.clone(), &updated_at).await?;
+            turso
+                .query_one(
+                    samples::SAMPLE_STATUS_LOG_INSERT_SQL,
+                    vec![
+                        json!(log_id),
+                        json!(sample_id),
+                        json!(base_status),
+                        json!(status),
+                        json!(action),
+                        json!(notes),
+                        json!(""),
+                        recorded_by,
+                        json!(updated_at),
+                    ],
+                )
+                .await?;
+            if action == "SHIP_DISPATCH" {
+                // Barang keluar (keputusan H): CS meneruskan resi ke klien.
+                turso
+                    .query_one(notifications::NOTIFY_SHIPPED_SQL, vec![json!(log_id), json!(entity_key)])
+                    .await?;
+            }
+        }
+        ("batch", "stage") => {
+            // Urutan dan gerbang tahap diperiksa `production_guard`; isiannya
+            // divalidasi ulang dengan aturan yang sama.
+            let done = number("base_stages_done");
+            let updated_at = text("updated_at");
+            let sample_id = text("sample_request_id");
+            let log_id = payload
+                .get("log")
+                .and_then(|log| log.get("id"))
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned();
+            let valid = !entity_key.is_empty()
+                && !sample_id.is_empty()
+                && !log_id.is_empty()
+                && (0..production::PRODUCTION_STAGES.len() as i64).contains(&done)
+                && clients::parse_stored_timestamp(&updated_at).is_some();
+            if !valid {
+                return Err(CommandError::new("TURSO_SYNC_PAYLOAD_INVALID", "The production stage is incomplete or invalid."));
+            }
+            let record = production::validate_stage_record(payload.get("stage").unwrap_or(&Value::Null), done)
+                .map_err(|message| CommandError::new("TURSO_SYNC_PAYLOAD_INVALID", message))?;
+            let name = production::PRODUCTION_STAGES[done as usize];
+            let previous = if done > 0 { production::PRODUCTION_STAGES[done as usize - 1] } else { "" };
+            let (cartons, units) = record
+                .packing
+                .as_ref()
+                .map_or((0, 0), |packing| (packing.carton_count, packing.produced_units));
+            let recorded_by = payload.get("recorded_by").filter(|value| value.is_i64()).cloned().unwrap_or(Value::Null);
+            turso
+                .query_one(
+                    production::BATCH_STAGE_SQL,
+                    vec![json!(entity_key), json!(done + 1), json!(updated_at), json!(cartons), json!(units)],
+                )
+                .await?;
+            turso
+                .query_one(
+                    samples::SAMPLE_STATUS_LOG_INSERT_SQL,
+                    vec![
+                        json!(log_id),
+                        json!(sample_id),
+                        json!(previous),
+                        json!(name),
+                        json!(format!("STAGE_{name}")),
+                        json!(production::stage_log_notes(name, &record)),
+                        json!(""),
+                        recorded_by,
+                        json!(updated_at),
+                    ],
+                )
+                .await?;
+            if record.packing.is_some() {
+                // Packing selesai (US-22): CS dan Finance menyiapkan pelunasan.
+                turso
+                    .query_one(notifications::NOTIFY_BATCH_PACKED_SQL, vec![json!(log_id), json!(entity_key)])
+                    .await?;
+            }
+        }
         ("purchase-order", "record") => {
             // Kecocokan status/ETA dengan cloud diperiksa `production_guard`;
             // isiannya divalidasi ulang dengan aturan yang sama.
@@ -6718,6 +7116,10 @@ async fn apply_event_to_turso(
                     ],
                 )
                 .await?;
+            // Tagihan biaya titip yang dibebaskan (total 0) langsung lunas (v3.3).
+            turso
+                .query_one(notifications::NOTIFY_SHIP_CLEARED_SQL, vec![json!(entity_key)])
+                .await?;
         }
         ("invoice", "cancel") | ("fund", "void") => {
             let reason = finance::normalize_cancel_reason(&text("reason"));
@@ -6908,6 +7310,10 @@ async fn apply_event_to_turso(
                         json!(recorded_at),
                     ],
                 )
+                .await?;
+            // Pelunasan lunas: Logistik boleh mengirim (v3.3, keputusan H).
+            turso
+                .query_one(notifications::NOTIFY_SHIP_CLEARED_SQL, vec![json!(text("invoice_id"))])
                 .await?;
         }
         ("media", "upload") => {
@@ -9992,6 +10398,107 @@ mod tests {
                 notified,
                 vec!["BATCH_CREATED/PRODUCTION", "BATCH_SCHEDULED/CS", "PO_LATE/CS", "PO_LATE/PRODUCTION"]
             );
+
+            // v3.2 (F-25): tahap berurutan, tablet basi = konflik (E-34),
+            // PO terkunci setelah Penimbangan, Packing memberi tahu CS + Finance.
+            rusqlite::Connection::open(&hub)
+                .expect("buka hub")
+                .execute_batch(
+                    "INSERT INTO legal_documents (id, mou_id, sample_request_id, kind, status, notes, created_at, updated_at) VALUES ('l1', 'm1', 's1', 'HALAL', 'NOT_REQUIRED', 'Exempt', '2026-10-09 03:00:00', '2026-10-09 03:00:00');",
+                )
+                .expect("legal");
+            let stage = |base: i64, stage: Value| json!({ "base_stages_done": base, "stage": stage });
+            let more = vec![
+                event("batch", "stage", "bt1", stage(0, json!({ "notes": "Crew A" }))),
+                // Tablet kedua menandai Penimbangan yang sama saat offline.
+                event("batch", "stage", "bt1", stage(0, json!({ "notes": "Crew B" }))),
+                event("purchase-order", "record", "p2", po("PO_ADD", "", "OPEN")),
+                event("batch", "stage", "bt1", stage(1, json!({ "notes": "" }))),
+                event("batch", "stage", "bt1", stage(2, json!({ "notes": "" }))),
+                event("batch", "stage", "bt1", stage(3, json!({ "carton_count": 40, "produced_units": 990 }))),
+            ];
+            let results = client.push_events(&more).await.expect("push tahap");
+            let statuses: Vec<&str> = results
+                .iter()
+                .map(|result| result["status"].as_str().unwrap_or_default())
+                .collect();
+            assert_eq!(statuses, vec!["applied", "conflict", "conflict", "applied", "applied", "applied"]);
+            assert_eq!(results[1]["message"], json!(production::BATCH_CHANGED_ELSEWHERE));
+            assert_eq!(results[2]["message"], json!(production::PRODUCTION_STARTED));
+            let connection = rusqlite::Connection::open(&hub).expect("buka hub");
+            let packed: (i64, i64, i64) = connection
+                .query_row(
+                    "SELECT stages_done, carton_count, produced_units FROM production_batches WHERE id = 'bt1';",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .expect("work order");
+            assert_eq!(packed, (4, 40, 990));
+            let packed_notices: i64 = connection
+                .query_row(
+                    "SELECT COUNT(*) FROM notification_outbox WHERE event_type = 'BATCH_PACKED';",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("notifikasi packing");
+            assert_eq!(packed_notices, 2);
+
+            // v3.4 (F-27): Surat Jalan menunggu pelunasan; satu aktif per work order.
+            let shipment = |batch: &str| {
+                json!({
+                    "batch_id": batch,
+                    "client_id": "c1",
+                    "delivery_note_no": "SJ-1",
+                    "shipment": {
+                        "method": "FLEET",
+                        "driver_name": "Budi",
+                        "vehicle_plate": "D 1234 AB",
+                        "carton_count": 40,
+                        "unit_count": 990,
+                        "ship_on": "2026-11-20",
+                        "ship_to_address": "Jl. A",
+                    },
+                })
+            };
+            let blocked = client
+                .push_events(&[event("shipment", "create", "h0", shipment("bt1"))])
+                .await
+                .expect("push surat jalan");
+            assert_eq!(blocked[0]["message"], json!(production::SHIP_NO_SETTLEMENT));
+            rusqlite::Connection::open(&hub)
+                .expect("buka hub")
+                .execute_batch(
+                    "INSERT INTO invoices (id, invoice_number, client_id, sample_request_id, ref_type, subtotal_idr, total_idr, issued_on, due_on, created_at, updated_at) VALUES ('i2', 'INV-2', 'c1', 's1', 'SETTLEMENT', 5000, 5000, '2026-10-09', '2026-10-16', '2026-10-09 01:00:00', '2026-10-09 01:00:00');
+                     INSERT INTO incoming_funds (id, received_on, amount_idr, created_at, updated_at) VALUES ('f2', date('now', '+7 hours'), 5000, '2026-10-09 01:00:00', '2026-10-09 01:00:00');
+                     INSERT INTO fund_allocations (id, fund_id, invoice_id, amount_idr, recorded_at) VALUES ('a2', 'f2', 'i2', 5000, '2026-10-09 01:00:00');",
+                )
+                .expect("pelunasan");
+            let dispatch = json!({
+                "batch_id": "bt1",
+                "action": "SHIP_DISPATCH",
+                "base_status": "PREPARED",
+                "status": "SHIPPED",
+                "base_updated_at": "",
+                "tracking_no": "",
+                "log": { "id": "log-ship", "notes": "Shipped by Budi (D 1234 AB)" },
+            });
+            let results = client
+                .push_events(&[
+                    event("shipment", "create", "h1", shipment("bt1")),
+                    // Perangkat kedua menerbitkan Surat Jalan untuk work order yang sama.
+                    event("shipment", "create", "h2", shipment("bt1")),
+                    // Langkah dari perangkat yang tidak melihat `updated_at` terbaru.
+                    event("shipment", "transition", "h1", dispatch),
+                ])
+                .await
+                .expect("push pengiriman");
+            let statuses: Vec<&str> = results
+                .iter()
+                .map(|result| result["status"].as_str().unwrap_or_default())
+                .collect();
+            assert_eq!(statuses, vec!["applied", "conflict", "conflict"]);
+            assert_eq!(results[1]["message"], json!("This work order already has a shipment."));
+            assert_eq!(results[2]["message"], json!(production::SHIPMENT_CHANGED_ELSEWHERE));
         });
     }
 

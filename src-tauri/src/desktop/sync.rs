@@ -23,7 +23,7 @@ use super::{
 /// `CURRENT_SCHEMA_VERSION` di `web-desktop/src/lib/db-schema.ts` setiap kali
 /// migrasi baru ditambahkan, karena keduanya membaca tabel `schema_migration`
 /// yang sama di Turso.
-pub const CLIENT_SCHEMA_VERSION: i64 = 18;
+pub const CLIENT_SCHEMA_VERSION: i64 = 20;
 
 /// Hanya `cloud > client` yang berbahaya; `cloud <= client` adalah kondisi normal.
 fn is_client_schema_outdated(cloud_version: i64) -> bool {
@@ -525,6 +525,10 @@ const SNAPSHOT_TABLES: &[SnapshotTable] = &[
             "sched_packing_on",
             "needs_reschedule",
             "schedule_updated_at",
+            "stages_done",
+            "packed_at",
+            "carton_count",
+            "produced_units",
             "created_by",
             "created_at",
             "updated_at",
@@ -547,6 +551,41 @@ const SNAPSHOT_TABLES: &[SnapshotTable] = &[
             "eta_on",
             "status",
             "late_reason",
+            "created_by",
+            "created_at",
+            "updated_at",
+        ],
+        conflict_column: "id",
+        entity_column: "id",
+        delete_missing: true,
+        read_only: false,
+    },
+    // Pengiriman (v3.4, PRD F-27). Cloud otoritatif seperti work order.
+    SnapshotTable {
+        payload_key: "shipments",
+        domain: "shipment",
+        table: "shipments",
+        columns: &[
+            "id",
+            "batch_id",
+            "sample_request_id",
+            "client_id",
+            "delivery_note_no",
+            "method",
+            "carrier_option_id",
+            "tracking_no",
+            "driver_name",
+            "driver_phone",
+            "vehicle_plate",
+            "carton_count",
+            "unit_count",
+            "ship_on",
+            "ship_to_address",
+            "notes",
+            "status",
+            "cancel_reason",
+            "shipped_at",
+            "forwarded_at",
             "created_by",
             "created_at",
             "updated_at",
@@ -688,7 +727,12 @@ const CANONICAL_SYNC_ROUTES: &[(&str, &str)] = &[
     ("batch", "create"),
     ("batch", "ready"),
     ("batch", "schedule"),
+    // Tahap lantai produksi (v3.2): satu event per tahap selesai.
+    ("batch", "stage"),
     ("purchase-order", "record"),
+    // Pengiriman (v3.4): Surat Jalan terbit, lalu setiap langkahnya.
+    ("shipment", "create"),
+    ("shipment", "transition"),
     ("media", "upload"),
     // Log audit hanya-dorong: tidak ada di `SNAPSHOT_TABLES` karena tumbuh
     // tanpa batas dan hanya dibaca dari cloud (layar Audit).

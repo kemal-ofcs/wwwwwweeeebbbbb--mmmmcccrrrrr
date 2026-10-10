@@ -1,5 +1,11 @@
 import type { StatusTone } from "@/components/ui/StatusBadge";
 import type { SampleRequestRecord } from "@/lib/gateways/samples";
+import {
+  PRODUCTION_STAGES,
+  SHIP_NO_SETTLEMENT,
+  SHIP_STORAGE_UNBILLED,
+  STAGE_LABEL,
+} from "@/lib/validations/production";
 import type { SampleAction } from "@/lib/validations/sample";
 
 /** Label tampilan status dan langkah tiket sampel (PRD FR-06.4). */
@@ -92,6 +98,26 @@ export const SAMPLE_ACTION_PAST: Record<string, string> = {
   PO_CANCEL: "cancelled a purchase order",
   MATERIALS_READY: "confirmed the materials are ready",
   BATCH_SCHEDULE: "scheduled the production",
+  // Tahap lantai produksi (v3.2).
+  STAGE_WEIGHING: "marked weighing done",
+  STAGE_MIXING: "marked mixing done",
+  STAGE_FILLING: "marked filling done",
+  STAGE_PACKING: "marked packing done",
+  // Pengiriman (v3.4).
+  SHIP_PREPARE: "issued the delivery note",
+  SHIP_UPDATE: "corrected the shipment",
+  SHIP_CANCEL: "cancelled the shipment",
+  SHIP_DISPATCH: "marked the order as shipped",
+  SHIP_TRACKING: "recorded the tracking number",
+  SHIP_FORWARD: "forwarded the tracking number to the client",
+};
+
+/** Status pengiriman (v3.4, PRD F-27). */
+export const SHIPMENT_STATUS_LABEL: Record<string, string> = {
+  PREPARED: "Delivery note issued",
+  SHIPPED: "Shipped",
+  FORWARDED: "Sent to client",
+  CANCELLED: "Cancelled",
 };
 
 /** Bahan work order dan PO (v3.1, PRD F-23). */
@@ -112,6 +138,8 @@ export const PO_STATUS_LABEL: Record<string, string> = {
   ARRIVED: "Arrived",
   CANCELLED: "Cancelled",
   SCHEDULED: "Scheduled",
+  // Tahap lantai produksi (v3.2) sebagai status linimasa.
+  ...STAGE_LABEL,
 };
 
 /** Dokumen legal (v2.6, PRD F-21). */
@@ -282,5 +310,24 @@ export function nextSampleStep(row: SampleRequestRecord): string | null {
     return `Production SPV: schedule the production.${legal}`;
   if (legal)
     return "Legal and RnD: record the legal documents before production starts.";
-  return `Production scheduled: packing on ${row.batch_packing_on}.`;
+  const stages = row.batch_stages ?? 0;
+  if (stages >= PRODUCTION_STAGES.length) {
+    // Gerbang kirim v3.3 (`shipGateError`), dihitung di backend.
+    if (row.ship_block === SHIP_NO_SETTLEMENT)
+      return "Finance: create the Settlement invoice.";
+    if (row.ship_block === SHIP_STORAGE_UNBILLED)
+      return "Finance: create the Storage fee invoice.";
+    // Pengiriman (v3.4): Surat Jalan → kirim → diteruskan ke klien.
+    if (row.shipment_status === "PREPARED")
+      return "Logistics: mark the shipment as shipped when the goods leave.";
+    if (row.shipment_status === "SHIPPED")
+      return "CS: forward the tracking number and delivery note to the client.";
+    if (row.shipment_status === "FORWARDED")
+      return "Waiting for the client to confirm receipt.";
+    if (row.ship_block)
+      return "Finance: allocate the client's payment to the open settlement, shipping, or storage invoices.";
+    return "Cleared to ship: Logistics records the shipment.";
+  }
+  const next = PRODUCTION_STAGES[stages] ?? "PACKING";
+  return `Production SPV: mark ${STAGE_LABEL[next].toLowerCase()} done. Packing on ${row.batch_packing_on}.`;
 }

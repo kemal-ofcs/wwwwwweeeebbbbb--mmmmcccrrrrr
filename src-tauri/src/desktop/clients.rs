@@ -14,6 +14,7 @@ pub const CLIENT_CODE_WEB_TAG_SETTING: &str = "client_code_web_tag";
 pub const INVOICE_PREFIX_SETTING: &str = "invoice_number_prefix";
 pub const MOU_PREFIX_SETTING: &str = "mou_number_prefix";
 pub const BATCH_PREFIX_SETTING: &str = "batch_code_prefix";
+pub const DELIVERY_NOTE_PREFIX_SETTING: &str = "delivery_note_prefix";
 
 pub const CLIENT_LIFECYCLE_STATUSES: &[&str] = &["LEAD", "FIRST_ORDER_ACTIVE", "EXISTING_CLIENT"];
 pub const MASTER_OPTION_KINDS: &[&str] = &[
@@ -27,6 +28,8 @@ pub const MASTER_OPTION_KINDS: &[&str] = &[
     "RND_REJECT_REASON",
     // Supplier bahan dan kemasan untuk PO PPIC (v3.1, PRD FR-12).
     "SUPPLIER",
+    // Ekspedisi rekanan untuk pengiriman (v3.4, PRD FR-12).
+    "CARRIER",
 ];
 
 pub const CLIENT_NAME_MIN: usize = 2;

@@ -121,7 +121,12 @@ const COSTS = {
 };
 
 // Tagihan yang dibayar penuh (v2.3a): buat, catat uang masuk, alokasikan.
-async function settle(id: string, refType: string, amount: number) {
+async function settle(
+  id: string,
+  refType: string,
+  amount: number,
+  receivedOn = "2026-10-08",
+) {
   const invoice = await finance.createInvoice(
     client,
     {
@@ -134,7 +139,7 @@ async function settle(id: string, refType: string, amount: number) {
   );
   const fund = await finance.recordIncomingFund(
     client,
-    { received_on: "2026-10-08", amount_idr: invoice.total_idr },
+    { received_on: receivedOn, amount_idr: invoice.total_idr },
     FINANCE,
   );
   await finance.allocateFund(
@@ -262,6 +267,9 @@ describe("tiket sampel, jalur Web", () => {
         telegram_chat_id_production: "",
         default_dummy_fee_idr: 0,
         max_dummy_rejections: 0,
+        storage_grace_days: 14,
+        storage_fee_idr: 0,
+        storage_sop_text: "",
         dp_percentage_bp: 5000,
         approval_web_url: "",
         approval_token_ttl_days: 3,
@@ -1595,6 +1603,241 @@ describe("tiket sampel, jalur Web", () => {
       "PO_LATE/CS",
       "PO_LATE/PRODUCTION",
     ]);
+
+    // v3.2 (F-25): tahap 1 menunggu dokumen legal wajib final (OQ-22).
+    const SPV_STAGE = (stage: Record<string, unknown> = {}) =>
+      production.recordBatchStage(
+        client,
+        { batch_id: batch.id, stage: { notes: "", ...stage } },
+        SPV,
+      );
+    await expect(SPV_STAGE()).rejects.toThrow(
+      "Waiting for every required legal document to be issued or marked not required.",
+    );
+    await legal.recordLegalDocument(
+      client,
+      {
+        mou_id: created.id,
+        document: { kind: "HALAL", status: "NOT_REQUIRED", notes: "Exempt" },
+      },
+      { id: 4, role: "Legal" },
+    );
+    await SPV_STAGE({ notes: "Crew A" });
+    // Setelah Penimbangan, PO dan tanggal tahap yang selesai terkunci.
+    await expect(
+      production.recordPurchaseOrder(
+        client,
+        {
+          batch_id: batch.id,
+          step: {
+            action: "PO_ADD",
+            order: {
+              po_number: "PO-779",
+              supplier_option_id: supplier.id,
+              eta_on: "2026-11-20",
+            },
+          },
+        },
+        PPIC,
+      ),
+    ).rejects.toThrow(
+      "Production has started, so purchase orders and materials can no longer change.",
+    );
+    await expect(
+      production.saveBatchSchedule(
+        client,
+        {
+          batch_id: batch.id,
+          schedule: {
+            ...schedule,
+            weighing_on: "2026-11-01",
+            packing_on: "2026-11-12",
+            reason: "Earlier",
+          },
+        },
+        SPV,
+      ),
+    ).rejects.toThrow("The dates of finished stages cannot change.");
+    await SPV_STAGE();
+    await SPV_STAGE();
+    await expect(
+      SPV_STAGE({ carton_count: 0, produced_units: 1000 }),
+    ).rejects.toThrow("Enter the number of cartons (1 to 100,000).");
+    await SPV_STAGE({ carton_count: 40, produced_units: 990 });
+    expect(await current()).toMatchObject({
+      stages_done: 4,
+      carton_count: 40,
+      produced_units: 990,
+    });
+    await expect(SPV_STAGE()).rejects.toThrow("Production is already packed.");
+    await expect(
+      production.saveBatchSchedule(
+        client,
+        {
+          batch_id: batch.id,
+          schedule: { ...schedule, packing_on: "2026-11-12", reason: "Late" },
+        },
+        SPV,
+      ),
+    ).rejects.toThrow("Production is already packed.");
+    const packed = await client.execute(
+      "SELECT target_division FROM notification_outbox WHERE event_type = 'BATCH_PACKED' ORDER BY target_division;",
+    );
+    expect(packed.rows.map((row) => String(row.target_division))).toEqual([
+      "CS",
+      "FINANCE",
+    ]);
+    const stages = await client.execute({
+      sql: "SELECT action, notes FROM sample_status_log WHERE sample_request_id = ? AND action LIKE 'STAGE_%' ORDER BY recorded_at, rowid;",
+      args: [sample.id],
+    });
+    expect(stages.rows.map((row) => `${row.action}: ${row.notes}`)).toEqual([
+      "STAGE_WEIGHING: Weighing done - Crew A",
+      "STAGE_MIXING: Mixing done",
+      "STAGE_FILLING: Filling done",
+      "STAGE_PACKING: Packing done: 40 cartons, 990 units",
+    ]);
+    expect(
+      (await samples.getSampleRequest(client, sample.id, false)).request,
+    ).toMatchObject({ batch_stages: 4 });
+
+    // v3.3 (F-26/F-31): pelunasan, biaya titip, dan siap kirim.
+    const shipOf = async () =>
+      (await samples.getSampleRequest(client, sample.id, false)).request;
+    expect(await shipOf()).toMatchObject({
+      ship_block: "Finance has not issued the settlement invoice yet.",
+      settlement_default_idr: 16_250_000,
+      storage_fee_idr: 0,
+      settlement_cleared: 0,
+    });
+    await expect(
+      finance.createInvoice(
+        client,
+        {
+          ref_type: "STORAGE_FEE",
+          sample_request_id: sample.id,
+          subtotal_idr: 1000,
+          tax_option_ids: [],
+        },
+        FINANCE,
+      ),
+    ).rejects.toThrow("The settlement invoice is not paid yet.");
+    // Packing 5 hari lalu, masa bebas 2 hari, 500 per koli per hari.
+    await client.execute(
+      "UPDATE production_batches SET packed_at = datetime('now', '-5 days') WHERE id = '" +
+        batch.id +
+        "';",
+    );
+    for (const [key, value] of [
+      ["storage_grace_days", "2"],
+      ["storage_fee_idr", "500"],
+    ]) {
+      await client.execute({
+        sql: "INSERT INTO setting_gex_system (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value;",
+        args: [key, value],
+      });
+    }
+    expect(await shipOf()).toMatchObject({ storage_fee_idr: 3 * 40 * 500 });
+    const today = String(
+      (await client.execute("SELECT date('now', '+7 hours') AS today;")).rows[0]
+        ?.today,
+    );
+    await settle(sample.id, "SETTLEMENT", 16_250_000, today);
+    expect(await shipOf()).toMatchObject({
+      ship_block: "Finance must issue the storage fee invoice first.",
+      storage_fee_idr: 60_000,
+      settlement_cleared: 1,
+    });
+    const cleared = async () =>
+      Number(
+        (
+          await client.execute(
+            "SELECT COUNT(*) AS total FROM notification_outbox WHERE event_type = 'SHIP_CLEARED' AND target_division = 'PRODUCTION';",
+          )
+        ).rows[0]?.total,
+      );
+    expect(await cleared()).toBe(0);
+    await settle(sample.id, "STORAGE_FEE", 60_000, today);
+    expect(await shipOf()).toMatchObject({ ship_block: null });
+    expect(await cleared()).toBe(1);
+
+    // v3.4 (F-27): Surat Jalan, batal, terbit ulang, kirim, resi, teruskan.
+    const LOGISTICS = { id: 9, role: "Logistics" };
+    const carrier = await clients.saveMasterOption(
+      client,
+      { kind: "CARRIER", code: "JNE", label: "JNE Express" },
+      ADMIN,
+    );
+    const shipment = {
+      method: "CARRIER",
+      carrier_option_id: carrier.id,
+      carton_count: 40,
+      unit_count: 990,
+      ship_on: today,
+      ship_to_address: "Jl. Merdeka 1, Bandung",
+      notes: "",
+    };
+    const first = await production.createShipment(
+      client,
+      { batch_id: batch.id, shipment },
+      LOGISTICS,
+    );
+    expect(first.delivery_note_no).toMatch(/^SJ-\d{8}-WB01$/);
+    await expect(
+      production.createShipment(
+        client,
+        { batch_id: batch.id, shipment },
+        LOGISTICS,
+      ),
+    ).rejects.toThrow("This work order already has a shipment.");
+    const shipStep = (id: string, step: Record<string, unknown>) =>
+      production.recordShipmentStep(
+        client,
+        { shipment_id: id, step },
+        LOGISTICS,
+      );
+    await expect(
+      shipStep(first.id, { action: "SHIP_CANCEL", reason: "" }),
+    ).rejects.toThrow(
+      "Write why the shipment is cancelled, up to 500 characters.",
+    );
+    await shipStep(first.id, {
+      action: "SHIP_CANCEL",
+      reason: "Wrong address",
+    });
+    const second = await production.createShipment(
+      client,
+      { batch_id: batch.id, shipment },
+      LOGISTICS,
+    );
+    expect(second.delivery_note_no).toMatch(/^SJ-\d{8}-WB02$/);
+    expect((await shipOf()).shipment_status).toBe("PREPARED");
+    await shipStep(second.id, { action: "SHIP_DISPATCH", tracking_no: "" });
+    await expect(
+      shipStep(second.id, { action: "SHIP_FORWARD" }),
+    ).rejects.toThrow("Record the tracking number before forwarding it.");
+    await shipStep(second.id, {
+      action: "SHIP_TRACKING",
+      tracking_no: "JNE123",
+    });
+    await shipStep(second.id, { action: "SHIP_FORWARD" });
+    expect((await shipOf()).shipment_status).toBe("FORWARDED");
+    const shipLog = await client.execute({
+      sql: "SELECT action, notes FROM sample_status_log WHERE sample_request_id = ? AND action LIKE 'SHIP_%' ORDER BY recorded_at, rowid;",
+      args: [sample.id],
+    });
+    expect(shipLog.rows.map((row) => `${row.action}: ${row.notes}`)).toEqual([
+      `SHIP_PREPARE: Delivery note ${first.delivery_note_no}`,
+      `SHIP_CANCEL: Delivery note ${first.delivery_note_no} cancelled: Wrong address`,
+      `SHIP_PREPARE: Delivery note ${second.delivery_note_no}`,
+      "SHIP_DISPATCH: Shipped by JNE Express",
+      "SHIP_TRACKING: Tracking number JNE123",
+      "SHIP_FORWARD: Tracking number and delivery note sent to the client",
+    ]);
+    const shippedNotices = await client.execute(
+      "SELECT COUNT(*) AS total FROM notification_outbox WHERE event_type = 'SHIPMENT_SHIPPED' AND target_division = 'CS';",
+    );
+    expect(Number(shippedNotices.rows[0]?.total)).toBe(1);
   });
 
   test("izin produksi untuk role divisi, sekali saja", async () => {

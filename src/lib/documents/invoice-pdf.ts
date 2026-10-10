@@ -398,20 +398,38 @@ export interface MouPdfData {
   signatures: [string, string];
 }
 
+/** Dokumen satu halaman: kop, pihak, baris isi, catatan, dan tanda tangan. */
+export interface TermsPdfData {
+  company: { name: string; lines: string[] };
+  logo: PdfLogo | null;
+  number: string;
+  issued_on: string;
+  stamp: string;
+  party_label: string;
+  party: string[];
+  terms_label: string;
+  terms: { label: string; value: string }[];
+  notes_label: string;
+  notes: string;
+  footer: string;
+  /** Kotak tanda tangan berjajar di bawah; kosong = tanpa tanda tangan. */
+  signatures: string[];
+}
+
 /**
- * MoU produksi satu halaman (v2.5a, PRD F-20): kop yang sama dengan invoice,
- * isi MoU, catatan, dan dua kotak tanda tangan.
+ * Dokumen ber-syarat satu halaman: MoU (v2.5a), Surat Jalan, dan SOP
+ * Penyimpanan (v3.4). Kop sama dengan invoice.
  */
-export function buildMouPdf(data: MouPdfData): Uint8Array {
+export function buildTermsPdf(title: string, data: TermsPdfData): Uint8Array {
   const page = new Page();
-  let top = drawHeader(page, { ...data, stamp_note: "" }, "PRODUCTION MOU", [
-    data.mou_number,
+  let top = drawHeader(page, { ...data, stamp_note: "" }, title, [
+    data.number,
     `Date ${data.issued_on}`,
   ]);
 
-  page.text(MARGIN, top, "Client", 9, true);
+  page.text(MARGIN, top, data.party_label, 9, true);
   top -= 14;
-  for (const line of data.client) {
+  for (const line of data.party) {
     for (const part of wrapText(line, 10, RIGHT - MARGIN)) {
       page.text(MARGIN, top, part, 10);
       top -= 13;
@@ -419,7 +437,7 @@ export function buildMouPdf(data: MouPdfData): Uint8Array {
   }
   top -= 12;
 
-  page.text(MARGIN, top, "Terms", 9, true);
+  page.text(MARGIN, top, data.terms_label, 9, true);
   top -= 6;
   page.line(MARGIN, top, RIGHT, top);
   top -= 14;
@@ -436,11 +454,13 @@ export function buildMouPdf(data: MouPdfData): Uint8Array {
   top -= 14;
 
   if (data.notes.trim()) {
-    page.text(MARGIN, top, "Notes", 9, true);
+    page.text(MARGIN, top, data.notes_label, 9, true);
     top -= 14;
-    for (const part of wrapText(data.notes, 9, RIGHT - MARGIN)) {
-      page.text(MARGIN, top, part, 9);
-      top -= 12;
+    for (const paragraph of data.notes.split("\n")) {
+      for (const part of wrapText(paragraph, 9, RIGHT - MARGIN)) {
+        page.text(MARGIN, top, part, 9);
+        top -= 12;
+      }
     }
     top -= 8;
   }
@@ -449,14 +469,31 @@ export function buildMouPdf(data: MouPdfData): Uint8Array {
     top -= 12;
   }
 
-  // Dua kotak tanda tangan di bawah halaman.
-  const signY = Math.min(top - 40, 170);
-  const half = (RIGHT - MARGIN) / 2;
-  data.signatures.forEach((label, index) => {
-    const x = MARGIN + index * half;
-    page.text(x, signY, label, 9, true);
-    page.line(x, signY - 60, x + half - 30, signY - 60);
-    page.text(x, signY - 72, "Name and date", 8);
-  });
+  // Kotak tanda tangan berjajar di bawah halaman.
+  if (data.signatures.length > 0) {
+    const signY = Math.min(top - 40, 170);
+    const width = (RIGHT - MARGIN) / data.signatures.length;
+    data.signatures.forEach((label, index) => {
+      const x = MARGIN + index * width;
+      page.text(x, signY, label, 9, true);
+      page.line(x, signY - 60, x + width - 30, signY - 60);
+      page.text(x, signY - 72, "Name and date", 8);
+    });
+  }
   return finishPage(page, data.logo);
+}
+
+/**
+ * MoU produksi satu halaman (v2.5a, PRD F-20): kop yang sama dengan invoice,
+ * isi MoU, catatan, dan dua kotak tanda tangan.
+ */
+export function buildMouPdf(data: MouPdfData): Uint8Array {
+  return buildTermsPdf("PRODUCTION MOU", {
+    ...data,
+    number: data.mou_number,
+    party_label: "Client",
+    party: data.client,
+    terms_label: "Terms",
+    notes_label: "Notes",
+  });
 }

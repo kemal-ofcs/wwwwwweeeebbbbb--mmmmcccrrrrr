@@ -79,6 +79,9 @@ export const PERMISSION_CATALOG = [
     name: "Schedule production",
     group: "Production",
   },
+  // Pengiriman (v3.4, PRD F-27): Surat Jalan, kirim, resi. Meneruskan resi
+  // ke klien memakai `samples.manage` (CS).
+  { key: "shipping.manage", name: "Ship orders", group: "Production" },
   {
     key: "design.override_dummy_limit",
     name: "Override the dummy rejection limit",

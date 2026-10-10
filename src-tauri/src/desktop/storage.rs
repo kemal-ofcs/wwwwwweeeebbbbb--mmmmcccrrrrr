@@ -524,6 +524,10 @@ pub fn initialize(path: &Path) -> Result<(), String> {
         sched_packing_on TEXT NOT NULL DEFAULT '',
         needs_reschedule INTEGER NOT NULL DEFAULT 0,
         schedule_updated_at TEXT NOT NULL DEFAULT '',
+        stages_done INTEGER NOT NULL DEFAULT 0,
+        packed_at TEXT NOT NULL DEFAULT '',
+        carton_count INTEGER NOT NULL DEFAULT 0,
+        produced_units INTEGER NOT NULL DEFAULT 0,
         created_by INTEGER,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
@@ -544,6 +548,34 @@ pub fn initialize(path: &Path) -> Result<(), String> {
       );
       CREATE INDEX IF NOT EXISTS idx_local_batch_purchase_orders_batch
         ON batch_purchase_orders(batch_id);
+      -- Pengiriman (v3.4, PRD F-27), cache cloud.
+      CREATE TABLE IF NOT EXISTS shipments (
+        id TEXT PRIMARY KEY,
+        batch_id TEXT NOT NULL,
+        sample_request_id TEXT NOT NULL,
+        client_id TEXT NOT NULL,
+        delivery_note_no TEXT NOT NULL,
+        method TEXT NOT NULL,
+        carrier_option_id TEXT NOT NULL DEFAULT '',
+        tracking_no TEXT NOT NULL DEFAULT '',
+        driver_name TEXT NOT NULL DEFAULT '',
+        driver_phone TEXT NOT NULL DEFAULT '',
+        vehicle_plate TEXT NOT NULL DEFAULT '',
+        carton_count INTEGER NOT NULL,
+        unit_count INTEGER NOT NULL,
+        ship_on TEXT NOT NULL,
+        ship_to_address TEXT NOT NULL DEFAULT '',
+        notes TEXT NOT NULL DEFAULT '',
+        status TEXT NOT NULL DEFAULT 'PREPARED',
+        cancel_reason TEXT NOT NULL DEFAULT '',
+        shipped_at TEXT NOT NULL DEFAULT '',
+        forwarded_at TEXT NOT NULL DEFAULT '',
+        created_by INTEGER,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_local_shipments_batch
+        ON shipments(batch_id);
       -- Foto: data ringkas ditarik dari cloud; `data_base64` terisi untuk foto
       -- buatan perangkat ini dan foto yang pernah dibuka ('' = belum diambil).
       CREATE TABLE IF NOT EXISTS media_asset (
@@ -665,6 +697,15 @@ pub fn initialize(path: &Path) -> Result<(), String> {
         "is_test_requested",
         "ALTER TABLE sample_requests ADD COLUMN is_test_requested INTEGER NOT NULL DEFAULT 0;",
     )?;
+    // Progres tahap lantai produksi (v3.2, PRD F-25).
+    for (column, sql) in [
+        ("stages_done", "ALTER TABLE production_batches ADD COLUMN stages_done INTEGER NOT NULL DEFAULT 0;"),
+        ("packed_at", "ALTER TABLE production_batches ADD COLUMN packed_at TEXT NOT NULL DEFAULT '';"),
+        ("carton_count", "ALTER TABLE production_batches ADD COLUMN carton_count INTEGER NOT NULL DEFAULT 0;"),
+        ("produced_units", "ALTER TABLE production_batches ADD COLUMN produced_units INTEGER NOT NULL DEFAULT 0;"),
+    ] {
+        ensure_column(&connection, "production_batches", column, sql)?;
+    }
 
     Ok(())
 }
@@ -697,6 +738,7 @@ const CLOUD_MIRRORED_TABLES: &[&str] = &[
     "imported_records",
     "production_batches",
     "batch_purchase_orders",
+    "shipments",
     "media_asset",
 ];
 
@@ -1023,6 +1065,7 @@ mod tests {
             "imported_records",
             "production_batches",
             "batch_purchase_orders",
+            "shipments",
             "media_asset",
             "setting_gex_system",
             "desktop_sync_outbox",

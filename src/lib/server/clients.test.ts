@@ -124,6 +124,7 @@ describe("klien, jalur Web", () => {
       invoice_number_prefix: "fak",
       mou_number_prefix: "MOU",
       batch_code_prefix: "spk",
+      delivery_note_prefix: "SJ",
     });
     // Awalan nomor dokumen lain ikut tersimpan dengan aturan yang sama (D-43).
     expect(await domain.getClientCodeSettings(client)).toMatchObject({
@@ -138,6 +139,7 @@ describe("klien, jalur Web", () => {
         invoice_number_prefix: "INV",
         mou_number_prefix: "MOU",
         batch_code_prefix: "B4T",
+        delivery_note_prefix: "SJ",
       }),
     ).rejects.toThrow("The work order prefix must be 2-5 letters.");
     const second = await domain.registerClient(
@@ -270,6 +272,7 @@ describe("klien, jalur Web", () => {
         invoice_number_prefix: "INV",
         mou_number_prefix: "MOU",
         batch_code_prefix: "BAT",
+        delivery_note_prefix: "SJ",
       }),
     ).rejects.toThrow("That Web tag is already used by a device.");
   });

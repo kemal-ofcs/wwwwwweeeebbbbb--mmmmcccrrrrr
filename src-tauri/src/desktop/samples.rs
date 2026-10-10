@@ -32,6 +32,9 @@ pub const SETTING_TELEGRAM_CHAT_ID_DESIGN: &str = "telegram_chat_id_design";
 pub const SETTING_TELEGRAM_CHAT_ID_PRODUCTION: &str = "telegram_chat_id_production";
 pub const SETTING_DEFAULT_DUMMY_FEE_IDR: &str = "default_dummy_fee_idr";
 pub const SETTING_MAX_DUMMY_REJECTIONS: &str = "max_dummy_rejections";
+pub const SETTING_STORAGE_GRACE_DAYS: &str = "storage_grace_days";
+pub const SETTING_STORAGE_FEE_IDR: &str = "storage_fee_idr";
+pub const SETTING_STORAGE_SOP_TEXT: &str = "storage_sop_text";
 pub const SETTING_DP_PERCENTAGE_BP: &str = "dp_percentage_bp";
 pub const SETTING_APPROVAL_WEB_URL: &str = "approval_web_url";
 pub const SETTING_APPROVAL_TOKEN_TTL_DAYS: &str = "approval_token_ttl_days";
@@ -53,6 +56,9 @@ pub const BUSINESS_SETTING_KEYS: &[&str] = &[
     SETTING_TELEGRAM_CHAT_ID_PRODUCTION,
     SETTING_DEFAULT_DUMMY_FEE_IDR,
     SETTING_MAX_DUMMY_REJECTIONS,
+    SETTING_STORAGE_GRACE_DAYS,
+    SETTING_STORAGE_FEE_IDR,
+    SETTING_STORAGE_SOP_TEXT,
     SETTING_DP_PERCENTAGE_BP,
     SETTING_APPROVAL_WEB_URL,
     SETTING_APPROVAL_TOKEN_TTL_DAYS,
@@ -66,7 +72,9 @@ pub const OFFLINE_LOGIN_MAX_DAYS_LIMIT: i64 = 7;
 pub const DEFAULT_FEE_MAX: i64 = 100_000_000_000;
 pub const INVOICE_DUE_DAYS_LIMIT: i64 = 90;
 pub const PAYMENT_INSTRUCTIONS_MAX: usize = 1000;
+pub const STORAGE_SOP_MAX: usize = 2000;
 pub const MAX_DUMMY_REJECTIONS_LIMIT: i64 = 20;
+pub const STORAGE_GRACE_DAYS_LIMIT: i64 = 90;
 pub const DP_PERCENTAGE_INVALID: &str = "The down payment must be from 0.01% to 100%.";
 pub const APPROVAL_TTL_DAYS_LIMIT: i64 = 30;
 pub const APPROVAL_WEB_URL_MAX: usize = 200;
@@ -98,6 +106,7 @@ pub fn normalize_approval_web_url(value: &str) -> Option<String> {
     (host_ok && port_ok && extra.is_none() && path_ok).then(|| text.to_owned())
 }
 pub const PAYMENT_INSTRUCTIONS_INVALID: &str = "Payment instructions are up to 1000 characters.";
+pub const STORAGE_SOP_INVALID: &str = "The storage SOP is up to 2000 characters.";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BusinessSettings {
@@ -127,6 +136,11 @@ pub struct BusinessSettings {
     pub default_dummy_fee_idr: i64,
     /// Batas penolakan dummy (D-18, OQ-29); 0 = tanpa batas.
     pub max_dummy_rejections: i64,
+    /// Masa bebas titip dan biaya titip per koli per hari (v3.3, D-19, OQ-30).
+    pub storage_grace_days: i64,
+    pub storage_fee_idr: i64,
+    /// Teks SOP Penyimpanan untuk PDF pengiriman (v3.4); kosong = tanpa PDF.
+    pub storage_sop_text: String,
     /// Persen DP bawaan MoU dalam basis poin (v2.5a, F-20).
     pub dp_percentage_bp: i64,
     /// Alamat Web tautan persetujuan (v2.5b); kosong = hanya jalur manual.
@@ -155,6 +169,9 @@ impl Default for BusinessSettings {
             telegram_chat_id_production: String::new(),
             default_dummy_fee_idr: 0,
             max_dummy_rejections: 0,
+            storage_grace_days: 14,
+            storage_fee_idr: 0,
+            storage_sop_text: String::new(),
             dp_percentage_bp: 5000,
             approval_web_url: String::new(),
             approval_token_ttl_days: 3,
@@ -182,6 +199,9 @@ impl BusinessSettings {
             "telegram_chat_id_production": self.telegram_chat_id_production,
             "default_dummy_fee_idr": self.default_dummy_fee_idr,
             "max_dummy_rejections": self.max_dummy_rejections,
+            "storage_grace_days": self.storage_grace_days,
+            "storage_fee_idr": self.storage_fee_idr,
+            "storage_sop_text": self.storage_sop_text,
             "dp_percentage_bp": self.dp_percentage_bp,
             "approval_web_url": self.approval_web_url,
             "approval_token_ttl_days": self.approval_token_ttl_days,
@@ -208,6 +228,9 @@ impl BusinessSettings {
             (SETTING_TELEGRAM_CHAT_ID_PRODUCTION, self.telegram_chat_id_production.clone()),
             (SETTING_DEFAULT_DUMMY_FEE_IDR, self.default_dummy_fee_idr.to_string()),
             (SETTING_MAX_DUMMY_REJECTIONS, self.max_dummy_rejections.to_string()),
+            (SETTING_STORAGE_GRACE_DAYS, self.storage_grace_days.to_string()),
+            (SETTING_STORAGE_FEE_IDR, self.storage_fee_idr.to_string()),
+            (SETTING_STORAGE_SOP_TEXT, self.storage_sop_text.clone()),
             (SETTING_DP_PERCENTAGE_BP, self.dp_percentage_bp.to_string()),
             (SETTING_APPROVAL_WEB_URL, self.approval_web_url.clone()),
             (SETTING_APPROVAL_TOKEN_TTL_DAYS, self.approval_token_ttl_days.to_string()),
@@ -312,6 +335,19 @@ pub fn read_business_settings(values: &HashMap<String, String>) -> BusinessSetti
             MAX_DUMMY_REJECTIONS_LIMIT,
         )
         .unwrap_or(defaults.max_dummy_rejections),
+        storage_grace_days: in_range(
+            stored_int(values.get(SETTING_STORAGE_GRACE_DAYS)),
+            0,
+            STORAGE_GRACE_DAYS_LIMIT,
+        )
+        .unwrap_or(defaults.storage_grace_days),
+        storage_fee_idr: in_range(stored_int(values.get(SETTING_STORAGE_FEE_IDR)), 0, DEFAULT_FEE_MAX)
+            .unwrap_or(defaults.storage_fee_idr),
+        storage_sop_text: values
+            .get(SETTING_STORAGE_SOP_TEXT)
+            .map(|text| text.trim().to_owned())
+            .filter(|text| text.chars().count() <= STORAGE_SOP_MAX)
+            .unwrap_or_default(),
         dp_percentage_bp: in_range(stored_int(values.get(SETTING_DP_PERCENTAGE_BP)), 1, 10_000)
             .unwrap_or(defaults.dp_percentage_bp),
         approval_web_url: values
@@ -409,6 +445,21 @@ pub fn validate_business_settings(draft: &Value) -> Result<BusinessSettings, &'s
             MAX_DUMMY_REJECTIONS_LIMIT,
         )
         .ok_or("The dummy rejection limit must be a whole number from 0 to 20.")?,
+        storage_grace_days: in_range(
+            strict_int(draft.get(SETTING_STORAGE_GRACE_DAYS)),
+            0,
+            STORAGE_GRACE_DAYS_LIMIT,
+        )
+        .ok_or("The free storage period must be a whole number of days from 0 to 90.")?,
+        storage_fee_idr: in_range(strict_int(draft.get(SETTING_STORAGE_FEE_IDR)), 0, DEFAULT_FEE_MAX)
+            .ok_or("The storage fee must be a whole rupiah amount.")?,
+        // Wajib dikirim, walau kosong: field yang hilang akan menimpa teks tersimpan.
+        storage_sop_text: draft
+            .get(SETTING_STORAGE_SOP_TEXT)
+            .and_then(Value::as_str)
+            .map(|text| text.trim().to_owned())
+            .filter(|text| text.chars().count() <= STORAGE_SOP_MAX)
+            .ok_or(STORAGE_SOP_INVALID)?,
         dp_percentage_bp: in_range(strict_int(draft.get(SETTING_DP_PERCENTAGE_BP)), 1, 10_000)
             .ok_or(DP_PERCENTAGE_INVALID)?,
         // Wajib dikirim, walau kosong: field yang hilang akan menimpa alamat tersimpan.
@@ -973,7 +1024,7 @@ pub const SAMPLE_FEEDBACK_INSERT_SQL: &str = "INSERT INTO sample_feedbacks (id, 
 /// Padanan `SAMPLE_LIST_SQL`: `unit_price_idr` = harga Finance terbaru untuk
 /// iterasi yang sedang berjalan (NULL = belum diberi harga, gerbang D-27).
 /// Seri di detik yang sama dipisahkan `rowid`; lihat catatan `ponytail` di TS.
-pub const SAMPLE_LIST_SQL: &str = "SELECT s.*, c.client_code, c.name AS client_name, c.free_revision_limit, o.nama_operator AS pic_crm_name, (SELECT p.final_unit_price_idr FROM pricing_formulas p WHERE p.sample_request_id = s.id AND p.iteration_number = s.revision_index + 1 ORDER BY p.recorded_at DESC, p.rowid DESC LIMIT 1) AS unit_price_idr, EXISTS (SELECT 1 FROM invoices i WHERE i.sample_request_id = s.id AND ((s.status = 'WAITING_SAMPLE_PAYMENT' AND i.ref_type = 'SAMPLE_FEE') OR (s.status = 'WAITING_REVISION_PAYMENT' AND i.ref_type = 'REVISION_FEE' AND i.revision_index = s.revision_index)) AND (i.status = 'RESCHEDULED' OR (i.status = 'OPEN' AND (SELECT COALESCE(SUM(a.amount_idr), 0) FROM fund_allocations a WHERE a.invoice_id = i.id) >= i.total_idr))) AS fee_paid, EXISTS (SELECT 1 FROM invoices i WHERE i.sample_request_id = s.id AND i.ref_type = 'TEST_FEE' AND (i.status = 'RESCHEDULED' OR (i.status = 'OPEN' AND (SELECT COALESCE(SUM(a.amount_idr), 0) FROM fund_allocations a WHERE a.invoice_id = i.id) >= i.total_idr))) AS test_paid, (SELECT d.status FROM design_tickets d WHERE d.sample_request_id = s.id AND d.status <> 'CANCELLED' ORDER BY d.created_at DESC, d.rowid DESC LIMIT 1) AS design_status, (SELECT d.dummy_rejection_count FROM design_tickets d WHERE d.sample_request_id = s.id AND d.status <> 'CANCELLED' ORDER BY d.created_at DESC, d.rowid DESC LIMIT 1) AS dummy_round, ((s.is_dummy_required = 0 AND NOT EXISTS (SELECT 1 FROM design_tickets d WHERE d.sample_request_id = s.id AND d.status <> 'CANCELLED')) OR EXISTS (SELECT 1 FROM media_asset m WHERE m.owner_type = 'sample' AND m.owner_id = s.id AND m.purpose = 'MOCKUP')) AS mockup_ready, (SELECT m.status FROM production_mou m WHERE m.sample_request_id = s.id AND m.status NOT IN ('CANCELLED', 'REJECTED') ORDER BY m.created_at DESC, m.rowid DESC LIMIT 1) AS mou_status, (SELECT m.dp_amount_required_idr FROM production_mou m WHERE m.sample_request_id = s.id AND m.status = 'ACCEPTED' ORDER BY m.created_at DESC, m.rowid DESC LIMIT 1) AS mou_dp_idr, EXISTS (SELECT 1 FROM invoices i WHERE i.sample_request_id = s.id AND i.ref_type = 'DP_PRODUCTION_LEGAL' AND (i.status = 'RESCHEDULED' OR (i.status = 'OPEN' AND (SELECT COALESCE(SUM(a.amount_idr), 0) FROM fund_allocations a WHERE a.invoice_id = i.id) >= i.total_idr))) AS dp_paid, (SELECT CASE m.regulatory_path WHEN 'WITH_BPOM' THEN 4 ELSE 1 END - (SELECT COUNT(DISTINCT l.kind) FROM legal_documents l WHERE l.mou_id = m.id AND l.status IN ('ISSUED', 'NOT_REQUIRED') AND (m.regulatory_path = 'WITH_BPOM' OR l.kind = 'HALAL')) FROM production_mou m WHERE m.sample_request_id = s.id AND m.status = 'ACCEPTED' ORDER BY m.created_at DESC, m.rowid DESC LIMIT 1) AS legal_open, (SELECT CASE WHEN d.dummy_rejection_count = 0 THEN EXISTS (SELECT 1 FROM invoices i WHERE i.sample_request_id = s.id AND i.ref_type = 'DUMMY_FEE' AND i.revision_index = 0 AND (i.status = 'RESCHEDULED' OR (i.status = 'OPEN' AND (SELECT COALESCE(SUM(a.amount_idr), 0) FROM fund_allocations a WHERE a.invoice_id = i.id) >= i.total_idr))) ELSE NOT EXISTS (SELECT 1 FROM invoices i WHERE i.sample_request_id = s.id AND i.ref_type = 'DUMMY_FEE' AND i.revision_index = d.dummy_rejection_count AND i.status = 'OPEN' AND (SELECT COALESCE(SUM(a.amount_idr), 0) FROM fund_allocations a WHERE a.invoice_id = i.id) < i.total_idr) END FROM design_tickets d WHERE d.sample_request_id = s.id AND d.status <> 'CANCELLED' ORDER BY d.created_at DESC, d.rowid DESC LIMIT 1) AS dummy_paid, (SELECT m.status FROM production_mou m WHERE m.sample_request_id = s.id ORDER BY m.created_at DESC, m.rowid DESC LIMIT 1) IN ('REJECTED', 'CANCELLED') AS mou_closed, (SELECT b.material_status FROM production_batches b WHERE b.sample_request_id = s.id ORDER BY b.created_at DESC, b.rowid DESC LIMIT 1) AS batch_material, (SELECT b.sched_packing_on FROM production_batches b WHERE b.sample_request_id = s.id ORDER BY b.created_at DESC, b.rowid DESC LIMIT 1) AS batch_packing_on FROM sample_requests s LEFT JOIN clients c ON c.id = s.client_id LEFT JOIN master_operator o ON o.id = s.pic_crm_id";
+pub const SAMPLE_LIST_SQL: &str = "SELECT s.*, c.client_code, c.name AS client_name, c.free_revision_limit, o.nama_operator AS pic_crm_name, (SELECT p.final_unit_price_idr FROM pricing_formulas p WHERE p.sample_request_id = s.id AND p.iteration_number = s.revision_index + 1 ORDER BY p.recorded_at DESC, p.rowid DESC LIMIT 1) AS unit_price_idr, EXISTS (SELECT 1 FROM invoices i WHERE i.sample_request_id = s.id AND ((s.status = 'WAITING_SAMPLE_PAYMENT' AND i.ref_type = 'SAMPLE_FEE') OR (s.status = 'WAITING_REVISION_PAYMENT' AND i.ref_type = 'REVISION_FEE' AND i.revision_index = s.revision_index)) AND (i.status = 'RESCHEDULED' OR (i.status = 'OPEN' AND (SELECT COALESCE(SUM(a.amount_idr), 0) FROM fund_allocations a WHERE a.invoice_id = i.id) >= i.total_idr))) AS fee_paid, EXISTS (SELECT 1 FROM invoices i WHERE i.sample_request_id = s.id AND i.ref_type = 'TEST_FEE' AND (i.status = 'RESCHEDULED' OR (i.status = 'OPEN' AND (SELECT COALESCE(SUM(a.amount_idr), 0) FROM fund_allocations a WHERE a.invoice_id = i.id) >= i.total_idr))) AS test_paid, (SELECT d.status FROM design_tickets d WHERE d.sample_request_id = s.id AND d.status <> 'CANCELLED' ORDER BY d.created_at DESC, d.rowid DESC LIMIT 1) AS design_status, (SELECT d.dummy_rejection_count FROM design_tickets d WHERE d.sample_request_id = s.id AND d.status <> 'CANCELLED' ORDER BY d.created_at DESC, d.rowid DESC LIMIT 1) AS dummy_round, ((s.is_dummy_required = 0 AND NOT EXISTS (SELECT 1 FROM design_tickets d WHERE d.sample_request_id = s.id AND d.status <> 'CANCELLED')) OR EXISTS (SELECT 1 FROM media_asset m WHERE m.owner_type = 'sample' AND m.owner_id = s.id AND m.purpose = 'MOCKUP')) AS mockup_ready, (SELECT m.status FROM production_mou m WHERE m.sample_request_id = s.id AND m.status NOT IN ('CANCELLED', 'REJECTED') ORDER BY m.created_at DESC, m.rowid DESC LIMIT 1) AS mou_status, (SELECT m.dp_amount_required_idr FROM production_mou m WHERE m.sample_request_id = s.id AND m.status = 'ACCEPTED' ORDER BY m.created_at DESC, m.rowid DESC LIMIT 1) AS mou_dp_idr, EXISTS (SELECT 1 FROM invoices i WHERE i.sample_request_id = s.id AND i.ref_type = 'DP_PRODUCTION_LEGAL' AND (i.status = 'RESCHEDULED' OR (i.status = 'OPEN' AND (SELECT COALESCE(SUM(a.amount_idr), 0) FROM fund_allocations a WHERE a.invoice_id = i.id) >= i.total_idr))) AS dp_paid, (SELECT CASE m.regulatory_path WHEN 'WITH_BPOM' THEN 4 ELSE 1 END - (SELECT COUNT(DISTINCT l.kind) FROM legal_documents l WHERE l.mou_id = m.id AND l.status IN ('ISSUED', 'NOT_REQUIRED') AND (m.regulatory_path = 'WITH_BPOM' OR l.kind = 'HALAL')) FROM production_mou m WHERE m.sample_request_id = s.id AND m.status = 'ACCEPTED' ORDER BY m.created_at DESC, m.rowid DESC LIMIT 1) AS legal_open, (SELECT CASE WHEN d.dummy_rejection_count = 0 THEN EXISTS (SELECT 1 FROM invoices i WHERE i.sample_request_id = s.id AND i.ref_type = 'DUMMY_FEE' AND i.revision_index = 0 AND (i.status = 'RESCHEDULED' OR (i.status = 'OPEN' AND (SELECT COALESCE(SUM(a.amount_idr), 0) FROM fund_allocations a WHERE a.invoice_id = i.id) >= i.total_idr))) ELSE NOT EXISTS (SELECT 1 FROM invoices i WHERE i.sample_request_id = s.id AND i.ref_type = 'DUMMY_FEE' AND i.revision_index = d.dummy_rejection_count AND i.status = 'OPEN' AND (SELECT COALESCE(SUM(a.amount_idr), 0) FROM fund_allocations a WHERE a.invoice_id = i.id) < i.total_idr) END FROM design_tickets d WHERE d.sample_request_id = s.id AND d.status <> 'CANCELLED' ORDER BY d.created_at DESC, d.rowid DESC LIMIT 1) AS dummy_paid, (SELECT m.status FROM production_mou m WHERE m.sample_request_id = s.id ORDER BY m.created_at DESC, m.rowid DESC LIMIT 1) IN ('REJECTED', 'CANCELLED') AS mou_closed, (SELECT b.material_status FROM production_batches b WHERE b.sample_request_id = s.id ORDER BY b.created_at DESC, b.rowid DESC LIMIT 1) AS batch_material, (SELECT b.sched_packing_on FROM production_batches b WHERE b.sample_request_id = s.id ORDER BY b.created_at DESC, b.rowid DESC LIMIT 1) AS batch_packing_on, (SELECT b.stages_done FROM production_batches b WHERE b.sample_request_id = s.id ORDER BY b.created_at DESC, b.rowid DESC LIMIT 1) AS batch_stages, (SELECT h.status FROM shipments h WHERE h.sample_request_id = s.id AND h.status <> 'CANCELLED' ORDER BY h.created_at DESC, h.rowid DESC LIMIT 1) AS shipment_status FROM sample_requests s LEFT JOIN clients c ON c.id = s.client_id LEFT JOIN master_operator o ON o.id = s.pic_crm_id";
 
 /// Satu harga per simpan (v2.2), hanya-tambah. ?1 id, ?2 tiket, ?3 iterasi,
 /// ?4-?7 komponen, ?8 HPP, ?9 margin, ?10 harga jual, ?11 catatan,
@@ -1012,11 +1063,13 @@ pub const SAMPLE_CHANGED_ELSEWHERE: &str =
 // ---------------------------------------------------------------------------
 
 pub const SAMPLE_MEDIA_PURPOSES: &[&str] =
-    &["REFERENCE", "PAYMENT_PROOF", "MOCKUP", "CLIENT_RESPONSE", "LEGAL_DOCUMENT", "DUMMY_ARTWORK"];
+    &["REFERENCE", "PAYMENT_PROOF", "MOCKUP", "CLIENT_RESPONSE", "LEGAL_DOCUMENT", "DUMMY_ARTWORK", "SHIPMENT_PROOF"];
 
 /// Padanan `mediaPurposePermission`: mockup milik desainer (v2.4).
 pub fn media_purpose_permission(purpose: &str) -> &'static str {
-    if purpose == "MOCKUP" || purpose == "DUMMY_ARTWORK" {
+    if purpose == "SHIPMENT_PROOF" {
+        "shipping.manage"
+    } else if purpose == "MOCKUP" || purpose == "DUMMY_ARTWORK" {
         "design.manage"
     } else {
         "samples.manage"
@@ -1098,6 +1151,8 @@ mod tests {
                 ("telegram_chat_id_production", "@maklon_production"),
                 ("default_dummy_fee_idr", "75000"),
                 ("max_dummy_rejections", "3"),
+                ("storage_grace_days", "21"),
+                ("storage_fee_idr", "500"),
                 ("dp_percentage_bp", "3000"),
                 ("approval_web_url", " https://crm.company.id/ "),
                 ("approval_token_ttl_days", "7"),
@@ -1116,10 +1171,13 @@ mod tests {
                 default_test_fee_idr: 1_500_000_000,
                 invoice_due_days: 14,
                 invoice_payment_instructions: "BCA 123 a.n. Company".into(),
+                storage_sop_text: String::new(),
                 telegram_chat_id_design: "@maklon_design".into(),
                 telegram_chat_id_production: "@maklon_production".into(),
                 default_dummy_fee_idr: 75_000,
                 max_dummy_rejections: 3,
+                storage_grace_days: 21,
+                storage_fee_idr: 500,
                 dp_percentage_bp: 3000,
                 approval_web_url: "https://crm.company.id".into(),
                 approval_token_ttl_days: 7,
@@ -1134,6 +1192,8 @@ mod tests {
                 ("max_photos_per_sample", "0"),
                 ("offline_login_max_days", "9"),
                 ("max_dummy_rejections", "21"),
+                ("storage_grace_days", "91"),
+                ("storage_fee_idr", "-1"),
                 ("dp_percentage_bp", "0"),
                 ("approval_web_url", "http://crm.company.id"),
                 ("approval_token_ttl_days", "31"),
@@ -1190,10 +1250,13 @@ mod tests {
             "default_test_fee_idr": 250000,
             "invoice_due_days": 0,
             "invoice_payment_instructions": " Transfer to BCA ",
+            "storage_sop_text": " Keep below 25°C ",
             "telegram_chat_id_design": "",
             "telegram_chat_id_production": "",
             "default_dummy_fee_idr": 50000,
             "max_dummy_rejections": 2,
+            "storage_grace_days": 0,
+            "storage_fee_idr": 2500,
             "dp_percentage_bp": 10000,
             "approval_web_url": "",
             "approval_token_ttl_days": 30,
@@ -1214,10 +1277,13 @@ mod tests {
                 default_test_fee_idr: 250_000,
                 invoice_due_days: 0,
                 invoice_payment_instructions: "Transfer to BCA".into(),
+                storage_sop_text: "Keep below 25°C".into(),
                 telegram_chat_id_design: String::new(),
                 telegram_chat_id_production: String::new(),
                 default_dummy_fee_idr: 50_000,
                 max_dummy_rejections: 2,
+                storage_grace_days: 0,
+                storage_fee_idr: 2500,
                 dp_percentage_bp: 10_000,
                 approval_web_url: String::new(),
                 approval_token_ttl_days: 30,
@@ -1236,6 +1302,8 @@ mod tests {
         assert_eq!(with("default_dummy_fee_idr", json!(-5)), "Default fees must be whole rupiah amounts.");
         assert_eq!(with("telegram_chat_id_design", Value::Null), TELEGRAM_CHAT_ID_INVALID);
         assert_eq!(with("telegram_chat_id_production", Value::Null), TELEGRAM_CHAT_ID_INVALID);
+        assert_eq!(with("storage_grace_days", json!(91)), "The free storage period must be a whole number of days from 0 to 90.");
+        assert_eq!(with("storage_fee_idr", json!(-1)), "The storage fee must be a whole rupiah amount.");
         for limit in [json!(21), json!(-1), json!("2")] {
             assert_eq!(
                 with("max_dummy_rejections", limit),
@@ -1252,6 +1320,7 @@ mod tests {
             assert_eq!(with("approval_token_ttl_days", ttl), APPROVAL_TTL_INVALID);
         }
         assert_eq!(with("invoice_payment_instructions", Value::Null), PAYMENT_INSTRUCTIONS_INVALID);
+        assert_eq!(with("storage_sop_text", json!("x".repeat(2001))), STORAGE_SOP_INVALID);
         assert_eq!(with("invoice_payment_instructions", json!("x".repeat(1001))), PAYMENT_INSTRUCTIONS_INVALID);
         assert_eq!(
             with("invoice_due_days", json!(91)),

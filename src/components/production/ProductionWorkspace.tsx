@@ -10,25 +10,97 @@ import { Modal } from "@/components/ui/Modal";
 import { PageHeader } from "@/components/ui/PageHeader";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import {
+  type BatchRecord,
   getProductionOverview,
   type ProductionOverview,
 } from "@/lib/gateways/production";
 import { SYNC_COMPLETED_EVENT } from "@/lib/gateways/sync-status";
-import { ProductionPanel } from "./ProductionPanel";
+import {
+  PRODUCTION_STAGES,
+  STAGE_LABEL,
+  shipGateError,
+  shipStateFromRow,
+} from "@/lib/validations/production";
+import { deviceToday, isBehind, ProductionPanel } from "./ProductionPanel";
 
 /**
- * Halaman Production (v3.1, PRD F-23/F-24, SCR-15): MoU yang siap dibuatkan
- * work order, lalu work order per tahap bahan dan jadwal. Ditulis sekali untuk
+ * Halaman Production (v3.1-v3.2, PRD F-23/F-24/F-25, SCR-15/16): MoU yang
+ * siap dibuatkan work order, lalu work order per tahap bahan, jadwal, dan
+ * lantai produksi. Ditulis sekali untuk
  * Web-Desktop dan Mobile (`filesToCopy`).
  */
 
-type View = "ready" | "materials" | "scheduling" | "scheduled" | "all";
+type View =
+  | "ready"
+  | "materials"
+  | "scheduling"
+  | "scheduled"
+  | "floor"
+  | "awaiting"
+  | "cleared"
+  | "shipping"
+  | "forwarded"
+  | "all";
+
+/**
+ * Tab sebuah work order; `ready` hanya berisi MoU tanpa work order.
+ * `shipment` = status pengiriman aktif (v3.4), null bila belum ada.
+ */
+function inView(batch: BatchRecord, view: View, shipment: string | null) {
+  const waiting = batch.stages_done === 0;
+  switch (view) {
+    case "materials":
+      return waiting && batch.material_status !== "READY";
+    case "scheduling":
+      return (
+        waiting &&
+        (batch.sched_packing_on === "" || batch.needs_reschedule === 1)
+      );
+    case "scheduled":
+      return (
+        waiting && batch.sched_packing_on !== "" && batch.needs_reschedule !== 1
+      );
+    case "floor":
+      return (
+        batch.stages_done > 0 && batch.stages_done < PRODUCTION_STAGES.length
+      );
+    // Sesudah Packing: menunggu pembayaran atau siap kirim (v3.3).
+    case "awaiting":
+      return (
+        batch.stages_done >= PRODUCTION_STAGES.length &&
+        shipGateError(
+          shipStateFromRow(batch as unknown as Record<string, unknown>),
+        ) !== null
+      );
+    // Pengiriman (v3.4): Surat Jalan terbit atau sudah dikirim, lalu diteruskan.
+    case "shipping":
+      return shipment === "PREPARED" || shipment === "SHIPPED";
+    case "forwarded":
+      return shipment === "FORWARDED";
+    case "cleared":
+      return (
+        shipment === null &&
+        batch.stages_done >= PRODUCTION_STAGES.length &&
+        shipGateError(
+          shipStateFromRow(batch as unknown as Record<string, unknown>),
+        ) === null
+      );
+    case "ready":
+      return false;
+    default:
+      return true;
+  }
+}
 
 const EMPTY: ProductionOverview = {
   ready: [],
   batches: [],
   purchase_orders: [],
   suppliers: [],
+  stage_log: [],
+  shipments: [],
+  storage_sop_text: "",
+  carriers: [],
 };
 
 export function ProductionWorkspace() {
@@ -60,21 +132,33 @@ export function ProductionWorkspace() {
     return () => window.removeEventListener(SYNC_COMPLETED_EVENT, onSync);
   }, [refresh]);
 
-  const counts = useMemo(
-    () => ({
+  // Status pengiriman aktif per work order (v3.4).
+  const shipmentOf = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const shipment of data.shipments) {
+      if (shipment.status !== "CANCELLED")
+        map.set(shipment.batch_id, shipment.status);
+    }
+    return (batchId: string) => map.get(batchId) ?? null;
+  }, [data.shipments]);
+  const counts = useMemo(() => {
+    const count = (view: View) =>
+      data.batches.filter((batch) => inView(batch, view, shipmentOf(batch.id)))
+        .length;
+    return {
       ready: data.ready.length,
-      materials: data.batches.filter((b) => b.material_status !== "READY")
-        .length,
-      scheduling: data.batches.filter(
-        (b) => b.sched_packing_on === "" || b.needs_reschedule === 1,
-      ).length,
-      scheduled: data.batches.filter(
-        (b) => b.sched_packing_on !== "" && b.needs_reschedule !== 1,
-      ).length,
+      materials: count("materials"),
+      scheduling: count("scheduling"),
+      scheduled: count("scheduled"),
+      floor: count("floor"),
+      awaiting: count("awaiting"),
+      cleared: count("cleared"),
+      shipping: count("shipping"),
+      forwarded: count("forwarded"),
       all: data.batches.length,
-    }),
-    [data],
-  );
+    };
+  }, [data, shipmentOf]);
+  const today = deviceToday();
 
   const query = search.trim().toLowerCase();
   const matches = (...values: (string | null)[]) =>
@@ -92,12 +176,7 @@ export function ProductionWorkspace() {
       )
     )
       return false;
-    if (view === "materials") return batch.material_status !== "READY";
-    if (view === "scheduling")
-      return batch.sched_packing_on === "" || batch.needs_reschedule === 1;
-    if (view === "scheduled")
-      return batch.sched_packing_on !== "" && batch.needs_reschedule !== 1;
-    return true;
+    return inView(batch, view, shipmentOf(batch.id));
   });
 
   const openMou = openKey?.startsWith("mou:")
@@ -132,6 +211,11 @@ export function ProductionWorkspace() {
               ["materials", "Materials"],
               ["scheduling", "To schedule"],
               ["scheduled", "Scheduled"],
+              ["floor", "On the floor"],
+              ["awaiting", "Awaiting payment"],
+              ["cleared", "Cleared to ship"],
+              ["shipping", "Shipping"],
+              ["forwarded", "Sent to client"],
               ["all", "All"],
             ] as const
           ).map(([value, label]) => (
@@ -222,6 +306,24 @@ export function ProductionWorkspace() {
                       {batch.needs_reschedule === 1 ? (
                         <StatusBadge tone="warning">Reschedule</StatusBadge>
                       ) : null}
+                      {batch.stages_done > 0 ? (
+                        <StatusBadge
+                          tone={
+                            batch.stages_done >= PRODUCTION_STAGES.length
+                              ? "success"
+                              : "info"
+                          }
+                        >
+                          {batch.stages_done >= PRODUCTION_STAGES.length
+                            ? inView(batch, "cleared", shipmentOf(batch.id))
+                              ? "Cleared to ship"
+                              : "Packed, awaiting payment"
+                            : `${STAGE_LABEL[PRODUCTION_STAGES[batch.stages_done - 1] ?? "WEIGHING"]} done`}
+                        </StatusBadge>
+                      ) : null}
+                      {isBehind(batch, today) ? (
+                        <StatusBadge tone="danger">Behind schedule</StatusBadge>
+                      ) : null}
                     </span>
                     <span className="block text-body-sm text-on-surface-variant">
                       <span className="font-mono">{batch.batch_code}</span> ·{" "}
@@ -264,6 +366,13 @@ export function ProductionWorkspace() {
             batch={openBatch}
             purchaseOrders={data.purchase_orders}
             suppliers={data.suppliers}
+            shipments={data.shipments}
+            carriers={data.carriers}
+            storageSopText={data.storage_sop_text}
+            stageLog={data.stage_log.filter(
+              (entry) =>
+                entry.sample_request_id === openBatch?.sample_request_id,
+            )}
             onChanged={() => {
               // Work order baru menggantikan baris MoU-nya di daftar.
               void refresh().then(() => {

@@ -5,6 +5,7 @@ import type { InvoiceRecord } from "@/lib/gateways/finance";
 import type {
   BatchRecord,
   PurchaseOrderRecord,
+  ShipmentRecord,
   SupplierOption,
 } from "@/lib/gateways/production";
 import { isDesktopRuntime } from "@/lib/runtime/app-runtime";
@@ -105,6 +106,18 @@ export interface SampleRequestRecord {
   batch_material: string | null;
   /** Tanggal packing terjadwal; '' = belum dijadwalkan SPV. */
   batch_packing_on: string | null;
+  /** Tahap lantai produksi yang sudah selesai, 0-4 (v3.2); null = belum ada work order. */
+  batch_stages: number | null;
+  /**
+   * Ringkasan kirim work order (v3.3, `shipSummary`); semuanya null bila
+   * tiket belum punya work order. `ship_block` null = siap kirim.
+   */
+  ship_block: string | null;
+  settlement_default_idr: number | null;
+  storage_fee_idr: number | null;
+  settlement_cleared: number | null;
+  /** Status pengiriman aktif terakhir (v3.4); null = belum ada. */
+  shipment_status: string | null;
 }
 
 /**
@@ -217,6 +230,10 @@ export interface SampleDetail {
   purchase_orders: PurchaseOrderRecord[];
   /** Pilihan supplier untuk form PO. */
   suppliers: SupplierOption[];
+  /** Pengiriman tiket ini (v3.4), teks SOP, dan pilihan ekspedisi. */
+  shipments: ShipmentRecord[];
+  storage_sop_text: string;
+  carriers: SupplierOption[];
 }
 
 /** Satu baris `LEGAL_LIST_SQL` (v2.6, PRD F-21). */

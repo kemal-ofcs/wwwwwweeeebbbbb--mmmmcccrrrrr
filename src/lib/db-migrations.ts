@@ -149,6 +149,27 @@ const COLUMN_MIGRATIONS: readonly ColumnMigration[] = [
     column: "is_test_requested",
     sql: "ALTER TABLE sample_requests ADD COLUMN is_test_requested INTEGER NOT NULL DEFAULT 0;",
   },
+  // Progres tahap lantai produksi (v3.2, PRD F-25).
+  {
+    table: "production_batches",
+    column: "stages_done",
+    sql: "ALTER TABLE production_batches ADD COLUMN stages_done INTEGER NOT NULL DEFAULT 0;",
+  },
+  {
+    table: "production_batches",
+    column: "packed_at",
+    sql: "ALTER TABLE production_batches ADD COLUMN packed_at TEXT NOT NULL DEFAULT '';",
+  },
+  {
+    table: "production_batches",
+    column: "carton_count",
+    sql: "ALTER TABLE production_batches ADD COLUMN carton_count INTEGER NOT NULL DEFAULT 0;",
+  },
+  {
+    table: "production_batches",
+    column: "produced_units",
+    sql: "ALTER TABLE production_batches ADD COLUMN produced_units INTEGER NOT NULL DEFAULT 0;",
+  },
 ];
 
 async function tableExists(client: Client, table: string) {
@@ -369,6 +390,24 @@ export async function runDatabaseMigrations(client: Client) {
   await client.execute({
     sql: `INSERT OR IGNORE INTO schema_migration (version, name, applied_at)
           VALUES (18, 'production-batches', ?);`,
+    args: [new Date().toISOString()],
+  });
+
+  // Versi 19: tahap lantai produksi (v3.2, PRD F-25): kolom progres di
+  // `production_batches` (`COLUMN_MIGRATIONS`). Nomor dan nama WAJIB sama
+  // dengan `turso.rs`.
+  await client.execute({
+    sql: `INSERT OR IGNORE INTO schema_migration (version, name, applied_at)
+          VALUES (19, 'batch-stages', ?);`,
+    args: [new Date().toISOString()],
+  });
+
+  // Versi 20: pengiriman dan Surat Jalan (v3.4, PRD F-27): tabel `shipments`
+  // (DDL awal) dan izin `shipping.manage`. Nomor dan nama WAJIB sama dengan
+  // `turso.rs`.
+  await client.execute({
+    sql: `INSERT OR IGNORE INTO schema_migration (version, name, applied_at)
+          VALUES (20, 'shipments', ?);`,
     args: [new Date().toISOString()],
   });
 }

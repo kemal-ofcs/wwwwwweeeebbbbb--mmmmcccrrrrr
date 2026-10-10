@@ -14,6 +14,10 @@ import {
   INVOICE_DESCRIPTION_MAX,
   INVOICE_REF_TYPES,
 } from "@/lib/validations/finance";
+import {
+  SHIP_NO_SETTLEMENT,
+  SHIP_STORAGE_UNBILLED,
+} from "@/lib/validations/production";
 import { formatRupiah } from "@/lib/validations/sample";
 import { INVOICE_TYPE_LABEL } from "./labels";
 
@@ -37,6 +41,9 @@ interface InvoiceFormProps {
 function suggestedType(sample: SampleRequestRecord | undefined) {
   if (!sample) return "OTHER";
   if (sample.status === "WAITING_REVISION_PAYMENT") return "REVISION_FEE";
+  // Sesudah Packing: pelunasan, lalu biaya titip bila ada (v3.3).
+  if (sample.ship_block === SHIP_NO_SETTLEMENT) return "SETTLEMENT";
+  if (sample.ship_block === SHIP_STORAGE_UNBILLED) return "STORAGE_FEE";
   if (sample.is_paid_sample === 1 && sample.status === "WAITING_SAMPLE_PAYMENT")
     return "SAMPLE_FEE";
   // MoU disetujui: tagihan DP (v2.5a).
@@ -73,6 +80,9 @@ export function InvoiceForm({
     if (refType === "DUMMY_FEE")
       return overview.defaults.default_dummy_fee_idr || "";
     if (refType === "DP_PRODUCTION_LEGAL") return sample?.mou_dp_idr ?? "";
+    // Total MoU − DP sebelum pajak (keputusan B v3.3); biaya titip berjalan.
+    if (refType === "SETTLEMENT") return sample?.settlement_default_idr ?? "";
+    if (refType === "STORAGE_FEE") return sample?.storage_fee_idr ?? "";
     return "";
   };
 

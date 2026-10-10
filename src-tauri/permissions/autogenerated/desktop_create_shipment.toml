@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-desktop-create-shipment"
+description = "Enables the desktop_create_shipment command without any pre-configured scope."
+commands.allow = ["desktop_create_shipment"]
+
+[[permission]]
+identifier = "deny-desktop-create-shipment"
+description = "Denies the desktop_create_shipment command without any pre-configured scope."
+commands.deny = ["desktop_create_shipment"]
