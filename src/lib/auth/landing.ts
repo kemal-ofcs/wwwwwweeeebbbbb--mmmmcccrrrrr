@@ -10,6 +10,8 @@ import { type AccessSubject, type AppArea, canAccessArea } from "./access";
  */
 const LANDING_ORDER: readonly (readonly [AppArea, string])[] = [
   ["clients", "/clients"],
+  // Role produksi (PPIC, SPV, QC, Logistik) tanpa izin klien (v3.1).
+  ["production", "/production"],
   ["settings", "/settings"],
   ["password_reset", "/password-reset-history"],
 ];

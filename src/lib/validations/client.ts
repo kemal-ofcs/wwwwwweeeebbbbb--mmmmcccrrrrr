@@ -13,6 +13,14 @@ export const DEFAULT_CLIENT_CODE_WEB_TAG = "WB";
 
 export const CLIENT_CODE_PREFIX_SETTING = "client_code_prefix";
 export const CLIENT_CODE_WEB_TAG_SETTING = "client_code_web_tag";
+/**
+ * Awalan nomor dokumen lain (D-43). Bagian `-YYYYMMDD-<TAG><NN>` tetap, jadi
+ * aturannya sama dengan awalan kode klien (`normalizeCodePrefix`). Bawaannya
+ * `INVOICE_NUMBER_PREFIX`, `MOU_NUMBER_PREFIX`, `DEFAULT_BATCH_CODE_PREFIX`.
+ */
+export const INVOICE_PREFIX_SETTING = "invoice_number_prefix";
+export const MOU_PREFIX_SETTING = "mou_number_prefix";
+export const BATCH_PREFIX_SETTING = "batch_code_prefix";
 
 /** Siklus hidup klien (PRD D-09). Divalidasi aplikasi, bukan CHECK (keputusan G). */
 export const CLIENT_LIFECYCLE_STATUSES = [
@@ -31,6 +39,8 @@ export const MASTER_OPTION_KINDS = [
   "REGISTRATION_CATEGORY",
   // Alasan RnD menolak tiket (v2.1, PRD E-23), wajib dipilih saat menolak.
   "RND_REJECT_REASON",
+  // Supplier bahan dan kemasan untuk PO PPIC (v3.1, PRD FR-12).
+  "SUPPLIER",
 ] as const;
 export type MasterOptionKind = (typeof MASTER_OPTION_KINDS)[number];
 

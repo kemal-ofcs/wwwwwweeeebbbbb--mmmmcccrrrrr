@@ -21,6 +21,8 @@ export const NOTIFICATION_DIVISIONS = [
   "RND",
   "FINANCE",
   "DESIGN",
+  // PPIC, SPV, QC, dan Logistik berbagi satu grup (v3.1, D-43).
+  "PRODUCTION",
 ] as const;
 export type NotificationDivision = (typeof NOTIFICATION_DIVISIONS)[number];
 
@@ -30,6 +32,7 @@ export const NOTIFICATION_PERMISSIONS = {
   RND: "notifications_rnd.view",
   FINANCE: "notifications_finance.view",
   DESIGN: "notifications_design.view",
+  PRODUCTION: "notifications_production.view",
 } as const satisfies Record<NotificationDivision, string>;
 
 export const NOTIFICATION_EVENT_TYPES = [
@@ -52,6 +55,10 @@ export const NOTIFICATION_EVENT_TYPES = [
   "MOU_ACCEPTED",
   // Klien menjawab lewat tautan persetujuan, ke grup CS (v2.5b).
   "CLIENT_RESPONDED",
+  // Produksi (v3.1): work order baru, PO terlambat, jadwal disimpan.
+  "BATCH_CREATED",
+  "PO_LATE",
+  "BATCH_SCHEDULED",
 ] as const;
 export type NotificationEventType = (typeof NOTIFICATION_EVENT_TYPES)[number];
 
@@ -257,6 +264,25 @@ export function renderNotification(
         `MoU ${text(payload, "mou_number")}, down payment ${rupiah(payload, "dp_amount_idr")}`,
         `Accepted ${when}`,
       ].join("\n");
+    case "BATCH_CREATED":
+      return [
+        `New work order ${text(payload, "batch_code")}: ${sample}`,
+        `MoU ${text(payload, "mou_number")}, ${text(payload, "total_units")} units`,
+        `Created ${when}`,
+      ].join("\n");
+    case "PO_LATE":
+      return [
+        `Purchase order late: ${sample}`,
+        `Work order ${text(payload, "batch_code")}, PO ${text(payload, "po_number")} from ${orDash(text(payload, "supplier"))}`,
+        `Now arriving ${text(payload, "eta_on")}: ${orDash(text(payload, "reason"))}`,
+        `Reported ${when}`,
+      ].join("\n");
+    case "BATCH_SCHEDULED":
+      return [
+        `Production scheduled, packing on ${text(payload, "packing_on")}: ${sample}`,
+        `Work order ${text(payload, "batch_code")}: ${orDash(text(payload, "notes"))}`,
+        `Saved ${when}`,
+      ].join("\n");
     case "COLD_DIGEST": {
       const leads = Array.isArray(payload.leads)
         ? (payload.leads as Payload[])
@@ -327,6 +353,24 @@ export const NOTIFY_CLIENT_RESPONSE_SQL =
 export const NOTIFY_MOU_SQL =
   "INSERT INTO notification_outbox (id, event_type, target_division, payload_json, occurred_at, status, attempts, next_attempt_at, created_at) SELECT 'mou:' || ?1, 'MOU_ACCEPTED', 'FINANCE', json_object('sample_id', s.id, 'client_code', COALESCE(c.client_code, ''), 'client_name', COALESCE(c.name, ''), 'brand_name', s.brand_name, 'mou_number', m.mou_number, 'dp_amount_idr', m.dp_amount_required_idr), m.status_changed_at, CASE WHEN EXISTS (SELECT 1 FROM telegram_config t WHERE t.id = 'default' AND t.is_active = 1 AND TRIM(COALESCE(t.bot_token, '')) <> '') AND TRIM(COALESCE((SELECT g.value FROM setting_gex_system g WHERE g.key = 'telegram_chat_id_finance'), '')) <> '' THEN 'PENDING' ELSE 'SKIPPED' END, 0, datetime('now'), datetime('now') FROM production_mou m JOIN sample_requests s ON s.id = m.sample_request_id LEFT JOIN clients c ON c.id = m.client_id WHERE m.id = ?2 AND m.status = 'ACCEPTED' LIMIT 1 ON CONFLICT(id) DO NOTHING;";
 
+/**
+ * Work order baru, ke grup Production (v3.1). ?1 = id work order; ditulis di
+ * transaksi yang sama dengan work order-nya.
+ */
+export const NOTIFY_BATCH_CREATED_SQL =
+  "INSERT INTO notification_outbox (id, event_type, target_division, payload_json, occurred_at, status, attempts, next_attempt_at, created_at) SELECT 'batch:' || b.id, 'BATCH_CREATED', 'PRODUCTION', json_object('sample_id', s.id, 'client_code', COALESCE(c.client_code, ''), 'client_name', COALESCE(c.name, ''), 'brand_name', s.brand_name, 'batch_code', b.batch_code, 'mou_number', m.mou_number, 'total_units', m.total_units), b.created_at, CASE WHEN EXISTS (SELECT 1 FROM telegram_config t WHERE t.id = 'default' AND t.is_active = 1 AND TRIM(COALESCE(t.bot_token, '')) <> '') AND TRIM(COALESCE((SELECT g.value FROM setting_gex_system g WHERE g.key = 'telegram_chat_id_production'), '')) <> '' THEN 'PENDING' ELSE 'SKIPPED' END, 0, datetime('now'), datetime('now') FROM production_batches b JOIN production_mou m ON m.id = b.mou_id JOIN sample_requests s ON s.id = b.sample_request_id LEFT JOIN clients c ON c.id = b.client_id WHERE b.id = ?1 LIMIT 1 ON CONFLICT(id) DO NOTHING;";
+
+/**
+ * PO terlambat, ke grup CS dan Production (v3.1, E-30). ?1 = id log langkah,
+ * ?2 = id PO. Satu baris per divisi; `id` tetap kunci dedupe.
+ */
+export const NOTIFY_PO_LATE_SQL =
+  "INSERT INTO notification_outbox (id, event_type, target_division, payload_json, occurred_at, status, attempts, next_attempt_at, created_at) SELECT 'po-late:' || ?1 || ':' || d.division, 'PO_LATE', d.division, json_object('sample_id', s.id, 'client_code', COALESCE(c.client_code, ''), 'client_name', COALESCE(c.name, ''), 'brand_name', s.brand_name, 'batch_code', b.batch_code, 'po_number', p.po_number, 'supplier', COALESCE(o.label, ''), 'eta_on', p.eta_on, 'reason', p.late_reason), p.updated_at, CASE WHEN EXISTS (SELECT 1 FROM telegram_config t WHERE t.id = 'default' AND t.is_active = 1 AND TRIM(COALESCE(t.bot_token, '')) <> '') AND TRIM(COALESCE((SELECT g.value FROM setting_gex_system g WHERE g.key = CASE d.division WHEN 'CS' THEN 'telegram_chat_id_cs' ELSE 'telegram_chat_id_production' END), '')) <> '' THEN 'PENDING' ELSE 'SKIPPED' END, 0, datetime('now'), datetime('now') FROM batch_purchase_orders p JOIN production_batches b ON b.id = p.batch_id JOIN sample_requests s ON s.id = b.sample_request_id LEFT JOIN clients c ON c.id = b.client_id LEFT JOIN master_option o ON o.id = p.supplier_option_id CROSS JOIN (SELECT 'CS' AS division UNION ALL SELECT 'PRODUCTION') d WHERE p.id = ?2 ON CONFLICT(id) DO NOTHING;";
+
+/** Jadwal produksi disimpan, ke grup CS (v3.1). ?1 = id log, ?2 = id work order. */
+export const NOTIFY_BATCH_SCHEDULED_SQL =
+  "INSERT INTO notification_outbox (id, event_type, target_division, payload_json, occurred_at, status, attempts, next_attempt_at, created_at) SELECT 'schedule:' || ?1, 'BATCH_SCHEDULED', 'CS', json_object('sample_id', s.id, 'client_code', COALESCE(c.client_code, ''), 'client_name', COALESCE(c.name, ''), 'brand_name', s.brand_name, 'batch_code', b.batch_code, 'packing_on', b.sched_packing_on, 'notes', COALESCE(l.notes, '')), b.schedule_updated_at, CASE WHEN EXISTS (SELECT 1 FROM telegram_config t WHERE t.id = 'default' AND t.is_active = 1 AND TRIM(COALESCE(t.bot_token, '')) <> '') AND TRIM(COALESCE((SELECT g.value FROM setting_gex_system g WHERE g.key = 'telegram_chat_id_cs'), '')) <> '' THEN 'PENDING' ELSE 'SKIPPED' END, 0, datetime('now'), datetime('now') FROM production_batches b JOIN sample_requests s ON s.id = b.sample_request_id LEFT JOIN clients c ON c.id = b.client_id LEFT JOIN sample_status_log l ON l.id = ?1 WHERE b.id = ?2 LIMIT 1 ON CONFLICT(id) DO NOTHING;";
+
 /** Ringkasan Cold yang sudah ada untuk satu tanggal, dan tanggal ringkasan terakhir. */
 export const COLD_DIGEST_STATE_SQL =
   "SELECT (SELECT COUNT(*) FROM notification_outbox WHERE id = ?1) AS done, COALESCE((SELECT MAX(id) FROM notification_outbox WHERE id LIKE 'cold-digest:%'), '') AS last_id;";
@@ -367,15 +411,15 @@ export const NOTIFICATION_PENDING_COUNT_SQL =
   "SELECT COUNT(*) AS total FROM notification_outbox WHERE status = 'PENDING';";
 
 /**
- * Lonceng: ?1/?2/?3/?4 = boleh melihat CS/RnD/Finance/Desain (0/1). Ringkasan Cold
+ * Lonceng: ?1-?5 = boleh melihat CS/RnD/Finance/Desain/Production (0/1). Ringkasan Cold
  * kosong hanya penanda tanggal, tidak pernah ditampilkan.
  */
 export const NOTIFICATION_BELL_LIST_SQL =
-  "SELECT id, event_type, target_division, payload_json, occurred_at, created_at FROM notification_outbox WHERE ((?1 = 1 AND target_division = 'CS') OR (?2 = 1 AND target_division = 'RND') OR (?3 = 1 AND target_division = 'FINANCE') OR (?4 = 1 AND target_division = 'DESIGN')) AND NOT (event_type = 'COLD_DIGEST' AND json_array_length(payload_json, '$.leads') = 0) ORDER BY created_at DESC, rowid DESC LIMIT 30;";
+  "SELECT id, event_type, target_division, payload_json, occurred_at, created_at FROM notification_outbox WHERE ((?1 = 1 AND target_division = 'CS') OR (?2 = 1 AND target_division = 'RND') OR (?3 = 1 AND target_division = 'FINANCE') OR (?4 = 1 AND target_division = 'DESIGN') OR (?5 = 1 AND target_division = 'PRODUCTION')) AND NOT (event_type = 'COLD_DIGEST' AND json_array_length(payload_json, '$.leads') = 0) ORDER BY created_at DESC, rowid DESC LIMIT 30;";
 
-/** ?5 = operator id. Belum dibaca = lahir sesudah operator terakhir membuka lonceng. */
+/** ?6 = operator id. Belum dibaca = lahir sesudah operator terakhir membuka lonceng. */
 export const NOTIFICATION_UNREAD_COUNT_SQL =
-  "SELECT COUNT(*) AS total FROM notification_outbox WHERE ((?1 = 1 AND target_division = 'CS') OR (?2 = 1 AND target_division = 'RND') OR (?3 = 1 AND target_division = 'FINANCE') OR (?4 = 1 AND target_division = 'DESIGN')) AND NOT (event_type = 'COLD_DIGEST' AND json_array_length(payload_json, '$.leads') = 0) AND created_at > COALESCE((SELECT seen_at FROM notification_seen WHERE operator_id = ?5), '');";
+  "SELECT COUNT(*) AS total FROM notification_outbox WHERE ((?1 = 1 AND target_division = 'CS') OR (?2 = 1 AND target_division = 'RND') OR (?3 = 1 AND target_division = 'FINANCE') OR (?4 = 1 AND target_division = 'DESIGN') OR (?5 = 1 AND target_division = 'PRODUCTION')) AND NOT (event_type = 'COLD_DIGEST' AND json_array_length(payload_json, '$.leads') = 0) AND created_at > COALESCE((SELECT seen_at FROM notification_seen WHERE operator_id = ?6), '');";
 
 /** Waktu database, zona perusahaan, dan konfigurasi bot dalam satu baris. */
 export const NOTIFICATION_CONTEXT_SQL =
@@ -383,7 +427,7 @@ export const NOTIFICATION_CONTEXT_SQL =
 
 /** Kunci setelan bisnis yang dibutuhkan pengirim (dibaca lewat `readBusinessSettings`). */
 export const NOTIFICATION_SETTINGS_SQL =
-  "SELECT key, value FROM setting_gex_system WHERE key IN ('lead_hot_max_days', 'lead_warm_max_days', 'telegram_chat_id_cs', 'telegram_chat_id_rnd', 'telegram_chat_id_finance', 'telegram_chat_id_design');";
+  "SELECT key, value FROM setting_gex_system WHERE key IN ('lead_hot_max_days', 'lead_warm_max_days', 'telegram_chat_id_cs', 'telegram_chat_id_rnd', 'telegram_chat_id_finance', 'telegram_chat_id_design', 'telegram_chat_id_production');";
 
 /** ?1 = token baru (kosong = pertahankan yang lama, aturan 11), ?2 = aktif, ?3 = pelaku. */
 export const TELEGRAM_CONFIG_SAVE_SQL =

@@ -94,6 +94,10 @@ export interface MasterOptionDraft {
 export interface ClientCodeSettings {
   client_code_prefix: string;
   client_code_web_tag: string;
+  /** Awalan nomor tagihan, MoU, dan work order (D-43). */
+  invoice_number_prefix: string;
+  mou_number_prefix: string;
+  batch_code_prefix: string;
   /** Tag perangkat ini. Selalu `null` di Web; `null` di perangkat yang belum pernah tersambung. */
   device_tag: string | null;
 }
@@ -169,10 +173,9 @@ export async function getClientCodeSettings(): Promise<ClientCodeSettings> {
   return result.settings;
 }
 
-export async function saveClientCodeSettings(settings: {
-  client_code_prefix: string;
-  client_code_web_tag: string;
-}): Promise<ClientCodeSettings> {
+export async function saveClientCodeSettings(
+  settings: Omit<ClientCodeSettings, "device_tag">,
+): Promise<ClientCodeSettings> {
   if (isDesktopRuntime()) {
     return invokeDesktop("desktop_save_client_code_settings", { settings });
   }

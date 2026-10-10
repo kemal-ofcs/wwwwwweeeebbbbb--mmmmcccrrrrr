@@ -998,11 +998,11 @@ pub async fn desktop_retry_failed_notifications(
     notifications::telegram_settings(&turso).await
 }
 
-/// Divisi lonceng yang boleh dilihat sesi ini (urutan CS, RnD, Finance, Desain).
+/// Divisi lonceng yang boleh dilihat sesi ini (urutan CS, RnD, Finance, Desain, Production).
 /// Setiap izin diperiksa lewat `require_permission`, termasuk gerbang lisensi;
 /// tanpa satu pun, penolakan terakhir dikembalikan.
-fn notification_access(state: &DesktopState) -> Result<(OperatorUser, [bool; 4]), CommandError> {
-    let mut allowed = [false; 4];
+fn notification_access(state: &DesktopState) -> Result<(OperatorUser, [bool; 5]), CommandError> {
+    let mut allowed = [false; 5];
     let mut granted = None;
     let mut denied = None;
     for (index, division) in notifications::NOTIFICATION_DIVISIONS.iter().enumerate() {
@@ -1991,7 +1991,7 @@ pub async fn desktop_update_company_profile(
 //   4. Picu sinkronisasi latar setelah commit, jangan sebelum.
 // ===========================================================================
 
-use super::{approval, clients, design, finance, legal, mou, samples, sheet_import};
+use super::{approval, clients, design, finance, legal, mou, production, samples, sheet_import};
 
 fn draft_text(draft: &Value, key: &str) -> String {
     draft
@@ -2160,11 +2160,28 @@ fn business_settings(connection: &rusqlite::Connection) -> samples::BusinessSett
 }
 
 fn client_code_prefix(state: &DesktopState) -> String {
-    storage::get_system_setting(&state.data_dir, clients::CLIENT_CODE_PREFIX_SETTING)
+    code_prefix(state, clients::CLIENT_CODE_PREFIX_SETTING, clients::DEFAULT_CLIENT_CODE_PREFIX)
+}
+
+/// Awalan nomor dokumen dari setelan, atau bawaannya bila kosong/rusak (D-43).
+fn code_prefix(state: &DesktopState, setting: &str, fallback: &str) -> String {
+    storage::get_system_setting(&state.data_dir, setting)
         .ok()
         .flatten()
         .and_then(|value| clients::normalize_code_prefix(&value))
-        .unwrap_or_else(|| clients::DEFAULT_CLIENT_CODE_PREFIX.to_owned())
+        .unwrap_or_else(|| fallback.to_owned())
+}
+
+/// Awalan kode klien dan nomor dokumen, bentuknya sama dengan `ClientCodeSettings`.
+fn code_settings_json(state: &DesktopState) -> Result<Value, CommandError> {
+    Ok(json!({
+        "client_code_prefix": client_code_prefix(state),
+        "client_code_web_tag": client_code_web_tag(state),
+        "invoice_number_prefix": code_prefix(state, clients::INVOICE_PREFIX_SETTING, finance::INVOICE_NUMBER_PREFIX),
+        "mou_number_prefix": code_prefix(state, clients::MOU_PREFIX_SETTING, mou::MOU_NUMBER_PREFIX),
+        "batch_code_prefix": code_prefix(state, clients::BATCH_PREFIX_SETTING, production::DEFAULT_BATCH_CODE_PREFIX),
+        "device_tag": sync::local_device_tag(state)?,
+    }))
 }
 
 fn client_code_web_tag(state: &DesktopState) -> String {
@@ -3170,11 +3187,7 @@ pub fn desktop_get_client_code_settings(
     state: State<'_, DesktopState>,
 ) -> Result<Value, CommandError> {
     require_permission(&state, "clients.view")?;
-    Ok(json!({
-        "client_code_prefix": client_code_prefix(&state),
-        "client_code_web_tag": client_code_web_tag(&state),
-        "device_tag": sync::local_device_tag(&state)?,
-    }))
+    code_settings_json(&state)
 }
 
 /// Simpan awalan kode klien dan tag Web. Mengganti tag Web butuh koneksi ke
@@ -3190,6 +3203,12 @@ pub async fn desktop_save_client_code_settings(
         .ok_or_else(|| invalid("The client code prefix must be 2-5 letters."))?;
     let web_tag = clients::normalize_device_tag(&draft_text(&settings, "client_code_web_tag"))
         .ok_or_else(|| invalid("The Web tag must be exactly 2 letters or numbers."))?;
+    let invoice_prefix = clients::normalize_code_prefix(&draft_text(&settings, "invoice_number_prefix"))
+        .ok_or_else(|| invalid("The invoice number prefix must be 2-5 letters."))?;
+    let mou_prefix = clients::normalize_code_prefix(&draft_text(&settings, "mou_number_prefix"))
+        .ok_or_else(|| invalid("The MoU number prefix must be 2-5 letters."))?;
+    let batch_prefix = clients::normalize_code_prefix(&draft_text(&settings, "batch_code_prefix"))
+        .ok_or_else(|| invalid("The work order prefix must be 2-5 letters."))?;
     if web_tag != client_code_web_tag(&state) {
         let turso = state.get_turso_client().map_err(|_| {
             invalid("Changing the Web tag needs a database connection.")
@@ -3215,6 +3234,9 @@ pub async fn desktop_save_client_code_settings(
         for (key, value) in [
             (clients::CLIENT_CODE_PREFIX_SETTING, prefix.as_str()),
             (clients::CLIENT_CODE_WEB_TAG_SETTING, web_tag.as_str()),
+            (clients::INVOICE_PREFIX_SETTING, invoice_prefix.as_str()),
+            (clients::MOU_PREFIX_SETTING, mou_prefix.as_str()),
+            (clients::BATCH_PREFIX_SETTING, batch_prefix.as_str()),
         ] {
             transaction
                 .execute(
@@ -3236,11 +3258,7 @@ pub async fn desktop_save_client_code_settings(
     }
 
     let _ = sync::synchronize(&state).await;
-    Ok(json!({
-        "client_code_prefix": prefix,
-        "client_code_web_tag": web_tag,
-        "device_tag": sync::local_device_tag(&state)?,
-    }))
+    code_settings_json(&state)
 }
 
 fn operator_can(operator: &OperatorUser, permission: &str) -> bool {
@@ -3846,6 +3864,23 @@ pub fn desktop_get_sample_request(state: State<'_, DesktopState>, id: String) ->
             &format!("{} WHERE l.sample_request_id = ? ORDER BY l.created_at, l.rowid;", legal::LEGAL_LIST_SQL),
             &[&id],
         )?,
+        // Work order dan PO-nya (v3.1); `null` sebelum PPIC membuatnya.
+        "batch": query_json(
+            &connection,
+            &format!("{} WHERE b.sample_request_id = ? ORDER BY b.created_at DESC, b.rowid DESC LIMIT 1;", production::BATCH_LIST_SQL),
+            &[&id],
+        )?
+        .into_iter()
+        .next(),
+        "purchase_orders": query_json(
+            &connection,
+            &format!(
+                "{} WHERE p.batch_id IN (SELECT id FROM production_batches WHERE sample_request_id = ?) ORDER BY p.created_at, p.rowid;",
+                production::PO_LIST_SQL
+            ),
+            &[&id],
+        )?,
+        "suppliers": query_json(&connection, production::SUPPLIER_LIST_SQL, &[])?,
     }))
 }
 
@@ -4704,6 +4739,442 @@ pub async fn desktop_record_legal_document(
     Ok(json!({ "id": id, "status": record.status }))
 }
 
+// ---------------------------------------------------------------------------
+// Produksi (v3.1, PRD F-23/F-24, D-44): work order, PO bahan, jadwal SPV.
+// Cermin `src/lib/server/production.ts`; aturannya `production.rs`.
+// ---------------------------------------------------------------------------
+
+fn production_invalid(message: impl Into<String>) -> CommandError {
+    CommandError::new("PRODUCTION_INVALID", message)
+}
+
+fn find_batch(connection: &rusqlite::Connection, batch_id: &str) -> Result<Value, CommandError> {
+    query_json(connection, &format!("{} WHERE b.id = ?;", production::BATCH_LIST_SQL), &[&batch_id])?
+        .into_iter()
+        .next()
+        .ok_or_else(|| CommandError::new("BATCH_NOT_FOUND", "Work order not found."))
+}
+
+/// MoU siap untuk PPIC (disetujui, DP lunas, belum punya work order), work
+/// order, PO, dan daftar supplier. Cermin `listProduction`.
+#[tauri::command]
+pub fn desktop_list_production(state: State<'_, DesktopState>) -> Result<Value, CommandError> {
+    require_permission(&state, "production.view")?;
+    let connection = storage::database(&state.data_dir)?;
+    let ready: Vec<Value> = query_json(
+        &connection,
+        &format!(
+            "{}{} ORDER BY m.status_changed_at, m.id;",
+            mou::MOU_LIST_SQL,
+            production::MOU_WITHOUT_BATCH_WHERE
+        ),
+        &[],
+    )?
+    .into_iter()
+    .filter(|row| row["dp_cleared"].as_i64() == Some(1))
+    .collect();
+    Ok(json!({
+        "ready": ready,
+        "batches": query_json(
+            &connection,
+            &format!("{} ORDER BY b.created_at DESC, b.id;", production::BATCH_LIST_SQL),
+            &[],
+        )?,
+        "purchase_orders": query_json(
+            &connection,
+            &format!("{} ORDER BY p.created_at, p.rowid;", production::PO_LIST_SQL),
+            &[],
+        )?,
+        "suppliers": query_json(&connection, production::SUPPLIER_LIST_SQL, &[])?,
+    }))
+}
+
+/// Work order baru dari MoU yang disetujui dan DP-nya lunas (keputusan I).
+/// Cermin `createBatch`.
+#[tauri::command]
+pub async fn desktop_create_batch(state: State<'_, DesktopState>, mou_id: String) -> Result<Value, CommandError> {
+    let operator = require_permission(&state, "ppic.manage")?;
+    let tag = sync::local_device_tag(&state)?.ok_or_else(|| {
+        CommandError::new(
+            "DEVICE_TAG_MISSING",
+            "This device has no code tag yet. Connect it to the database once to get one.",
+        )
+    })?;
+    let now = storage::now_epoch_seconds();
+    let timestamp = clients::utc_timestamp(now);
+    let prefix = code_prefix(&state, clients::BATCH_PREFIX_SETTING, production::DEFAULT_BATCH_CODE_PREFIX);
+    let (mou_row, code) = {
+        let connection = storage::database(&state.data_dir)?;
+        let mou_row = query_json(&connection, &format!("{} WHERE m.id = ?;", mou::MOU_LIST_SQL), &[&mou_id])?
+            .into_iter()
+            .next()
+            .ok_or_else(|| CommandError::new("MOU_NOT_FOUND", "MoU not found."))?;
+        let active: i64 = connection
+            .query_row(production::BATCH_ACTIVE_SQL, [mou_id.as_str(), ""], |row| row.get(0))
+            .map_err(|_| CommandError::internal())?;
+        if let Some(message) = production::batch_request_error(
+            mou_row["status"].as_str().unwrap_or_default(),
+            mou_row["dp_cleared"].as_i64() == Some(1),
+            active,
+        ) {
+            return Err(production_invalid(message));
+        }
+        let stamp = clients::company_date_stamp(now, &company_timezone(&connection));
+        let mut statement = connection
+            .prepare("SELECT batch_code FROM production_batches WHERE batch_code LIKE ?;")
+            .map_err(|_| CommandError::internal())?;
+        let codes = statement
+            .query_map([format!("%-{stamp}-{tag}__")], |row| row.get::<_, String>(0))
+            .map_err(|_| CommandError::internal())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| CommandError::internal())?;
+        let code = clients::next_client_sequence(codes.iter().map(String::as_str), &stamp, &tag)
+            .and_then(|sequence| clients::format_client_code(&prefix, &stamp, &tag, sequence))
+            .ok_or_else(|| production_invalid("This device has used up its work order numbers for today."))?;
+        (mou_row, code)
+    };
+    let id = clients::new_uuid();
+    let log_id = clients::new_uuid();
+    let sample_id = mou_row["sample_request_id"].as_str().unwrap_or_default().to_owned();
+    let client_id = mou_row["client_id"].as_str().unwrap_or_default().to_owned();
+    let payload = json!({
+        "id": id,
+        "batch_code": code,
+        "mou_id": mou_id,
+        "sample_request_id": sample_id,
+        "client_id": client_id,
+        "created_by": operator.id,
+        "created_at": timestamp,
+        "log": { "id": log_id },
+    });
+    let audit = AuditEntry {
+        actor: &operator,
+        action: "batch.create",
+        entity_type: "sample",
+        entity_id: &sample_id,
+        summary: json!({
+            "client_code": mou_row["client_code"],
+            "brand_name": mou_row["brand_name"],
+            "mou_number": mou_row["mou_number"],
+            "batch_code": code,
+        }),
+        on_behalf_of: None,
+    };
+    commit_with_outbox(&state, "batch", "create", &id, payload, Some(audit), |transaction| {
+        transaction
+            .execute(
+                production::BATCH_INSERT_SQL,
+                rusqlite::params![&id, &code, &mou_id, &sample_id, &client_id, operator.id, &timestamp],
+            )
+            .map_err(|_| CommandError::internal())?;
+        transaction
+            .execute(
+                samples::SAMPLE_STATUS_LOG_INSERT_SQL,
+                rusqlite::params![
+                    &log_id,
+                    &sample_id,
+                    "",
+                    "UNCHECKED",
+                    production::BATCH_CREATE_ACTION,
+                    format!("Work order {code}"),
+                    "",
+                    operator.id,
+                    &timestamp,
+                ],
+            )
+            .map_err(|_| CommandError::internal())?;
+        Ok(())
+    })?;
+    let _ = sync::synchronize(&state).await;
+    Ok(json!({ "id": id, "batch_code": code }))
+}
+
+/// Satu langkah PO: tambah, tiba, terlambat, atau batal (keputusan J).
+/// `step` = `{ action, po_id, order, delay }`. Cermin `recordPurchaseOrder`.
+#[tauri::command]
+pub async fn desktop_record_purchase_order(
+    state: State<'_, DesktopState>,
+    batch_id: String,
+    step: Value,
+) -> Result<Value, CommandError> {
+    let operator = require_permission(&state, "ppic.manage")?;
+    let action = step.get("action").and_then(Value::as_str).unwrap_or_default().to_owned();
+    let now = clients::utc_timestamp(storage::now_epoch_seconds());
+    let (batch, po_id, base_status, base_eta, order, delay, number, supplier) = {
+        let connection = storage::database(&state.data_dir)?;
+        let batch = find_batch(&connection, &batch_id)?;
+        if action == "PO_ADD" {
+            let order = production::validate_purchase_order(step.get("order").unwrap_or(&Value::Null))
+                .map_err(production_invalid)?;
+            if !option_usable(&connection, &order.supplier_option_id, "SUPPLIER", None)? {
+                return Err(production_invalid("Choose an active supplier."));
+            }
+            let supplier: String = connection
+                .query_row(
+                    "SELECT label FROM master_option WHERE id = ?;",
+                    [order.supplier_option_id.as_str()],
+                    |row| row.get(0),
+                )
+                .map_err(|_| CommandError::internal())?;
+            let number = order.po_number.clone();
+            let eta = order.eta_on.clone();
+            (batch, clients::new_uuid(), String::new(), eta, Some(order), None, number, supplier)
+        } else {
+            let po_id = step.get("po_id").and_then(Value::as_str).unwrap_or_default().to_owned();
+            let po = query_json(
+                &connection,
+                &format!("{} WHERE p.id = ? AND p.batch_id = ?;", production::PO_LIST_SQL),
+                &[&po_id, &batch_id],
+            )?
+            .into_iter()
+            .next()
+            .ok_or_else(|| CommandError::new("PO_NOT_FOUND", "Purchase order not found."))?;
+            let status = po["status"].as_str().unwrap_or_default().to_owned();
+            let eta = po["eta_on"].as_str().unwrap_or_default().to_owned();
+            production::apply_po_action(&status, &action).map_err(production_invalid)?;
+            let delay = if action == "PO_LATE" {
+                Some(
+                    production::validate_po_delay(step.get("delay").unwrap_or(&Value::Null), &eta)
+                        .map_err(production_invalid)?,
+                )
+            } else {
+                None
+            };
+            let number = po["po_number"].as_str().unwrap_or_default().to_owned();
+            let supplier = po["supplier_label"].as_str().unwrap_or_default().to_owned();
+            (batch, po_id, status, eta, None, delay, number, supplier)
+        }
+    };
+    let status = production::apply_po_action(&base_status, &action).map_err(production_invalid)?;
+    let eta_on = delay.as_ref().map_or(base_eta.clone(), |delay| delay.eta_on.clone());
+    let reason = delay.as_ref().map(|delay| delay.reason.clone()).unwrap_or_default();
+    let notes = production::po_log_notes(&action, &number, &supplier, &eta_on, &reason);
+    let sample_id = batch["sample_request_id"].as_str().unwrap_or_default().to_owned();
+    let log_id = clients::new_uuid();
+    let payload = json!({
+        "id": po_id,
+        "batch_id": batch_id,
+        "sample_request_id": sample_id,
+        "action": action,
+        "base_status": base_status,
+        "status": status,
+        "base_eta_on": base_eta,
+        "order": order.as_ref().map(production::PurchaseOrderInput::to_json),
+        "delay": delay.as_ref().map(production::PoDelayInput::to_json),
+        "updated_at": now,
+        "recorded_by": operator.id,
+        "log": { "id": log_id, "notes": notes },
+    });
+    let audit = AuditEntry {
+        actor: &operator,
+        action: "batch.purchase_order",
+        entity_type: "sample",
+        entity_id: &sample_id,
+        summary: json!({
+            "client_code": batch["client_code"],
+            "brand_name": batch["brand_name"],
+            "batch_code": batch["batch_code"],
+            "action": action,
+            "notes": notes,
+        }),
+        on_behalf_of: None,
+    };
+    commit_with_outbox(&state, "purchase-order", "record", &po_id, payload, Some(audit), |transaction| {
+        let changed = match (&order, &delay) {
+            (Some(order), _) => transaction.execute(
+                production::PO_INSERT_SQL,
+                rusqlite::params![
+                    &po_id,
+                    &batch_id,
+                    &order.po_number,
+                    &order.supplier_option_id,
+                    &order.eta_on,
+                    operator.id,
+                    &now
+                ],
+            ),
+            (None, Some(delay)) => transaction.execute(
+                production::PO_DELAY_SQL,
+                rusqlite::params![&po_id, &delay.eta_on, &delay.reason, &now, &base_eta],
+            ),
+            (None, None) => transaction.execute(production::PO_STATUS_SQL, rusqlite::params![&po_id, status, &now]),
+        }
+        .map_err(|_| CommandError::internal())?;
+        if changed == 0 {
+            return Err(production_invalid(production::BATCH_CHANGED_ELSEWHERE));
+        }
+        let follow_up = match action.as_str() {
+            "PO_ADD" => Some(production::BATCH_WAITING_PO_SQL),
+            "PO_LATE" => Some(production::BATCH_NEEDS_RESCHEDULE_SQL),
+            _ => None,
+        };
+        if let Some(sql) = follow_up {
+            transaction
+                .execute(sql, rusqlite::params![&batch_id, &now])
+                .map_err(|_| CommandError::internal())?;
+        }
+        transaction
+            .execute(
+                samples::SAMPLE_STATUS_LOG_INSERT_SQL,
+                rusqlite::params![&log_id, &sample_id, &base_status, status, &action, &notes, "", operator.id, &now],
+            )
+            .map_err(|_| CommandError::internal())?;
+        Ok(())
+    })?;
+    let _ = sync::synchronize(&state).await;
+    Ok(json!({ "id": po_id, "status": status }))
+}
+
+/// Bahan siap: hanya bila tidak ada PO terbuka. Cermin `markMaterialsReady`.
+#[tauri::command]
+pub async fn desktop_mark_materials_ready(
+    state: State<'_, DesktopState>,
+    batch_id: String,
+) -> Result<Value, CommandError> {
+    let operator = require_permission(&state, "ppic.manage")?;
+    let now = clients::utc_timestamp(storage::now_epoch_seconds());
+    let batch = {
+        let connection = storage::database(&state.data_dir)?;
+        find_batch(&connection, &batch_id)?
+    };
+    let material_status = batch["material_status"].as_str().unwrap_or_default().to_owned();
+    if let Some(message) =
+        production::materials_ready_error(&material_status, batch["open_orders"].as_i64().unwrap_or(0))
+    {
+        return Err(production_invalid(message));
+    }
+    let sample_id = batch["sample_request_id"].as_str().unwrap_or_default().to_owned();
+    let log_id = clients::new_uuid();
+    let payload = json!({
+        "id": batch_id,
+        "sample_request_id": sample_id,
+        "base_status": material_status,
+        "updated_at": now,
+        "recorded_by": operator.id,
+        "log": { "id": log_id },
+    });
+    let audit = AuditEntry {
+        actor: &operator,
+        action: "batch.ready",
+        entity_type: "sample",
+        entity_id: &sample_id,
+        summary: json!({
+            "client_code": batch["client_code"],
+            "brand_name": batch["brand_name"],
+            "batch_code": batch["batch_code"],
+        }),
+        on_behalf_of: None,
+    };
+    commit_with_outbox(&state, "batch", "ready", &batch_id, payload, Some(audit), |transaction| {
+        let changed = transaction
+            .execute(production::BATCH_READY_SQL, rusqlite::params![&batch_id, &now])
+            .map_err(|_| CommandError::internal())?;
+        if changed == 0 {
+            return Err(production_invalid(production::BATCH_CHANGED_ELSEWHERE));
+        }
+        transaction
+            .execute(
+                samples::SAMPLE_STATUS_LOG_INSERT_SQL,
+                rusqlite::params![
+                    &log_id,
+                    &sample_id,
+                    &material_status,
+                    "READY",
+                    production::MATERIALS_READY_ACTION,
+                    "Materials ready",
+                    "",
+                    operator.id,
+                    &now
+                ],
+            )
+            .map_err(|_| CommandError::internal())?;
+        Ok(())
+    })?;
+    let _ = sync::synchronize(&state).await;
+    Ok(json!({ "id": batch_id, "material_status": "READY" }))
+}
+
+/// Jadwal 4 tahap oleh SPV (keputusan K). Cermin `saveBatchSchedule`.
+#[tauri::command]
+pub async fn desktop_save_batch_schedule(
+    state: State<'_, DesktopState>,
+    batch_id: String,
+    schedule: Value,
+) -> Result<Value, CommandError> {
+    let operator = require_permission(&state, "production.manage")?;
+    let now = clients::utc_timestamp(storage::now_epoch_seconds());
+    let batch = {
+        let connection = storage::database(&state.data_dir)?;
+        find_batch(&connection, &batch_id)?
+    };
+    let has_schedule = !batch["sched_packing_on"].as_str().unwrap_or_default().is_empty();
+    let checked = production::validate_batch_schedule(&schedule, has_schedule).map_err(production_invalid)?;
+    let base = batch["schedule_updated_at"].as_str().unwrap_or_default().to_owned();
+    let sample_id = batch["sample_request_id"].as_str().unwrap_or_default().to_owned();
+    let notes = production::schedule_log_notes(&checked);
+    let log_id = clients::new_uuid();
+    let payload = json!({
+        "id": batch_id,
+        "sample_request_id": sample_id,
+        "schedule": checked.to_json(),
+        "base_schedule_updated_at": base,
+        "updated_at": now,
+        "recorded_by": operator.id,
+        "log": { "id": log_id },
+    });
+    let audit = AuditEntry {
+        actor: &operator,
+        action: "batch.schedule",
+        entity_type: "sample",
+        entity_id: &sample_id,
+        summary: json!({
+            "client_code": batch["client_code"],
+            "brand_name": batch["brand_name"],
+            "batch_code": batch["batch_code"],
+            "schedule": checked.to_json(),
+        }),
+        on_behalf_of: None,
+    };
+    commit_with_outbox(&state, "batch", "schedule", &batch_id, payload, Some(audit), |transaction| {
+        let changed = transaction
+            .execute(
+                production::BATCH_SCHEDULE_SQL,
+                rusqlite::params![
+                    &batch_id,
+                    &checked.weighing_on,
+                    &checked.mixing_on,
+                    &checked.filling_on,
+                    &checked.packing_on,
+                    &now,
+                    &base
+                ],
+            )
+            .map_err(|_| CommandError::internal())?;
+        if changed == 0 {
+            return Err(production_invalid(production::BATCH_CHANGED_ELSEWHERE));
+        }
+        transaction
+            .execute(
+                samples::SAMPLE_STATUS_LOG_INSERT_SQL,
+                rusqlite::params![
+                    &log_id,
+                    &sample_id,
+                    "",
+                    "SCHEDULED",
+                    production::BATCH_SCHEDULE_ACTION,
+                    &notes,
+                    "",
+                    operator.id,
+                    &now
+                ],
+            )
+            .map_err(|_| CommandError::internal())?;
+        Ok(())
+    })?;
+    let _ = sync::synchronize(&state).await;
+    Ok(json!({ "id": batch_id }))
+}
+
 /// Tautan persetujuan klien (v2.5b, PRD F-18, keputusan J/K/L). Hanya saat
 /// online dan di database cloud: antrean dikirim dulu supaya cloud melihat
 /// status terbaru, lalu token ditulis langsung di cloud. Cermin
@@ -4816,7 +5287,7 @@ pub async fn desktop_create_mou(
             .collect::<Result<Vec<_>, _>>()
             .map_err(|_| CommandError::internal())?;
         let number = clients::next_client_sequence(numbers.iter().map(String::as_str), &stamp, &tag)
-            .and_then(|sequence| clients::format_client_code(mou::MOU_NUMBER_PREFIX, &stamp, &tag, sequence))
+            .and_then(|sequence| clients::format_client_code(&code_prefix(&state, clients::MOU_PREFIX_SETTING, mou::MOU_NUMBER_PREFIX), &stamp, &tag, sequence))
             .ok_or_else(|| sample_invalid("This device has used up its MoU numbers for today."))?;
         (current, checked, number)
     };
@@ -5376,7 +5847,7 @@ pub async fn desktop_create_invoice(
             .collect::<Result<Vec<_>, _>>()
             .map_err(|_| CommandError::internal())?;
         let number = clients::next_client_sequence(numbers.iter().map(String::as_str), &stamp, &tag)
-            .and_then(|sequence| clients::format_client_code(finance::INVOICE_NUMBER_PREFIX, &stamp, &tag, sequence))
+            .and_then(|sequence| clients::format_client_code(&code_prefix(&state, clients::INVOICE_PREFIX_SETTING, finance::INVOICE_NUMBER_PREFIX), &stamp, &tag, sequence))
             .ok_or_else(|| finance_invalid("This device has used up its invoice numbers for today."))?;
         let (issued_on, due_on) =
             finance::invoice_dates(now, &timezone, business_settings(&connection).invoice_due_days);

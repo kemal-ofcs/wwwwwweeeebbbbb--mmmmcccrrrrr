@@ -94,6 +94,8 @@ function chatId(settings: BusinessSettings, division: string) {
       return settings.telegram_chat_id_finance;
     case "DESIGN":
       return settings.telegram_chat_id_design;
+    case "PRODUCTION":
+      return settings.telegram_chat_id_production;
     default:
       return "";
   }
@@ -336,7 +338,7 @@ export async function retryFailedNotifications(client: Client) {
 export function notificationAccess(actor: OperatorUser) {
   const allowed = NOTIFICATION_DIVISIONS.map((division) =>
     hasPermission(actor, NOTIFICATION_PERMISSIONS[division]),
-  ) as [boolean, boolean, boolean, boolean];
+  ) as [boolean, boolean, boolean, boolean, boolean];
   if (!allowed.some(Boolean)) {
     throw new AuthorizationError("Access denied for this action.", 403);
   }
@@ -349,7 +351,7 @@ export function notificationAccess(actor: OperatorUser) {
  */
 export async function listNotifications(
   client: Client,
-  allowed: readonly [boolean, boolean, boolean, boolean],
+  allowed: readonly [boolean, boolean, boolean, boolean, boolean],
   operatorId: number,
 ) {
   const context = await loadContext(client);

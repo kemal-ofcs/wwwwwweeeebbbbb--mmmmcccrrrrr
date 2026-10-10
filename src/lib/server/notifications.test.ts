@@ -74,6 +74,7 @@ async function setChats(cs: string, rnd: string, finance: string) {
       invoice_due_days: 7,
       invoice_payment_instructions: "",
       telegram_chat_id_design: "",
+      telegram_chat_id_production: "",
       default_dummy_fee_idr: 0,
       max_dummy_rejections: 0,
       dp_percentage_bp: 5000,
@@ -349,7 +350,7 @@ describe("notifikasi divisi, jalur Web", () => {
   test("lonceng: hanya divisi yang boleh dilihat; membuka = semua dibaca", async () => {
     const cs = await notifications.listNotifications(
       client,
-      [true, false, false, false],
+      [true, false, false, false, false],
       7,
     );
     expect(cs.items.length).toBeGreaterThan(0);
@@ -360,7 +361,7 @@ describe("notifikasi divisi, jalur Web", () => {
 
     const rnd = await notifications.listNotifications(
       client,
-      [false, true, false, false],
+      [false, true, false, false, false],
       7,
     );
     expect(rnd.items.map((item) => item.event_type)).toEqual([
@@ -373,7 +374,7 @@ describe("notifikasi divisi, jalur Web", () => {
       (
         await notifications.listNotifications(
           client,
-          [true, true, true, true],
+          [true, true, true, true, true],
           7,
         )
       ).unread,
@@ -383,7 +384,7 @@ describe("notifikasi divisi, jalur Web", () => {
       (
         await notifications.listNotifications(
           client,
-          [true, true, true, true],
+          [true, true, true, true, true],
           1,
         )
       ).unread,

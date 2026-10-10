@@ -13,6 +13,16 @@ import {
   DEFAULT_CLIENT_CODE_PREFIX,
   DEFAULT_CLIENT_CODE_WEB_TAG,
 } from "@/lib/validations/client";
+import { INVOICE_NUMBER_PREFIX } from "@/lib/validations/finance";
+import { MOU_NUMBER_PREFIX } from "@/lib/validations/mou";
+import { DEFAULT_BATCH_CODE_PREFIX } from "@/lib/validations/production";
+
+/** Awalan nomor dokumen lain (D-43), aturannya sama dengan awalan kode klien. */
+const DOCUMENT_PREFIXES = [
+  ["invoice_number_prefix", "Invoices"],
+  ["mou_number_prefix", "MoUs"],
+  ["batch_code_prefix", "Work orders"],
+] as const;
 
 /**
  * Pengaturan kode klien `<AWALAN>-YYYYMMDD-<TAG><NN>` (PRD D-06, keputusan B1).
@@ -23,6 +33,9 @@ export function ClientCodeCard() {
   const [settings, setSettings] = useState<ClientCodeSettings>({
     client_code_prefix: DEFAULT_CLIENT_CODE_PREFIX,
     client_code_web_tag: DEFAULT_CLIENT_CODE_WEB_TAG,
+    invoice_number_prefix: INVOICE_NUMBER_PREFIX,
+    mou_number_prefix: MOU_NUMBER_PREFIX,
+    batch_code_prefix: DEFAULT_BATCH_CODE_PREFIX,
     device_tag: null,
   });
   const [loading, setLoading] = useState(true);
@@ -68,6 +81,9 @@ export function ClientCodeCard() {
         await saveClientCodeSettings({
           client_code_prefix: settings.client_code_prefix,
           client_code_web_tag: settings.client_code_web_tag,
+          invoice_number_prefix: settings.invoice_number_prefix,
+          mou_number_prefix: settings.mou_number_prefix,
+          batch_code_prefix: settings.batch_code_prefix,
         }),
       );
       setFeedback({
@@ -99,11 +115,14 @@ export function ClientCodeCard() {
           <Icon name="users" className="size-5" />
         </span>
         <div>
-          <h2 className="text-headline-md text-on-surface">Client codes</h2>
+          <h2 className="text-headline-md text-on-surface">
+            Client codes and document numbers
+          </h2>
           <p className="mt-1 max-w-2xl text-body-md text-on-surface-variant">
             New clients get a code like{" "}
             <span className="font-mono">{example}</span>: prefix, company date,
-            the device code, and a running number.
+            the device code, and a running number. Invoices, MoUs, and work
+            orders follow the same pattern with their own prefix.
           </p>
         </div>
       </div>
@@ -166,6 +185,25 @@ export function ClientCodeCard() {
               </span>
             </label>
           </div>
+          <fieldset className="grid gap-4 sm:grid-cols-3">
+            <legend className="app-label mb-2">Document prefixes</legend>
+            {DOCUMENT_PREFIXES.map(([key, label]) => (
+              <label key={key} className="app-label grid gap-1.5">
+                {label}
+                <input
+                  required
+                  minLength={2}
+                  maxLength={5}
+                  pattern="[A-Za-z]{2,5}"
+                  value={settings[key]}
+                  onChange={(event) =>
+                    setSettings({ ...settings, [key]: event.target.value })
+                  }
+                  className="app-input font-mono font-normal uppercase"
+                />
+              </label>
+            ))}
+          </fieldset>
           {isDesktopRuntime() ? (
             <p className="text-body-sm text-on-surface-variant">
               This device&apos;s code:{" "}
@@ -179,7 +217,7 @@ export function ClientCodeCard() {
             disabled={busy}
             className="app-btn app-btn-primary w-full sm:w-auto"
           >
-            {busy ? "Saving…" : "Save client codes"}
+            {busy ? "Saving…" : "Save codes"}
           </button>
         </form>
       )}

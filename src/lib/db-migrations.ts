@@ -362,4 +362,13 @@ export async function runDatabaseMigrations(client: Client) {
           VALUES (17, 'data-export', ?);`,
     args: [new Date().toISOString()],
   });
+
+  // Versi 18: work order produksi (v3.1, PRD F-23/F-24): tabel
+  // `production_batches` dan `batch_purchase_orders` (DDL awal), izin produksi.
+  // Nomor dan nama WAJIB sama dengan `turso.rs`.
+  await client.execute({
+    sql: `INSERT OR IGNORE INTO schema_migration (version, name, applied_at)
+          VALUES (18, 'production-batches', ?);`,
+    args: [new Date().toISOString()],
+  });
 }

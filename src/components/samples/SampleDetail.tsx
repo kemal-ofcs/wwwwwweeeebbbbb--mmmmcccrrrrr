@@ -14,6 +14,7 @@ import {
   invoiceStatusLabel,
   invoiceTone,
 } from "@/components/finance/labels";
+import { ProductionPanel } from "@/components/production/ProductionPanel";
 import { FeedbackBanner } from "@/components/ui/FeedbackBanner";
 import { Modal } from "@/components/ui/Modal";
 import { StatusBadge } from "@/components/ui/StatusBadge";
@@ -46,8 +47,10 @@ import { EvidencePicker } from "./EvidencePicker";
 import {
   DESIGN_STATUS_LABEL,
   LEGAL_STATUS_LABEL,
+  MATERIAL_STATUS_LABEL,
   MOU_STATUS_LABEL,
   nextSampleStep,
+  PO_STATUS_LABEL,
   SAMPLE_ACTION_LABEL,
   SAMPLE_ACTION_PAST,
   SAMPLE_STATUS_LABEL,
@@ -103,6 +106,8 @@ function statusLabel(status: string) {
     DESIGN_STATUS_LABEL[status] ??
     MOU_STATUS_LABEL[status] ??
     LEGAL_STATUS_LABEL[status] ??
+    MATERIAL_STATUS_LABEL[status] ??
+    PO_STATUS_LABEL[status] ??
     status
   );
 }
@@ -529,6 +534,19 @@ export function SampleDetail({
                 onChanged();
               }}
             />
+
+            {hasPermission(user, "production.view") ? (
+              <ProductionPanel
+                mou={data.mou}
+                batch={data.batch}
+                purchaseOrders={data.purchase_orders}
+                suppliers={data.suppliers}
+                onChanged={() => {
+                  void load();
+                  onChanged();
+                }}
+              />
+            ) : null}
 
             <SamplePhotos
               sampleId={request.id}

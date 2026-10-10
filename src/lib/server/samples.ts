@@ -9,6 +9,7 @@ import {
   insertClientEvidence,
   listSampleMedia,
 } from "@/lib/server/media";
+import { sampleProduction } from "@/lib/server/production";
 import {
   applyDesignAction,
   DESIGN_ACTIVE_SQL,
@@ -202,6 +203,8 @@ export async function getSampleRequest(
         args: [key],
       })
     ).rows.map(plain),
+    // Work order dan PO-nya (v3.1); `batch` null sebelum PPIC membuatnya.
+    ...(await sampleProduction(client, key)),
   };
 }
 

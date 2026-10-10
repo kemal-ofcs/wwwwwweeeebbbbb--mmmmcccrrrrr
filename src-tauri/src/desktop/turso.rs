@@ -19,6 +19,7 @@ use super::finance;
 use super::legal;
 use super::mou;
 use super::notifications;
+use super::production;
 use super::samples;
 use super::sheet_import;
 use super::models::{CommandError, OperatorUser};
@@ -703,6 +704,16 @@ const SNAPSHOT_SOURCES: &[SnapshotSource] = &[
         payload_key: "importedRecords",
         table: "imported_records",
         sql: "SELECT * FROM imported_records ORDER BY created_at, id;",
+    },
+    SnapshotSource {
+        payload_key: "productionBatches",
+        table: "production_batches",
+        sql: "SELECT * FROM production_batches ORDER BY created_at, id;",
+    },
+    SnapshotSource {
+        payload_key: "batchPurchaseOrders",
+        table: "batch_purchase_orders",
+        sql: "SELECT * FROM batch_purchase_orders ORDER BY created_at, id;",
     },
     // Direktori operator hanya-baca untuk nama PIC dan pilihan pindah PIC saat
     // offline. SENGAJA hanya empat kolom: hash password, email, nomor HP, dan
@@ -1462,6 +1473,9 @@ impl TursoClient {
                 ('design.manage', 'Do design work', 'Design', 'Upload mockups, print dummies, and record dummies as sent.', 1, 65),
                 ('mou.manage', 'Manage MoUs', 'Samples', 'Draft MoUs for approved samples, send them, and record the client''s answer.', 1, 60),
                 ('legal.manage', 'Record legal documents', 'Legal', 'Record BPOM, halal, and trademark (HKI) filings and certificates.', 1, 67),
+                ('production.view', 'View production', 'Production', 'See work orders, materials, purchase orders, and production schedules.', 1, 68),
+                ('ppic.manage', 'Plan production materials', 'Production', 'Create work orders, record purchase orders, and confirm materials are ready.', 1, 69),
+                ('production.manage', 'Schedule production', 'Production', 'Set and change the production schedule of each work order.', 1, 69),
                 ('design.override_dummy_limit', 'Override the dummy rejection limit', 'Design', 'Print a dummy again after the client has rejected it as many times as the limit allows.', 1, 66),
                 ('password_reset.view', 'View password reset history', 'Operators', 'Review who requested a password recovery, with their verification photo.', 1, 62),
                 ('password_reset.delete', 'Delete password reset history', 'Operators', 'Delete password recovery records and their photos.', 1, 64),
@@ -1481,6 +1495,7 @@ impl TursoClient {
                 ('notifications_rnd.view', 'RnD notifications', 'Notifications', 'See sample requests waiting for RnD review in the notification bell.', 1, 114),
                 ('notifications_finance.view', 'Finance notifications', 'Notifications', 'See sample fees and revision fees waiting for Finance in the notification bell.', 1, 116),
                 ('notifications_design.view', 'Design notifications', 'Notifications', 'See new design briefs and dummy revisions in the notification bell.', 1, 118),
+                ('notifications_production.view', 'Production notifications', 'Notifications', 'See new work orders and late purchase orders in the notification bell.', 1, 119),
                 ('sync.view', 'View sync status', 'Sync', 'View the sync indicator and queue.', 1, 120),
                 ('sync.retry', 'Retry sync and resolve conflicts', 'Sync', 'Trigger a manual sync and resolve conflicts.', 1, 130),
                 ('diagnostics.view', 'View system diagnostics', 'Diagnostics', 'View runtime information and database health.', 1, 140);"#,
@@ -1591,6 +1606,16 @@ impl TursoClient {
                 "INSERT OR IGNORE INTO setting_gex_system (key, value) VALUES ('invoice_permissions_seeded', '1');",
                 vec![],
             ),
+            // Izin produksi (v3.1, PRD F-23/F-24), sekali saja. WAJIB identik
+            // dengan `PRODUCTION_PERMISSION_SEED_SQL` di `db-schema.ts`.
+            Statement::new(
+                "INSERT OR IGNORE INTO role_permission (role_id, permission_key, is_allowed, updated_at, updated_by) SELECT r.id, p.permission_key, 1, datetime('now'), 'system' FROM app_role r JOIN app_permission p ON (r.role_key IN ('ppic', 'production_spv', 'qc', 'logistics') AND p.permission_key IN ('production.view', 'notifications_production.view')) OR (r.role_key IN ('cs', 'crm', 'finance') AND p.permission_key = 'production.view') OR (r.role_key = 'ppic' AND p.permission_key = 'ppic.manage') OR (r.role_key = 'production_spv' AND p.permission_key = 'production.manage') WHERE r.role_key IN ('ppic', 'production_spv', 'qc', 'logistics', 'cs', 'crm', 'finance') AND NOT EXISTS (SELECT 1 FROM setting_gex_system WHERE key = 'production_permissions_seeded');",
+                vec![],
+            ),
+            Statement::new(
+                "INSERT OR IGNORE INTO setting_gex_system (key, value) VALUES ('production_permissions_seeded', '1');",
+                vec![],
+            ),
             // Izin dokumen legal (v2.6, PRD F-21), sekali saja. WAJIB identik
             // dengan `LEGAL_PERMISSION_SEED_SQL` di `db-schema.ts`.
             Statement::new(
@@ -1651,7 +1676,8 @@ impl TursoClient {
                 (14, 'approval-tokens', datetime('now')),
                 (15, 'legal-documents', datetime('now')),
                 (16, 'imported-records', datetime('now')),
-                (17, 'data-export', datetime('now'));"#,
+                (17, 'data-export', datetime('now')),
+                (18, 'production-batches', datetime('now'));"#,
                 vec![],
             ),
             // ============ DOMAIN MAKLONOS ============
@@ -1949,6 +1975,43 @@ impl TursoClient {
                 );"#,
                 vec![],
             ),
+            // Work order produksi dan PO bahannya (v3.1, PRD F-23/F-24). WAJIB
+            // identik dengan `db-schema.ts`.
+            Statement::new(
+                r#"CREATE TABLE IF NOT EXISTS production_batches (
+                    id TEXT PRIMARY KEY,
+                    batch_code TEXT NOT NULL,
+                    mou_id TEXT NOT NULL,
+                    sample_request_id TEXT NOT NULL,
+                    client_id TEXT NOT NULL,
+                    material_status TEXT NOT NULL DEFAULT 'UNCHECKED',
+                    sched_weighing_on TEXT NOT NULL DEFAULT '',
+                    sched_mixing_on TEXT NOT NULL DEFAULT '',
+                    sched_filling_on TEXT NOT NULL DEFAULT '',
+                    sched_packing_on TEXT NOT NULL DEFAULT '',
+                    needs_reschedule INTEGER NOT NULL DEFAULT 0,
+                    schedule_updated_at TEXT NOT NULL DEFAULT '',
+                    created_by INTEGER,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );"#,
+                vec![],
+            ),
+            Statement::new(
+                r#"CREATE TABLE IF NOT EXISTS batch_purchase_orders (
+                    id TEXT PRIMARY KEY,
+                    batch_id TEXT NOT NULL,
+                    po_number TEXT NOT NULL,
+                    supplier_option_id TEXT NOT NULL,
+                    eta_on TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'OPEN',
+                    late_reason TEXT NOT NULL DEFAULT '',
+                    created_by INTEGER,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );"#,
+                vec![],
+            ),
             // Dokumen legal (v2.6, PRD F-21). WAJIB identik dengan `db-schema.ts`.
             Statement::new(
                 r#"CREATE TABLE IF NOT EXISTS legal_documents (
@@ -2155,6 +2218,14 @@ impl TursoClient {
             ),
             Statement::new(
                 "CREATE INDEX IF NOT EXISTS idx_imported_records_client ON imported_records(client_id);",
+                vec![],
+            ),
+            Statement::new(
+                "CREATE INDEX IF NOT EXISTS idx_production_batches_mou ON production_batches(mou_id);",
+                vec![],
+            ),
+            Statement::new(
+                "CREATE INDEX IF NOT EXISTS idx_batch_purchase_orders_batch ON batch_purchase_orders(batch_id);",
                 vec![],
             ),
             Statement::new(
@@ -2405,6 +2476,11 @@ impl TursoClient {
             vec![],
         )
         .await?;
+        self.query_one(
+            "INSERT OR IGNORE INTO schema_migration (version, name, applied_at) VALUES (-2026, 'production-batches-v1', datetime('now'));",
+            vec![],
+        )
+        .await?;
 
         Ok(())
     }
@@ -2573,7 +2649,7 @@ impl TursoClient {
             .query_one(
                 // Sentinel WAJIB dinaikkan setiap kali ensure_schema menambah
                 // tabel atau kolom — nilainya di sini dan pada INSERT harus sama.
-                "SELECT COUNT(*) AS total FROM schema_migration WHERE version = -2025;",
+                "SELECT COUNT(*) AS total FROM schema_migration WHERE version = -2026;",
                 vec![],
             )
             .await
@@ -3425,6 +3501,108 @@ impl TursoClient {
             None if !base.is_empty() => Some(legal::LEGAL_CHANGED_ELSEWHERE.to_owned()),
             _ => None,
         })
+    }
+
+    /// Pemeriksaan cloud untuk work order dan PO (v3.1). `Some(pesan)` =
+    /// konflik: syarat dihitung ulang dengan MoU, DP, PO, dan jadwal di cloud,
+    /// dan langkah yang dicatat dari keadaan basi ditolak.
+    async fn production_guard(
+        &self,
+        domain: &str,
+        operation: &str,
+        entity_key: &str,
+        payload: &Value,
+    ) -> Result<Option<String>, CommandError> {
+        let payload_text = |key: &str| payload.get(key).and_then(Value::as_str).unwrap_or_default().to_owned();
+        let changed = || Some(production::BATCH_CHANGED_ELSEWHERE.to_owned());
+        if domain == "batch" && operation == "create" {
+            let mou_id = payload_text("mou_id");
+            let mou_row = self
+                .query_one(format!("{} WHERE m.id = ?;", mou::MOU_LIST_SQL), vec![json!(mou_id)])
+                .await?
+                .to_objects()
+                .into_iter()
+                .next();
+            let Some(mou_row) = mou_row else {
+                return Ok(Some("This MoU does not exist in the database.".into()));
+            };
+            let active = self
+                .query_one(production::BATCH_ACTIVE_SQL, vec![json!(mou_id), json!(entity_key)])
+                .await?
+                .to_objects()
+                .into_iter()
+                .next()
+                .and_then(|row| row.get("total").and_then(lenient_i64))
+                .unwrap_or(0);
+            return Ok(production::batch_request_error(
+                mou_row.get("status").and_then(Value::as_str).unwrap_or_default(),
+                mou_row.get("dp_cleared").and_then(lenient_i64).unwrap_or(0) != 0,
+                active,
+            )
+            .map(str::to_owned));
+        }
+        let batch_id = if domain == "batch" { entity_key.to_owned() } else { payload_text("batch_id") };
+        let batch = self
+            .query_one(format!("{} WHERE b.id = ?;", production::BATCH_LIST_SQL), vec![json!(batch_id)])
+            .await?
+            .to_objects()
+            .into_iter()
+            .next();
+        let Some(batch) = batch else {
+            return Ok(Some("This work order does not exist in the database.".into()));
+        };
+        let batch_text = |key: &str| batch.get(key).and_then(Value::as_str).unwrap_or_default().to_owned();
+        if domain == "batch" && operation == "ready" {
+            return Ok(production::materials_ready_error(
+                &batch_text("material_status"),
+                batch.get("open_orders").and_then(lenient_i64).unwrap_or(0),
+            )
+            .map(str::to_owned));
+        }
+        if domain == "batch" {
+            if batch_text("schedule_updated_at") != payload_text("base_schedule_updated_at") {
+                return Ok(changed());
+            }
+            let has_schedule = !batch_text("sched_packing_on").is_empty();
+            return Ok(production::validate_batch_schedule(payload.get("schedule").unwrap_or(&Value::Null), has_schedule).err());
+        }
+        let po = self
+            .query_one("SELECT batch_id, status, eta_on FROM batch_purchase_orders WHERE id = ?;", vec![json!(entity_key)])
+            .await?
+            .to_objects()
+            .into_iter()
+            .next();
+        let po_text = |key: &str| {
+            po.as_ref()
+                .and_then(|row| row.get(key).and_then(Value::as_str))
+                .unwrap_or_default()
+                .to_owned()
+        };
+        if po.is_some() && po_text("batch_id") != batch_id {
+            return Ok(Some("This purchase order belongs to another work order.".into()));
+        }
+        let cloud_status = po_text("status");
+        if cloud_status != payload_text("base_status") {
+            return Ok(changed());
+        }
+        let action = payload_text("action");
+        match production::apply_po_action(&cloud_status, &action) {
+            Err(message) => return Ok(Some(message.to_owned())),
+            Ok(status) if status != payload_text("status") => {
+                return Ok(Some("The purchase order step does not match the company rules in the database.".into()))
+            }
+            Ok(_) => {}
+        }
+        if action == "PO_LATE" {
+            let cloud_eta = po_text("eta_on");
+            if cloud_eta != payload_text("base_eta_on") {
+                return Ok(changed());
+            }
+            return Ok(production::validate_po_delay(payload.get("delay").unwrap_or(&Value::Null), &cloud_eta)
+                .err()
+                .map(str::to_owned));
+        }
+        Ok(None)
     }
 
     /// Isi satu foto dari cloud (base64), atau `None` bila tidak ada.
@@ -4468,6 +4646,24 @@ impl TursoClient {
                 }
             }
 
+            // Work order dan PO (v3.1): syarat MoU/DP, PO terbuka, dan jadwal
+            // dihitung ulang dengan data cloud; keadaan basi = konflik.
+            if matches!(domain, "batch" | "purchase-order") {
+                if let Some(message) = self
+                    .production_guard(domain, operation, entity_key, &parsed_payload)
+                    .await?
+                {
+                    push_results.push(json!({
+                        "eventId": event_id,
+                        "status": "conflict",
+                        "reason": message.clone(),
+                        "message": message,
+                        "serverRevision": 0
+                    }));
+                    continue;
+                }
+            }
+
             // Foto hanya untuk tiket yang ada di cloud. Event `sample/create`
             // tiba lebih dulu di antrean yang sama, jadi urutannya terjaga.
             if domain == "media" {
@@ -5233,6 +5429,8 @@ fn canonical_sync_route(domain: &str, operation: &str) -> Option<(&'static str, 
         "mou" | "production_mou" => "mou",
         "legal" | "legal_documents" => "legal",
         "imported-record" | "imported_records" => "imported-record",
+        "batch" | "production_batches" => "batch",
+        "purchase-order" | "batch_purchase_orders" => "purchase-order",
         _ => return None,
     };
     let canonical_operation = match (canonical_domain, operation) {
@@ -5263,6 +5461,10 @@ fn canonical_sync_route(domain: &str, operation: &str) -> Option<(&'static str, 
         ("mou", "transition") => "transition",
         ("legal", "record") => "record",
         ("imported-record", "record") => "record",
+        ("batch", "create") => "create",
+        ("batch", "ready") => "ready",
+        ("batch", "schedule") => "schedule",
+        ("purchase-order", "record") => "record",
         ("media", "upload") => "upload",
         ("audit", "record") => "record",
         _ => return None,
@@ -6107,6 +6309,244 @@ async fn apply_event_to_turso(
                     ],
                 )
                 .await?;
+        }
+        ("batch", "create") => {
+            // Kelayakan (MoU disetujui, DP lunas, satu per MoU) diperiksa
+            // `production_guard`.
+            let created_at = text("created_at");
+            let code = text("batch_code");
+            let sample_id = text("sample_request_id");
+            let log_id = payload
+                .get("log")
+                .and_then(|log| log.get("id"))
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned();
+            let valid = !entity_key.is_empty()
+                && !code.is_empty()
+                && !text("mou_id").is_empty()
+                && !sample_id.is_empty()
+                && !text("client_id").is_empty()
+                && !log_id.is_empty()
+                && clients::parse_stored_timestamp(&created_at).is_some();
+            if !valid {
+                return Err(CommandError::new("TURSO_SYNC_PAYLOAD_INVALID", "The work order is incomplete or invalid."));
+            }
+            let created_by = payload.get("created_by").filter(|value| value.is_i64()).cloned().unwrap_or(Value::Null);
+            turso
+                .query_one(
+                    production::BATCH_INSERT_SQL,
+                    vec![
+                        json!(entity_key),
+                        json!(code),
+                        json!(text("mou_id")),
+                        json!(sample_id),
+                        json!(text("client_id")),
+                        created_by.clone(),
+                        json!(created_at),
+                    ],
+                )
+                .await?;
+            turso
+                .query_one(
+                    samples::SAMPLE_STATUS_LOG_INSERT_SQL,
+                    vec![
+                        json!(log_id),
+                        json!(sample_id),
+                        json!(""),
+                        json!("UNCHECKED"),
+                        json!(production::BATCH_CREATE_ACTION),
+                        json!(format!("Work order {code}")),
+                        json!(""),
+                        created_by,
+                        json!(created_at),
+                    ],
+                )
+                .await?;
+            // Work order baru: grup Production menyiapkan bahan dan jadwal.
+            turso
+                .query_one(notifications::NOTIFY_BATCH_CREATED_SQL, vec![json!(entity_key)])
+                .await?;
+        }
+        ("batch", "ready") | ("batch", "schedule") => {
+            let updated_at = text("updated_at");
+            let sample_id = text("sample_request_id");
+            let log_id = payload
+                .get("log")
+                .and_then(|log| log.get("id"))
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned();
+            let valid = !entity_key.is_empty()
+                && !sample_id.is_empty()
+                && !log_id.is_empty()
+                && clients::parse_stored_timestamp(&updated_at).is_some();
+            if !valid {
+                return Err(CommandError::new("TURSO_SYNC_PAYLOAD_INVALID", "The work order change is incomplete or invalid."));
+            }
+            let recorded_by = payload.get("recorded_by").filter(|value| value.is_i64()).cloned().unwrap_or(Value::Null);
+            if operation == "ready" {
+                turso
+                    .query_one(production::BATCH_READY_SQL, vec![json!(entity_key), json!(updated_at)])
+                    .await?;
+                turso
+                    .query_one(
+                        samples::SAMPLE_STATUS_LOG_INSERT_SQL,
+                        vec![
+                            json!(log_id),
+                            json!(sample_id),
+                            json!(text("base_status")),
+                            json!("READY"),
+                            json!(production::MATERIALS_READY_ACTION),
+                            json!("Materials ready"),
+                            json!(""),
+                            recorded_by,
+                            json!(updated_at),
+                        ],
+                    )
+                    .await?;
+                return Ok(());
+            }
+            // Alasan wajib sudah dicek `production_guard` terhadap jadwal cloud;
+            // di sini cukup bentuk tanggalnya.
+            let schedule = production::validate_batch_schedule(payload.get("schedule").unwrap_or(&Value::Null), false)
+                .map_err(|message| CommandError::new("TURSO_SYNC_PAYLOAD_INVALID", message))?;
+            turso
+                .query_one(
+                    production::BATCH_SCHEDULE_SQL,
+                    vec![
+                        json!(entity_key),
+                        json!(schedule.weighing_on),
+                        json!(schedule.mixing_on),
+                        json!(schedule.filling_on),
+                        json!(schedule.packing_on),
+                        json!(updated_at),
+                        json!(text("base_schedule_updated_at")),
+                    ],
+                )
+                .await?;
+            turso
+                .query_one(
+                    samples::SAMPLE_STATUS_LOG_INSERT_SQL,
+                    vec![
+                        json!(log_id),
+                        json!(sample_id),
+                        json!(""),
+                        json!("SCHEDULED"),
+                        json!(production::BATCH_SCHEDULE_ACTION),
+                        json!(production::schedule_log_notes(&schedule)),
+                        json!(""),
+                        recorded_by,
+                        json!(updated_at),
+                    ],
+                )
+                .await?;
+            // Jadwal disimpan: CS menyampaikan estimasi selesai ke klien.
+            turso
+                .query_one(notifications::NOTIFY_BATCH_SCHEDULED_SQL, vec![json!(log_id), json!(entity_key)])
+                .await?;
+        }
+        ("purchase-order", "record") => {
+            // Kecocokan status/ETA dengan cloud diperiksa `production_guard`;
+            // isiannya divalidasi ulang dengan aturan yang sama.
+            let action = text("action");
+            let status = text("status");
+            let base_status = text("base_status");
+            let updated_at = text("updated_at");
+            let batch_id = text("batch_id");
+            let sample_id = text("sample_request_id");
+            let log = payload.get("log").filter(|value| value.is_object());
+            let notes = log
+                .and_then(|log| log.get("notes"))
+                .and_then(Value::as_str)
+                .and_then(samples::normalize_sample_notes);
+            let log_id = log
+                .and_then(|log| log.get("id"))
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned();
+            let valid = !entity_key.is_empty()
+                && !batch_id.is_empty()
+                && !sample_id.is_empty()
+                && !log_id.is_empty()
+                && production::PO_ACTIONS.contains(&action.as_str())
+                && production::PO_STATUSES.contains(&status.as_str())
+                && clients::parse_stored_timestamp(&updated_at).is_some();
+            let (Some(notes), true) = (notes, valid) else {
+                return Err(CommandError::new("TURSO_SYNC_PAYLOAD_INVALID", "The purchase order step is incomplete or invalid."));
+            };
+            let recorded_by = payload.get("recorded_by").filter(|value| value.is_i64()).cloned().unwrap_or(Value::Null);
+            let invalid = |message: &str| CommandError::new("TURSO_SYNC_PAYLOAD_INVALID", message);
+            match action.as_str() {
+                "PO_ADD" => {
+                    let order = production::validate_purchase_order(payload.get("order").unwrap_or(&Value::Null))
+                        .map_err(invalid)?;
+                    turso
+                        .query_one(
+                            production::PO_INSERT_SQL,
+                            vec![
+                                json!(entity_key),
+                                json!(batch_id),
+                                json!(order.po_number),
+                                json!(order.supplier_option_id),
+                                json!(order.eta_on),
+                                recorded_by.clone(),
+                                json!(updated_at),
+                            ],
+                        )
+                        .await?;
+                    turso
+                        .query_one(production::BATCH_WAITING_PO_SQL, vec![json!(batch_id), json!(updated_at)])
+                        .await?;
+                }
+                "PO_LATE" => {
+                    let base_eta = text("base_eta_on");
+                    let delay = production::validate_po_delay(payload.get("delay").unwrap_or(&Value::Null), &base_eta)
+                        .map_err(invalid)?;
+                    turso
+                        .query_one(
+                            production::PO_DELAY_SQL,
+                            vec![
+                                json!(entity_key),
+                                json!(delay.eta_on),
+                                json!(delay.reason),
+                                json!(updated_at),
+                                json!(base_eta),
+                            ],
+                        )
+                        .await?;
+                    turso
+                        .query_one(production::BATCH_NEEDS_RESCHEDULE_SQL, vec![json!(batch_id), json!(updated_at)])
+                        .await?;
+                }
+                _ => {
+                    turso
+                        .query_one(production::PO_STATUS_SQL, vec![json!(entity_key), json!(status), json!(updated_at)])
+                        .await?;
+                }
+            }
+            turso
+                .query_one(
+                    samples::SAMPLE_STATUS_LOG_INSERT_SQL,
+                    vec![
+                        json!(log_id),
+                        json!(sample_id),
+                        json!(base_status),
+                        json!(status),
+                        json!(action),
+                        json!(notes),
+                        json!(""),
+                        recorded_by,
+                        json!(updated_at),
+                    ],
+                )
+                .await?;
+            if action == "PO_LATE" {
+                // PO terlambat (E-30): CS dan grup Production diberi tahu.
+                turso
+                    .query_one(notifications::NOTIFY_PO_LATE_SQL, vec![json!(log_id), json!(entity_key)])
+                    .await?;
+            }
         }
         ("legal", "record") => {
             // Gerbang dan kecocokan diperiksa `legal_guard`; isiannya
@@ -9419,6 +9859,139 @@ mod tests {
             let count = |sql: &str| -> i64 { connection.query_row(sql, [], |row| row.get(0)).expect("hitung") };
             assert_eq!(count("SELECT COUNT(*) FROM imported_records WHERE amount_idr = 32500;"), 1);
             assert_eq!(count("SELECT COUNT(*) FROM incoming_funds WHERE status = 'ACTIVE';"), 1);
+        });
+    }
+
+    /// Work order dan PO (v3.1): satu work order per MoU, bahan siap hanya
+    /// tanpa PO terbuka, dan langkah dari keadaan basi menjadi konflik.
+    #[test]
+    fn push_work_order_dijaga_cloud() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("runtime uji");
+        runtime.block_on(async {
+            let dir = tempfile::tempdir().expect("direktori sementara");
+            let hub = dir.path().join("app-hub.db");
+            let client = TursoClient::local_file(
+                Url::parse(LOCAL_FILE_ORIGIN).expect("origin lokal"),
+                &hub,
+                Client::new(),
+            );
+            client.ensure_schema().await.expect("provisioning lokal");
+            rusqlite::Connection::open(&hub)
+                .expect("buka hub")
+                .execute_batch(
+                    "INSERT INTO sample_requests (id, client_id, product_category_option_id, sample_qty, brand_name, packaging, deadline_at, ship_to_address, status, status_changed_at, created_at, updated_at) VALUES ('s1', 'c1', 'cat', 1, 'Aura', 'Box', '2026-10-31', 'Jl. A', 'CLIENT_ACC', '2026-10-09 01:00:00', '2026-10-09 01:00:00', '2026-10-09 01:00:00');
+                     INSERT INTO production_mou (id, mou_number, sample_request_id, client_id, total_units, unit_price_idr, total_production_cost_idr, production_lead_time_days, regulatory_path, dp_bp, dp_amount_required_idr, status, status_changed_at, created_at, updated_at) VALUES ('m1', 'MOU-1', 's1', 'c1', 10, 1000, 10000, 30, 'WHITE_LABEL', 5000, 5000, 'ACCEPTED', '2026-10-09 01:00:00', '2026-10-09 01:00:00', '2026-10-09 01:00:00');
+                     INSERT INTO invoices (id, invoice_number, client_id, sample_request_id, ref_type, subtotal_idr, total_idr, issued_on, due_on, created_at, updated_at) VALUES ('i1', 'INV-1', 'c1', 's1', 'DP_PRODUCTION_LEGAL', 5000, 5000, '2026-10-09', '2026-10-16', '2026-10-09 01:00:00', '2026-10-09 01:00:00');
+                     INSERT INTO incoming_funds (id, received_on, amount_idr, created_at, updated_at) VALUES ('f1', '2026-10-09', 5000, '2026-10-09 01:00:00', '2026-10-09 01:00:00');
+                     INSERT INTO fund_allocations (id, fund_id, invoice_id, amount_idr, recorded_at) VALUES ('a1', 'f1', 'i1', 5000, '2026-10-09 01:00:00');
+                     INSERT INTO master_option (id, kind, code, label, updated_at) VALUES ('sup', 'SUPPLIER', 'KIM', 'PT Kimia', '2026-10-09 01:00:00');",
+                )
+                .expect("seed");
+            let mut counter = 0u32;
+            let mut event = |domain: &str, operation: &str, key: &str, mut payload: Value| {
+                counter += 1;
+                let stamp = format!("2026-10-09 02:{counter:02}:00");
+                payload["id"] = json!(key);
+                payload["sample_request_id"] = json!("s1");
+                payload["created_at"] = json!(stamp);
+                payload["updated_at"] = json!(stamp);
+                payload["created_by"] = json!(5);
+                payload["recorded_by"] = json!(5);
+                if payload.get("log").is_none() {
+                    payload["log"] = json!({ "id": format!("log-{counter}"), "notes": "PO step" });
+                }
+                json!({
+                    "eventId": format!("evt-{counter:064x}"),
+                    "clientId": format!("desktop-{:064x}", 1),
+                    "domain": domain,
+                    "operation": operation,
+                    "entityKey": key,
+                    "payload": payload,
+                })
+            };
+            let create = |code: &str| json!({ "batch_code": code, "mou_id": "m1", "client_id": "c1" });
+            let po = |action: &str, base: &str, status: &str| {
+                json!({
+                    "batch_id": "bt1",
+                    "action": action,
+                    "base_status": base,
+                    "status": status,
+                    "base_eta_on": "2026-10-20",
+                    "order": { "po_number": "PO-778", "supplier_option_id": "sup", "eta_on": "2026-10-20" },
+                    "delay": { "eta_on": "2026-10-27", "reason": "Stock out" },
+                })
+            };
+            let schedule = json!({
+                "base_schedule_updated_at": "",
+                "schedule": {
+                    "weighing_on": "2026-11-02",
+                    "mixing_on": "2026-11-03",
+                    "filling_on": "2026-11-04",
+                    "packing_on": "2026-11-05",
+                    "reason": "",
+                },
+            });
+            let events = vec![
+                event("batch", "create", "bt1", create("BAT-1")),
+                // Perangkat kedua membuat work order untuk MoU yang sama.
+                event("batch", "create", "bt2", create("BAT-2")),
+                event("purchase-order", "record", "p1", po("PO_ADD", "", "OPEN")),
+                event("batch", "ready", "bt1", json!({ "base_status": "WAITING_PO" })),
+                event("batch", "schedule", "bt1", schedule.clone()),
+                event("purchase-order", "record", "p1", po("PO_LATE", "OPEN", "OPEN")),
+                // Laporan terlambat dari perangkat yang masih melihat ETA lama.
+                event("purchase-order", "record", "p1", po("PO_LATE", "OPEN", "OPEN")),
+                // Jadwal dari perangkat yang belum melihat jadwal pertama.
+                event("batch", "schedule", "bt1", schedule),
+                event("purchase-order", "record", "p1", po("PO_ARRIVED", "OPEN", "ARRIVED")),
+                event("batch", "ready", "bt1", json!({ "base_status": "WAITING_PO" })),
+            ];
+            let results = client.push_events(&events).await.expect("push");
+            let statuses: Vec<&str> = results
+                .iter()
+                .map(|result| result["status"].as_str().unwrap_or_default())
+                .collect();
+            assert_eq!(
+                statuses,
+                vec![
+                    "applied", "conflict", "applied", "conflict", "applied", "applied", "conflict", "conflict",
+                    "applied", "applied"
+                ]
+            );
+            assert_eq!(results[1]["message"], json!("This MoU already has a work order."));
+            assert_eq!(
+                results[3]["message"],
+                json!("Mark every open purchase order as arrived or cancelled first.")
+            );
+            assert_eq!(results[6]["message"], json!(production::BATCH_CHANGED_ELSEWHERE));
+            assert_eq!(results[7]["message"], json!(production::BATCH_CHANGED_ELSEWHERE));
+            let connection = rusqlite::Connection::open(&hub).expect("buka hub");
+            let batch: (String, i64, String) = connection
+                .query_row(
+                    "SELECT material_status, needs_reschedule, sched_packing_on FROM production_batches WHERE id = 'bt1';",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .expect("work order");
+            assert_eq!(batch, ("READY".to_owned(), 1, "2026-11-05".to_owned()));
+            let eta: String = connection
+                .query_row("SELECT eta_on FROM batch_purchase_orders WHERE id = 'p1';", [], |row| row.get(0))
+                .expect("PO");
+            assert_eq!(eta, "2026-10-27");
+            let mut statement = connection
+                .prepare("SELECT event_type || '/' || target_division FROM notification_outbox ORDER BY 1;")
+                .expect("notifikasi");
+            let notified: Vec<String> = statement
+                .query_map([], |row| row.get(0))
+                .expect("baris")
+                .collect::<Result<_, _>>()
+                .expect("teks");
+            assert_eq!(
+                notified,
+                vec!["BATCH_CREATED/PRODUCTION", "BATCH_SCHEDULED/CS", "PO_LATE/CS", "PO_LATE/PRODUCTION"]
+            );
         });
     }
 

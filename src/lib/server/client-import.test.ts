@@ -96,6 +96,7 @@ beforeAll(async () => {
       invoice_due_days: 7,
       invoice_payment_instructions: "",
       telegram_chat_id_design: "",
+      telegram_chat_id_production: "",
       default_dummy_fee_idr: 0,
       max_dummy_rejections: 0,
       dp_percentage_bp: 5000,

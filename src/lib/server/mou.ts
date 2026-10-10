@@ -19,7 +19,6 @@ import {
   MOU_INSERT_SQL,
   MOU_LIST_SQL,
   MOU_NOT_EDITABLE,
-  MOU_NUMBER_PREFIX,
   MOU_TRANSITION_SQL,
   MOU_UPDATE_SQL,
   mouRequestError,
@@ -154,7 +153,8 @@ export async function createMou(
     );
     if ("error" in checked) invalid(checked.error);
     const { epoch, stamp } = await clock(transaction);
-    const tag = (await getClientCodeSettings(transaction)).client_code_web_tag;
+    const codes = await getClientCodeSettings(transaction);
+    const tag = codes.client_code_web_tag;
     const dateStamp = companyDateStamp(
       epoch,
       await companyTimezone(transaction),
@@ -171,7 +171,7 @@ export async function createMou(
     const number =
       sequence == null
         ? null
-        : formatClientCode(MOU_NUMBER_PREFIX, dateStamp, tag, sequence);
+        : formatClientCode(codes.mou_number_prefix, dateStamp, tag, sequence);
     if (!number) {
       throw new ApiRequestError(
         "The Web has used up its MoU numbers for today.",

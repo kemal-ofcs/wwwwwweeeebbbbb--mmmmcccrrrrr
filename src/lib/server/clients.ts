@@ -5,6 +5,7 @@ import { type AuditActor, writeAudit } from "@/lib/server/audit";
 import { loadBusinessSettings } from "@/lib/server/business-settings";
 import { ApiRequestError } from "@/lib/server/http/api-response";
 import {
+  BATCH_PREFIX_SETTING,
   CLIENT_CODE_PREFIX_SETTING,
   CLIENT_CODE_WEB_TAG_SETTING,
   CLIENT_NAME_MAX,
@@ -16,10 +17,12 @@ import {
   DEFAULT_CLIENT_CODE_WEB_TAG,
   daysSinceResponse,
   formatClientCode,
+  INVOICE_PREFIX_SETTING,
   isMasterOptionKind,
   type LeadSegment,
   leadSegment,
   type MasterOptionKind,
+  MOU_PREFIX_SETTING,
   nextClientSequence,
   normalizeCodePrefix,
   normalizeDeviceTag,
@@ -28,7 +31,10 @@ import {
   OPTION_LABEL_MAX,
   sharedPhoneMessage,
 } from "@/lib/validations/client";
+import { INVOICE_NUMBER_PREFIX } from "@/lib/validations/finance";
+import { MOU_NUMBER_PREFIX } from "@/lib/validations/mou";
 import { NOTIFY_LEAD_NEW_SQL } from "@/lib/validations/notification";
+import { DEFAULT_BATCH_CODE_PREFIX } from "@/lib/validations/production";
 import { FREE_REVISION_LIMIT_MAX } from "@/lib/validations/sample";
 
 /**
@@ -84,6 +90,10 @@ export interface MasterOptionRecord {
 export interface ClientCodeSettings {
   client_code_prefix: string;
   client_code_web_tag: string;
+  /** Awalan nomor tagihan, MoU, dan work order (D-43). */
+  invoice_number_prefix: string;
+  mou_number_prefix: string;
+  batch_code_prefix: string;
   /** Web tidak punya tag perangkat; kolom ini selalu `null` di jalur Web. */
   device_tag: string | null;
 }
@@ -293,6 +303,16 @@ export async function getClientCodeSettings(
       normalizeDeviceTag(
         await readSetting(executor, CLIENT_CODE_WEB_TAG_SETTING),
       ) ?? DEFAULT_CLIENT_CODE_WEB_TAG,
+    invoice_number_prefix:
+      normalizeCodePrefix(
+        await readSetting(executor, INVOICE_PREFIX_SETTING),
+      ) ?? INVOICE_NUMBER_PREFIX,
+    mou_number_prefix:
+      normalizeCodePrefix(await readSetting(executor, MOU_PREFIX_SETTING)) ??
+      MOU_NUMBER_PREFIX,
+    batch_code_prefix:
+      normalizeCodePrefix(await readSetting(executor, BATCH_PREFIX_SETTING)) ??
+      DEFAULT_BATCH_CODE_PREFIX,
     device_tag: null,
   };
 }
@@ -623,6 +643,15 @@ export async function saveClientCodeSettings(
   const webTag =
     normalizeDeviceTag(text(settings, "client_code_web_tag")) ??
     invalid("The Web tag must be exactly 2 letters or numbers.");
+  const invoicePrefix =
+    normalizeCodePrefix(text(settings, "invoice_number_prefix")) ??
+    invalid("The invoice number prefix must be 2-5 letters.");
+  const mouPrefix =
+    normalizeCodePrefix(text(settings, "mou_number_prefix")) ??
+    invalid("The MoU number prefix must be 2-5 letters.");
+  const batchPrefix =
+    normalizeCodePrefix(text(settings, "batch_code_prefix")) ??
+    invalid("The work order prefix must be 2-5 letters.");
 
   const transaction = await client.transaction("write");
   try {
@@ -639,6 +668,9 @@ export async function saveClientCodeSettings(
     for (const [key, value] of [
       [CLIENT_CODE_PREFIX_SETTING, prefix],
       [CLIENT_CODE_WEB_TAG_SETTING, webTag],
+      [INVOICE_PREFIX_SETTING, invoicePrefix],
+      [MOU_PREFIX_SETTING, mouPrefix],
+      [BATCH_PREFIX_SETTING, batchPrefix],
     ] as const) {
       await transaction.execute({
         sql: "INSERT INTO setting_gex_system (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value;",
@@ -652,6 +684,9 @@ export async function saveClientCodeSettings(
   return {
     client_code_prefix: prefix,
     client_code_web_tag: webTag,
+    invoice_number_prefix: invoicePrefix,
+    mou_number_prefix: mouPrefix,
+    batch_code_prefix: batchPrefix,
     device_tag: null,
   };
 }

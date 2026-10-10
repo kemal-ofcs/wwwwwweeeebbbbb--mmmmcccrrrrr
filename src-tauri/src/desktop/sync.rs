@@ -23,7 +23,7 @@ use super::{
 /// `CURRENT_SCHEMA_VERSION` di `web-desktop/src/lib/db-schema.ts` setiap kali
 /// migrasi baru ditambahkan, karena keduanya membaca tabel `schema_migration`
 /// yang sama di Turso.
-pub const CLIENT_SCHEMA_VERSION: i64 = 17;
+pub const CLIENT_SCHEMA_VERSION: i64 = 18;
 
 /// Hanya `cloud > client` yang berbahaya; `cloud <= client` adalah kondisi normal.
 fn is_client_schema_outdated(cloud_version: i64) -> bool {
@@ -507,6 +507,55 @@ const SNAPSHOT_TABLES: &[SnapshotTable] = &[
         delete_missing: true,
         read_only: false,
     },
+    // Work order produksi (v3.1, PRD F-23/F-24). Cloud otoritatif seperti MoU.
+    SnapshotTable {
+        payload_key: "productionBatches",
+        domain: "batch",
+        table: "production_batches",
+        columns: &[
+            "id",
+            "batch_code",
+            "mou_id",
+            "sample_request_id",
+            "client_id",
+            "material_status",
+            "sched_weighing_on",
+            "sched_mixing_on",
+            "sched_filling_on",
+            "sched_packing_on",
+            "needs_reschedule",
+            "schedule_updated_at",
+            "created_by",
+            "created_at",
+            "updated_at",
+        ],
+        conflict_column: "id",
+        entity_column: "id",
+        delete_missing: true,
+        read_only: false,
+    },
+    // PO bahan per work order (v3.1): satu entitas per PO.
+    SnapshotTable {
+        payload_key: "batchPurchaseOrders",
+        domain: "purchase-order",
+        table: "batch_purchase_orders",
+        columns: &[
+            "id",
+            "batch_id",
+            "po_number",
+            "supplier_option_id",
+            "eta_on",
+            "status",
+            "late_reason",
+            "created_by",
+            "created_at",
+            "updated_at",
+        ],
+        conflict_column: "id",
+        entity_column: "id",
+        delete_missing: true,
+        read_only: false,
+    },
     // Arsip impor Database Formulasi/Desain (v2.7, PRD F-22).
     SnapshotTable {
         payload_key: "importedRecords",
@@ -634,6 +683,12 @@ const CANONICAL_SYNC_ROUTES: &[(&str, &str)] = &[
     ("legal", "record"),
     // Arsip impor sheet (v2.7): hanya-tambah.
     ("imported-record", "record"),
+    // Work order produksi (v3.1): dibuat PPIC, bahan siap, jadwal SPV; PO
+    // bahan dicatat per PO (tambah, tiba, terlambat, batal).
+    ("batch", "create"),
+    ("batch", "ready"),
+    ("batch", "schedule"),
+    ("purchase-order", "record"),
     ("media", "upload"),
     // Log audit hanya-dorong: tidak ada di `SNAPSHOT_TABLES` karena tumbuh
     // tanpa batas dan hanya dibaca dari cloud (layar Audit).

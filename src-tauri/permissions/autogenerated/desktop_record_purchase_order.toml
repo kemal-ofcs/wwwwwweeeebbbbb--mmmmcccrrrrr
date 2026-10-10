@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-desktop-record-purchase-order"
+description = "Enables the desktop_record_purchase_order command without any pre-configured scope."
+commands.allow = ["desktop_record_purchase_order"]
+
+[[permission]]
+identifier = "deny-desktop-record-purchase-order"
+description = "Denies the desktop_record_purchase_order command without any pre-configured scope."
+commands.deny = ["desktop_record_purchase_order"]

@@ -278,6 +278,35 @@ describe("notifikasi divisi", () => {
     );
   });
 
+  test("teks pesan produksi (v3.1)", () => {
+    const batch = {
+      client_name: "Aura Beauty",
+      client_code: "KLN-20261003-WB01",
+      brand_name: "Aura Glow",
+      batch_code: "BAT-20261010-A101",
+      mou_number: "MOU-20261009-A101",
+      total_units: 10000,
+      po_number: "PO-778",
+      supplier: "PT Kimia",
+      eta_on: "2026-10-27",
+      reason: "Stock out",
+      packing_on: "2026-11-05",
+      notes: "",
+    };
+    const at = "2026-10-03 07:05:00";
+    expect(renderNotification("BATCH_CREATED", batch, at, "Asia/Jakarta")).toBe(
+      "New work order BAT-20261010-A101: Aura Glow for Aura Beauty (KLN-20261003-WB01)\nMoU MOU-20261009-A101, 10000 units\nCreated 2026-10-03 14:05 WIB",
+    );
+    expect(renderNotification("PO_LATE", batch, at, "Asia/Jakarta")).toBe(
+      "Purchase order late: Aura Glow for Aura Beauty (KLN-20261003-WB01)\nWork order BAT-20261010-A101, PO PO-778 from PT Kimia\nNow arriving 2026-10-27: Stock out\nReported 2026-10-03 14:05 WIB",
+    );
+    expect(
+      renderNotification("BATCH_SCHEDULED", batch, at, "Asia/Jakarta"),
+    ).toBe(
+      "Production scheduled, packing on 2026-11-05: Aura Glow for Aura Beauty (KLN-20261003-WB01)\nWork order BAT-20261010-A101: -\nSaved 2026-10-03 14:05 WIB",
+    );
+  });
+
   test("setiap SQL dan pesan identik dengan Rust", () => {
     const path = ["desktop", "mobile"]
       .map((dir) =>

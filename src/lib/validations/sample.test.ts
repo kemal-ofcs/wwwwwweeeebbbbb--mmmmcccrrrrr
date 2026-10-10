@@ -380,6 +380,7 @@ describe("readBusinessSettings", () => {
     invoice_due_days: 7,
     invoice_payment_instructions: "",
     telegram_chat_id_design: "",
+    telegram_chat_id_production: "",
     default_dummy_fee_idr: 0,
     max_dummy_rejections: 0,
     dp_percentage_bp: 5000,
@@ -406,6 +407,7 @@ describe("readBusinessSettings", () => {
         invoice_due_days: "14",
         invoice_payment_instructions: " BCA 123 a.n. Company ",
         telegram_chat_id_design: "@maklon_design",
+        telegram_chat_id_production: "@maklon_production",
         default_dummy_fee_idr: "75000",
         max_dummy_rejections: "3",
         dp_percentage_bp: "3000",
@@ -427,6 +429,7 @@ describe("readBusinessSettings", () => {
       invoice_due_days: 14,
       invoice_payment_instructions: "BCA 123 a.n. Company",
       telegram_chat_id_design: "@maklon_design",
+      telegram_chat_id_production: "@maklon_production",
       default_dummy_fee_idr: 75_000,
       max_dummy_rejections: 3,
       dp_percentage_bp: 3000,
@@ -466,6 +469,7 @@ describe("validateBusinessSettings", () => {
     invoice_due_days: 0,
     invoice_payment_instructions: " Transfer to BCA ",
     telegram_chat_id_design: "",
+    telegram_chat_id_production: "",
     default_dummy_fee_idr: 50_000,
     max_dummy_rejections: 2,
     dp_percentage_bp: 10_000,
@@ -506,6 +510,7 @@ describe("validateBusinessSettings", () => {
       "Default fees must be whole rupiah amounts.",
     ],
     [{ ...valid, telegram_chat_id_design: null }, TELEGRAM_CHAT_ID_INVALID],
+    [{ ...valid, telegram_chat_id_production: null }, TELEGRAM_CHAT_ID_INVALID],
     ...[21, -1, "2"].map(
       (limit) =>
         [

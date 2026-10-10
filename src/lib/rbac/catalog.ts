@@ -66,6 +66,19 @@ export const PERMISSION_CATALOG = [
   // Dokumen legal (v2.6, PRD F-21): BPOM, Halal, HKI. SIG dicatat RnD
   // (`rnd.manage`). Tidak menghapus apa pun, jadi tidak sensitif.
   { key: "legal.manage", name: "Record legal documents", group: "Legal" },
+  // Produksi (v3.1, PRD F-23/F-24): PPIC membuat work order dan mencatat PO,
+  // SPV menyusun jadwal. Tidak menghapus apa pun, jadi tidak sensitif.
+  { key: "production.view", name: "View production", group: "Production" },
+  {
+    key: "ppic.manage",
+    name: "Plan production materials",
+    group: "Production",
+  },
+  {
+    key: "production.manage",
+    name: "Schedule production",
+    group: "Production",
+  },
   {
     key: "design.override_dummy_limit",
     name: "Override the dummy rejection limit",
@@ -150,6 +163,11 @@ export const PERMISSION_CATALOG = [
   {
     key: "notifications_design.view",
     name: "Design notifications",
+    group: "Notifications",
+  },
+  {
+    key: "notifications_production.view",
+    name: "Production notifications",
     group: "Notifications",
   },
   {

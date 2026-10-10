@@ -23,7 +23,7 @@ use super::models::CommandError;
 use super::samples::{self, BusinessSettings};
 use super::turso::{Statement, TursoClient};
 
-pub const NOTIFICATION_DIVISIONS: &[&str] = &["CS", "RND", "FINANCE", "DESIGN"];
+pub const NOTIFICATION_DIVISIONS: &[&str] = &["CS", "RND", "FINANCE", "DESIGN", "PRODUCTION"];
 pub const NOTIFICATION_MAX_ATTEMPTS: i64 = 5;
 pub const COLD_DIGEST_HOUR: i64 = 8;
 pub const COLD_DIGEST_MAX_CATCH_UP_DAYS: i64 = 7;
@@ -35,6 +35,7 @@ pub fn division_permission(division: &str) -> Option<&'static str> {
         "RND" => Some("notifications_rnd.view"),
         "FINANCE" => Some("notifications_finance.view"),
         "DESIGN" => Some("notifications_design.view"),
+        "PRODUCTION" => Some("notifications_production.view"),
         _ => None,
     }
 }
@@ -279,6 +280,45 @@ pub fn render_notification(
             format!("Accepted {when}"),
         ]
         .join("\n"),
+        "BATCH_CREATED" => [
+            format!("New work order {}: {sample}", field(payload, "batch_code")),
+            format!(
+                "MoU {}, {} units",
+                field(payload, "mou_number"),
+                field(payload, "total_units")
+            ),
+            format!("Created {when}"),
+        ]
+        .join("\n"),
+        "PO_LATE" => [
+            format!("Purchase order late: {sample}"),
+            format!(
+                "Work order {}, PO {} from {}",
+                field(payload, "batch_code"),
+                field(payload, "po_number"),
+                or_dash(field(payload, "supplier"))
+            ),
+            format!(
+                "Now arriving {}: {}",
+                field(payload, "eta_on"),
+                or_dash(field(payload, "reason"))
+            ),
+            format!("Reported {when}"),
+        ]
+        .join("\n"),
+        "BATCH_SCHEDULED" => [
+            format!(
+                "Production scheduled, packing on {}: {sample}",
+                field(payload, "packing_on")
+            ),
+            format!(
+                "Work order {}: {}",
+                field(payload, "batch_code"),
+                or_dash(field(payload, "notes"))
+            ),
+            format!("Saved {when}"),
+        ]
+        .join("\n"),
         "COLD_DIGEST" => {
             let leads = payload
                 .get("leads")
@@ -321,6 +361,15 @@ pub const NOTIFY_SAMPLE_STATUS_SQL: &str = "INSERT INTO notification_outbox (id,
 /// Brief desain baru dan dummy direvisi klien (v2.4). ?1 = id log, ?2 = id tiket desain.
 pub const NOTIFY_DESIGN_SQL: &str = "INSERT INTO notification_outbox (id, event_type, target_division, payload_json, occurred_at, status, attempts, next_attempt_at, created_at) SELECT 'design:' || ?1, CASE d.status WHEN 'MOCKUP' THEN 'DESIGN_REQUESTED' ELSE 'DUMMY_REVISED' END, 'DESIGN', json_object('sample_id', s.id, 'client_code', COALESCE(c.client_code, ''), 'client_name', COALESCE(c.name, ''), 'brand_name', s.brand_name, 'brief', d.brief, 'revision_notes', d.revision_notes, 'rejection_count', d.dummy_rejection_count), d.status_changed_at, CASE WHEN EXISTS (SELECT 1 FROM telegram_config t WHERE t.id = 'default' AND t.is_active = 1 AND TRIM(COALESCE(t.bot_token, '')) <> '') AND TRIM(COALESCE((SELECT g.value FROM setting_gex_system g WHERE g.key = 'telegram_chat_id_design'), '')) <> '' THEN 'PENDING' ELSE 'SKIPPED' END, 0, datetime('now'), datetime('now') FROM design_tickets d JOIN sample_requests s ON s.id = d.sample_request_id LEFT JOIN clients c ON c.id = s.client_id WHERE d.id = ?2 AND d.status IN ('MOCKUP', 'DUMMY_REVISION') LIMIT 1 ON CONFLICT(id) DO NOTHING;";
 
+/// Work order baru, ke grup Production (v3.1). ?1 = id work order.
+pub const NOTIFY_BATCH_CREATED_SQL: &str = "INSERT INTO notification_outbox (id, event_type, target_division, payload_json, occurred_at, status, attempts, next_attempt_at, created_at) SELECT 'batch:' || b.id, 'BATCH_CREATED', 'PRODUCTION', json_object('sample_id', s.id, 'client_code', COALESCE(c.client_code, ''), 'client_name', COALESCE(c.name, ''), 'brand_name', s.brand_name, 'batch_code', b.batch_code, 'mou_number', m.mou_number, 'total_units', m.total_units), b.created_at, CASE WHEN EXISTS (SELECT 1 FROM telegram_config t WHERE t.id = 'default' AND t.is_active = 1 AND TRIM(COALESCE(t.bot_token, '')) <> '') AND TRIM(COALESCE((SELECT g.value FROM setting_gex_system g WHERE g.key = 'telegram_chat_id_production'), '')) <> '' THEN 'PENDING' ELSE 'SKIPPED' END, 0, datetime('now'), datetime('now') FROM production_batches b JOIN production_mou m ON m.id = b.mou_id JOIN sample_requests s ON s.id = b.sample_request_id LEFT JOIN clients c ON c.id = b.client_id WHERE b.id = ?1 LIMIT 1 ON CONFLICT(id) DO NOTHING;";
+
+/// PO terlambat, ke grup CS dan Production (v3.1, E-30). ?1 = id log, ?2 = id PO.
+pub const NOTIFY_PO_LATE_SQL: &str = "INSERT INTO notification_outbox (id, event_type, target_division, payload_json, occurred_at, status, attempts, next_attempt_at, created_at) SELECT 'po-late:' || ?1 || ':' || d.division, 'PO_LATE', d.division, json_object('sample_id', s.id, 'client_code', COALESCE(c.client_code, ''), 'client_name', COALESCE(c.name, ''), 'brand_name', s.brand_name, 'batch_code', b.batch_code, 'po_number', p.po_number, 'supplier', COALESCE(o.label, ''), 'eta_on', p.eta_on, 'reason', p.late_reason), p.updated_at, CASE WHEN EXISTS (SELECT 1 FROM telegram_config t WHERE t.id = 'default' AND t.is_active = 1 AND TRIM(COALESCE(t.bot_token, '')) <> '') AND TRIM(COALESCE((SELECT g.value FROM setting_gex_system g WHERE g.key = CASE d.division WHEN 'CS' THEN 'telegram_chat_id_cs' ELSE 'telegram_chat_id_production' END), '')) <> '' THEN 'PENDING' ELSE 'SKIPPED' END, 0, datetime('now'), datetime('now') FROM batch_purchase_orders p JOIN production_batches b ON b.id = p.batch_id JOIN sample_requests s ON s.id = b.sample_request_id LEFT JOIN clients c ON c.id = b.client_id LEFT JOIN master_option o ON o.id = p.supplier_option_id CROSS JOIN (SELECT 'CS' AS division UNION ALL SELECT 'PRODUCTION') d WHERE p.id = ?2 ON CONFLICT(id) DO NOTHING;";
+
+/// Jadwal produksi disimpan, ke grup CS (v3.1). ?1 = id log, ?2 = id work order.
+pub const NOTIFY_BATCH_SCHEDULED_SQL: &str = "INSERT INTO notification_outbox (id, event_type, target_division, payload_json, occurred_at, status, attempts, next_attempt_at, created_at) SELECT 'schedule:' || ?1, 'BATCH_SCHEDULED', 'CS', json_object('sample_id', s.id, 'client_code', COALESCE(c.client_code, ''), 'client_name', COALESCE(c.name, ''), 'brand_name', s.brand_name, 'batch_code', b.batch_code, 'packing_on', b.sched_packing_on, 'notes', COALESCE(l.notes, '')), b.schedule_updated_at, CASE WHEN EXISTS (SELECT 1 FROM telegram_config t WHERE t.id = 'default' AND t.is_active = 1 AND TRIM(COALESCE(t.bot_token, '')) <> '') AND TRIM(COALESCE((SELECT g.value FROM setting_gex_system g WHERE g.key = 'telegram_chat_id_cs'), '')) <> '' THEN 'PENDING' ELSE 'SKIPPED' END, 0, datetime('now'), datetime('now') FROM production_batches b JOIN sample_requests s ON s.id = b.sample_request_id LEFT JOIN clients c ON c.id = b.client_id LEFT JOIN sample_status_log l ON l.id = ?1 WHERE b.id = ?2 LIMIT 1 ON CONFLICT(id) DO NOTHING;";
+
 /// Klien menjawab lewat tautan persetujuan, ke grup CS (v2.5b). Hanya Web yang
 /// menulisnya; ada di sini supaya paritas teksnya tetap dites dari sisi TS.
 #[allow(dead_code)]
@@ -355,15 +404,15 @@ pub const NOTIFICATION_FAILED_LIST_SQL: &str = "SELECT id, event_type, target_di
 pub const NOTIFICATION_PENDING_COUNT_SQL: &str =
     "SELECT COUNT(*) AS total FROM notification_outbox WHERE status = 'PENDING';";
 
-pub const NOTIFICATION_BELL_LIST_SQL: &str = "SELECT id, event_type, target_division, payload_json, occurred_at, created_at FROM notification_outbox WHERE ((?1 = 1 AND target_division = 'CS') OR (?2 = 1 AND target_division = 'RND') OR (?3 = 1 AND target_division = 'FINANCE') OR (?4 = 1 AND target_division = 'DESIGN')) AND NOT (event_type = 'COLD_DIGEST' AND json_array_length(payload_json, '$.leads') = 0) ORDER BY created_at DESC, rowid DESC LIMIT 30;";
+pub const NOTIFICATION_BELL_LIST_SQL: &str = "SELECT id, event_type, target_division, payload_json, occurred_at, created_at FROM notification_outbox WHERE ((?1 = 1 AND target_division = 'CS') OR (?2 = 1 AND target_division = 'RND') OR (?3 = 1 AND target_division = 'FINANCE') OR (?4 = 1 AND target_division = 'DESIGN') OR (?5 = 1 AND target_division = 'PRODUCTION')) AND NOT (event_type = 'COLD_DIGEST' AND json_array_length(payload_json, '$.leads') = 0) ORDER BY created_at DESC, rowid DESC LIMIT 30;";
 
-pub const NOTIFICATION_UNREAD_COUNT_SQL: &str = "SELECT COUNT(*) AS total FROM notification_outbox WHERE ((?1 = 1 AND target_division = 'CS') OR (?2 = 1 AND target_division = 'RND') OR (?3 = 1 AND target_division = 'FINANCE') OR (?4 = 1 AND target_division = 'DESIGN')) AND NOT (event_type = 'COLD_DIGEST' AND json_array_length(payload_json, '$.leads') = 0) AND created_at > COALESCE((SELECT seen_at FROM notification_seen WHERE operator_id = ?5), '');";
+pub const NOTIFICATION_UNREAD_COUNT_SQL: &str = "SELECT COUNT(*) AS total FROM notification_outbox WHERE ((?1 = 1 AND target_division = 'CS') OR (?2 = 1 AND target_division = 'RND') OR (?3 = 1 AND target_division = 'FINANCE') OR (?4 = 1 AND target_division = 'DESIGN') OR (?5 = 1 AND target_division = 'PRODUCTION')) AND NOT (event_type = 'COLD_DIGEST' AND json_array_length(payload_json, '$.leads') = 0) AND created_at > COALESCE((SELECT seen_at FROM notification_seen WHERE operator_id = ?6), '');";
 
 pub const NOTIFICATION_MARK_SEEN_SQL: &str = "INSERT INTO notification_seen (operator_id, seen_at) VALUES (?1, datetime('now')) ON CONFLICT(operator_id) DO UPDATE SET seen_at = excluded.seen_at;";
 
 pub const NOTIFICATION_CONTEXT_SQL: &str = "SELECT CAST(strftime('%s', 'now') AS INTEGER) AS now_epoch, COALESCE((SELECT timezone FROM company_profile WHERE id = 'default_company'), '') AS timezone, COALESCE((SELECT is_active FROM telegram_config WHERE id = 'default'), 0) AS is_active, COALESCE((SELECT bot_token FROM telegram_config WHERE id = 'default'), '') AS bot_token, COALESCE((SELECT updated_at FROM telegram_config WHERE id = 'default'), '') AS updated_at, COALESCE((SELECT updated_by FROM telegram_config WHERE id = 'default'), '') AS updated_by;";
 
-pub const NOTIFICATION_SETTINGS_SQL: &str = "SELECT key, value FROM setting_gex_system WHERE key IN ('lead_hot_max_days', 'lead_warm_max_days', 'telegram_chat_id_cs', 'telegram_chat_id_rnd', 'telegram_chat_id_finance', 'telegram_chat_id_design');";
+pub const NOTIFICATION_SETTINGS_SQL: &str = "SELECT key, value FROM setting_gex_system WHERE key IN ('lead_hot_max_days', 'lead_warm_max_days', 'telegram_chat_id_cs', 'telegram_chat_id_rnd', 'telegram_chat_id_finance', 'telegram_chat_id_design', 'telegram_chat_id_production');";
 
 /// ?1 = token baru (kosong = pertahankan yang lama), ?2 = aktif, ?3 = pelaku.
 pub const TELEGRAM_CONFIG_SAVE_SQL: &str = "INSERT INTO telegram_config (id, bot_token, is_active, updated_at, updated_by) VALUES ('default', ?1, ?2, datetime('now'), ?3) ON CONFLICT(id) DO UPDATE SET bot_token = CASE WHEN excluded.bot_token = '' THEN telegram_config.bot_token ELSE excluded.bot_token END, is_active = excluded.is_active, updated_at = excluded.updated_at, updated_by = excluded.updated_by;";
@@ -442,6 +491,7 @@ fn chat_id<'a>(settings: &'a BusinessSettings, division: &str) -> &'a str {
         "RND" => &settings.telegram_chat_id_rnd,
         "FINANCE" => &settings.telegram_chat_id_finance,
         "DESIGN" => &settings.telegram_chat_id_design,
+        "PRODUCTION" => &settings.telegram_chat_id_production,
         _ => "",
     }
 }
@@ -712,7 +762,7 @@ pub async fn retry_failed(turso: &TursoClient) -> Result<u64, CommandError> {
 /// yang belum dibaca. `allowed` = urutan CS, RnD, Finance, Desain.
 pub async fn bell(
     turso: &TursoClient,
-    allowed: [bool; 4],
+    allowed: [bool; 5],
     operator_id: i64,
 ) -> Result<Value, CommandError> {
     let context = load_context(turso).await?;
@@ -909,6 +959,38 @@ mod tests {
         assert_eq!(
             test_message("RND"),
             "Company OS test message for the RND group. Notifications are working."
+        );
+    }
+
+    // Vektor kembar dengan "teks pesan produksi (v3.1)" di `notification.test.ts`.
+    #[test]
+    fn teks_pesan_produksi() {
+        let batch = json!({
+            "client_name": "Aura Beauty",
+            "client_code": "KLN-20261003-WB01",
+            "brand_name": "Aura Glow",
+            "batch_code": "BAT-20261010-A101",
+            "mou_number": "MOU-20261009-A101",
+            "total_units": 10000,
+            "po_number": "PO-778",
+            "supplier": "PT Kimia",
+            "eta_on": "2026-10-27",
+            "reason": "Stock out",
+            "packing_on": "2026-11-05",
+            "notes": "",
+        });
+        let at = "2026-10-03 07:05:00";
+        assert_eq!(
+            render_notification("BATCH_CREATED", &batch, at, "Asia/Jakarta"),
+            "New work order BAT-20261010-A101: Aura Glow for Aura Beauty (KLN-20261003-WB01)\nMoU MOU-20261009-A101, 10000 units\nCreated 2026-10-03 14:05 WIB"
+        );
+        assert_eq!(
+            render_notification("PO_LATE", &batch, at, "Asia/Jakarta"),
+            "Purchase order late: Aura Glow for Aura Beauty (KLN-20261003-WB01)\nWork order BAT-20261010-A101, PO PO-778 from PT Kimia\nNow arriving 2026-10-27: Stock out\nReported 2026-10-03 14:05 WIB"
+        );
+        assert_eq!(
+            render_notification("BATCH_SCHEDULED", &batch, at, "Asia/Jakarta"),
+            "Production scheduled, packing on 2026-11-05: Aura Glow for Aura Beauty (KLN-20261003-WB01)\nWork order BAT-20261010-A101: -\nSaved 2026-10-03 14:05 WIB"
         );
     }
 }

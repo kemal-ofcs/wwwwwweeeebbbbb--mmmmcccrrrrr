@@ -9,6 +9,7 @@ import {
   initDatabaseSchema,
   LEGAL_PERMISSION_SEED_SQL,
   MOU_PERMISSION_SEED_SQL,
+  PRODUCTION_PERMISSION_SEED_SQL,
   RND_PERMISSION_SEED_SQL,
   SAMPLE_PERMISSION_SEED_SQL,
 } from "@/lib/db-schema";
@@ -28,6 +29,7 @@ const design = await import("@/lib/validations/design");
 const mou = await import("@/lib/server/mou");
 const approval = await import("@/lib/server/approval");
 const legal = await import("@/lib/server/legal");
+const production = await import("@/lib/server/production");
 
 let client: Client;
 let directory: string;
@@ -229,6 +231,7 @@ describe("tiket sampel, jalur Web", () => {
       ...DESIGN_PERMISSION_SEED_SQL,
       ...MOU_PERMISSION_SEED_SQL,
       ...LEGAL_PERMISSION_SEED_SQL,
+      ...PRODUCTION_PERMISSION_SEED_SQL,
     ]) {
       expect(tursoRs).toContain(`"${sql}"`);
     }
@@ -256,6 +259,7 @@ describe("tiket sampel, jalur Web", () => {
         invoice_due_days: 14,
         invoice_payment_instructions: "BCA 123",
         telegram_chat_id_design: "",
+        telegram_chat_id_production: "",
         default_dummy_fee_idr: 0,
         max_dummy_rejections: 0,
         dp_percentage_bp: 5000,
@@ -1400,6 +1404,217 @@ describe("tiket sampel, jalur Web", () => {
       args: [sample.id],
     });
     expect(Number(photos.rows[0]?.total)).toBe(1);
+  });
+
+  test("work order: menunggu DP, satu per MoU, PO, bahan siap, jadwal beralasan", async () => {
+    const PPIC = { id: 5, role: "PPIC" };
+    const SPV = { id: 6, role: "Production SPV" };
+    const owner = await newClient("081200000095");
+    const sample = await samples.createSampleRequest(
+      client,
+      draft(owner.id, { brand_name: "Aura Batch" }),
+      CS,
+    );
+    for (const action of [
+      "SUBMIT_TO_RND",
+      "RND_ACCEPT",
+      "PROCEED",
+      "SAMPLE_READY",
+    ]) {
+      await step(sample.id, action, { lead_time_days: 14 });
+    }
+    await price(sample.id);
+    await step(sample.id, "SAMPLE_SENT");
+    await step(sample.id, "CLIENT_ACC");
+    const created = await mou.createMou(
+      client,
+      {
+        sample_id: sample.id,
+        terms: {
+          total_units: 1000,
+          unit_price_idr: 1,
+          production_lead_time_days: 30,
+          regulatory_path: "WHITE_LABEL",
+          dp_bp: 5000,
+          notes: "",
+        },
+      },
+      CS,
+      false,
+    );
+    for (const action of ["SEND_MOU", "MOU_ACCEPT"]) {
+      await mou.recordMouStep(
+        client,
+        { id: created.id, action, notes: action, evidence_base64: EVIDENCE },
+        CS,
+      );
+    }
+    const readyIds = async () =>
+      (await production.listProduction(client)).ready.map((row) => row.id);
+    // OQ-22: PPIC mulai setelah DP lunas, paralel dengan dokumen legal.
+    await expect(
+      production.createBatch(client, { mou_id: created.id }, PPIC),
+    ).rejects.toThrow(
+      "Waiting for Finance to verify the production & legal down payment.",
+    );
+    expect(await readyIds()).not.toContain(created.id);
+    await settle(sample.id, "DP_PRODUCTION_LEGAL", 500);
+    expect(await readyIds()).toContain(created.id);
+    const batch = await production.createBatch(
+      client,
+      { mou_id: created.id },
+      PPIC,
+    );
+    expect(batch.batch_code).toMatch(/^BAT-\d{8}-WB01$/);
+    expect(await readyIds()).not.toContain(created.id);
+    await expect(
+      production.createBatch(client, { mou_id: created.id }, PPIC),
+    ).rejects.toThrow("This MoU already has a work order.");
+
+    const supplier = await clients.saveMasterOption(
+      client,
+      { kind: "SUPPLIER", code: "KIM", label: "PT Kimia" },
+      ADMIN,
+    );
+    const po = await production.recordPurchaseOrder(
+      client,
+      {
+        batch_id: batch.id,
+        step: {
+          action: "PO_ADD",
+          order: {
+            po_number: "PO-778",
+            supplier_option_id: supplier.id,
+            eta_on: "2026-10-20",
+          },
+        },
+      },
+      PPIC,
+    );
+    await expect(
+      production.markMaterialsReady(client, { batch_id: batch.id }, PPIC),
+    ).rejects.toThrow(
+      "Mark every open purchase order as arrived or cancelled first.",
+    );
+    const schedule = {
+      weighing_on: "2026-11-02",
+      mixing_on: "2026-11-03",
+      filling_on: "2026-11-04",
+      packing_on: "2026-11-05",
+      reason: "",
+    };
+    await production.saveBatchSchedule(
+      client,
+      { batch_id: batch.id, schedule },
+      SPV,
+    );
+    const late = (eta: string) =>
+      production.recordPurchaseOrder(
+        client,
+        {
+          batch_id: batch.id,
+          step: {
+            action: "PO_LATE",
+            po_id: po.id,
+            delay: { eta_on: eta, reason: "Stock out" },
+          },
+        },
+        PPIC,
+      );
+    await expect(late("2026-10-19")).rejects.toThrow(
+      "The new arrival date must be after the current one.",
+    );
+    await late("2026-10-27");
+    const current = async () =>
+      (await production.listProduction(client)).batches.find(
+        (row) => row.id === batch.id,
+      );
+    expect(await current()).toMatchObject({
+      material_status: "WAITING_PO",
+      needs_reschedule: 1,
+      open_orders: 1,
+      next_eta_on: "2026-10-27",
+    });
+    // Mengubah jadwal yang sudah ada wajib beralasan; menyimpannya menghapus tanda.
+    await expect(
+      production.saveBatchSchedule(
+        client,
+        { batch_id: batch.id, schedule },
+        SPV,
+      ),
+    ).rejects.toThrow("Write why the schedule changes.");
+    await production.saveBatchSchedule(
+      client,
+      {
+        batch_id: batch.id,
+        schedule: { ...schedule, packing_on: "2026-11-12", reason: "PO late" },
+      },
+      SPV,
+    );
+    await production.recordPurchaseOrder(
+      client,
+      { batch_id: batch.id, step: { action: "PO_ARRIVED", po_id: po.id } },
+      PPIC,
+    );
+    await production.markMaterialsReady(client, { batch_id: batch.id }, PPIC);
+    expect(await current()).toMatchObject({
+      material_status: "READY",
+      needs_reschedule: 0,
+      sched_packing_on: "2026-11-12",
+    });
+    const detail = await samples.getSampleRequest(client, sample.id, false);
+    expect(detail.request).toMatchObject({
+      batch_material: "READY",
+      batch_packing_on: "2026-11-12",
+    });
+    expect(detail.purchase_orders.map((row) => row.status)).toEqual([
+      "ARRIVED",
+    ]);
+    const log = await client.execute({
+      sql: "SELECT action FROM sample_status_log WHERE sample_request_id = ? AND action IN ('BATCH_CREATE', 'PO_ADD', 'PO_LATE', 'PO_ARRIVED', 'MATERIALS_READY', 'BATCH_SCHEDULE') ORDER BY recorded_at, rowid;",
+      args: [sample.id],
+    });
+    expect(log.rows.map((row) => String(row.action))).toEqual([
+      "BATCH_CREATE",
+      "PO_ADD",
+      "BATCH_SCHEDULE",
+      "PO_LATE",
+      "BATCH_SCHEDULE",
+      "PO_ARRIVED",
+      "MATERIALS_READY",
+    ]);
+    const notified = await client.execute(
+      "SELECT event_type, target_division FROM notification_outbox WHERE event_type IN ('BATCH_CREATED', 'PO_LATE', 'BATCH_SCHEDULED') ORDER BY event_type, target_division;",
+    );
+    expect(
+      notified.rows.map((row) => `${row.event_type}/${row.target_division}`),
+    ).toEqual([
+      "BATCH_CREATED/PRODUCTION",
+      "BATCH_SCHEDULED/CS",
+      "BATCH_SCHEDULED/CS",
+      "PO_LATE/CS",
+      "PO_LATE/PRODUCTION",
+    ]);
+  });
+
+  test("izin produksi untuk role divisi, sekali saja", async () => {
+    const granted = await client.execute(
+      "SELECT r.role_key || ':' || rp.permission_key AS pair FROM app_role r JOIN role_permission rp ON rp.role_id = r.id WHERE rp.is_allowed = 1 AND rp.permission_key IN ('production.view', 'ppic.manage', 'production.manage', 'notifications_production.view') ORDER BY pair;",
+    );
+    const pairs = granted.rows.map((row) => String(row.pair));
+    for (const pair of [
+      "cs:production.view",
+      "finance:production.view",
+      "logistics:notifications_production.view",
+      "ppic:ppic.manage",
+      "ppic:production.view",
+      "production_spv:production.manage",
+      "qc:production.view",
+    ]) {
+      expect(pairs).toContain(pair);
+    }
+    expect(pairs).not.toContain("ppic:production.manage");
+    expect(pairs).not.toContain("cs:ppic.manage");
   });
 
   test("izin dokumen legal untuk role Legal, sekali saja", async () => {

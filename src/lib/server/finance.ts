@@ -34,7 +34,6 @@ import {
   INVOICE_DUPLICATE_SQL,
   INVOICE_INSERT_SQL,
   INVOICE_LIST_SQL,
-  INVOICE_NUMBER_PREFIX,
   INVOICE_RESCHEDULE_SQL,
   installmentDescription,
   installmentNumber,
@@ -274,7 +273,8 @@ export async function createInvoice(
 
     const { epoch, stamp } = await databaseClock(transaction);
     const timezone = await companyTimezone(transaction);
-    const tag = (await getClientCodeSettings(transaction)).client_code_web_tag;
+    const codes = await getClientCodeSettings(transaction);
+    const tag = codes.client_code_web_tag;
     const dateStamp = companyDateStamp(epoch, timezone);
     const existing = await rows(
       transaction,
@@ -289,7 +289,12 @@ export async function createInvoice(
     const number =
       sequence == null
         ? null
-        : formatClientCode(INVOICE_NUMBER_PREFIX, dateStamp, tag, sequence);
+        : formatClientCode(
+            codes.invoice_number_prefix,
+            dateStamp,
+            tag,
+            sequence,
+          );
     if (!number) {
       throw new ApiRequestError(
         "The Web has used up its invoice numbers for today.",

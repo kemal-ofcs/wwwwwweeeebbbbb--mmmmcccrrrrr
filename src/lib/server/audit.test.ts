@@ -194,6 +194,8 @@ describe("role divisi", () => {
       "leads.view",
       "mou.manage",
       "notifications_cs.view",
+      // Melihat work order dan jadwal produksi (v3.1, keputusan D).
+      "production.view",
       "samples.manage",
       "samples.view",
       "sync.view",
@@ -203,10 +205,17 @@ describe("role divisi", () => {
       "dashboard.view",
       "home.view",
       "leads.view",
+      "production.view",
       "samples.view",
       "sync.view",
     ]);
-    expect(byRole.qc).toEqual(["dashboard.view", "home.view", "sync.view"]);
+    expect(byRole.qc).toEqual([
+      "dashboard.view",
+      "home.view",
+      "notifications_production.view",
+      "production.view",
+      "sync.view",
+    ]);
   });
 
   test("role yang dihapus dan izin yang dicabut tidak kembali saat skema diinisialisasi ulang", async () => {

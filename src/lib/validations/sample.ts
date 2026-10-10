@@ -29,6 +29,7 @@ export const BUSINESS_SETTING_KEYS = {
   invoiceDueDays: "invoice_due_days",
   invoicePaymentInstructions: "invoice_payment_instructions",
   telegramChatIdDesign: "telegram_chat_id_design",
+  telegramChatIdProduction: "telegram_chat_id_production",
   defaultDummyFeeIdr: "default_dummy_fee_idr",
   maxDummyRejections: "max_dummy_rejections",
   dpPercentageBp: "dp_percentage_bp",
@@ -67,6 +68,8 @@ export interface BusinessSettings {
   invoice_payment_instructions: string;
   /** Grup Telegram divisi Desain (v2.4, PRD F-19). */
   telegram_chat_id_design: string;
+  /** Grup Telegram Production: PPIC, SPV, QC, Logistik (v3.1, D-43). */
+  telegram_chat_id_production: string;
   /** Isian awal nominal tagihan dummy (v2.4); 0 = kosong. */
   default_dummy_fee_idr: number;
   /**
@@ -100,6 +103,7 @@ export const DEFAULT_BUSINESS_SETTINGS: BusinessSettings = {
   invoice_due_days: 7,
   invoice_payment_instructions: "",
   telegram_chat_id_design: "",
+  telegram_chat_id_production: "",
   default_dummy_fee_idr: 0,
   max_dummy_rejections: 0,
   dp_percentage_bp: 5000,
@@ -280,6 +284,10 @@ export function readBusinessSettings(
       normalizeTelegramChatId(
         values[BUSINESS_SETTING_KEYS.telegramChatIdDesign],
       ) ?? "",
+    telegram_chat_id_production:
+      normalizeTelegramChatId(
+        values[BUSINESS_SETTING_KEYS.telegramChatIdProduction],
+      ) ?? "",
     default_dummy_fee_idr:
       inRange(
         wholeNumber(values[BUSINESS_SETTING_KEYS.defaultDummyFeeIdr]),
@@ -371,11 +379,15 @@ export function validateBusinessSettings(
   const chatRnd = normalizeTelegramChatId(draft.telegram_chat_id_rnd);
   const chatFinance = normalizeTelegramChatId(draft.telegram_chat_id_finance);
   const chatDesign = normalizeTelegramChatId(draft.telegram_chat_id_design);
+  const chatProduction = normalizeTelegramChatId(
+    draft.telegram_chat_id_production,
+  );
   if (
     chatCs === null ||
     chatRnd === null ||
     chatFinance === null ||
-    chatDesign === null
+    chatDesign === null ||
+    chatProduction === null
   ) {
     return { error: TELEGRAM_CHAT_ID_INVALID };
   }
@@ -467,6 +479,7 @@ export function validateBusinessSettings(
       invoice_due_days: dueDays,
       invoice_payment_instructions: instructions,
       telegram_chat_id_design: chatDesign,
+      telegram_chat_id_production: chatProduction,
       default_dummy_fee_idr: dummyFee,
       max_dummy_rejections: dummyLimit,
       dp_percentage_bp: dpBp,
@@ -1170,7 +1183,7 @@ export const SAMPLE_FEEDBACK_INSERT_SQL =
  * dan perangkat; WAJIB identik dengan `SAMPLE_LIST_SQL` di Rust.
  */
 export const SAMPLE_LIST_SQL =
-  "SELECT s.*, c.client_code, c.name AS client_name, c.free_revision_limit, o.nama_operator AS pic_crm_name, (SELECT p.final_unit_price_idr FROM pricing_formulas p WHERE p.sample_request_id = s.id AND p.iteration_number = s.revision_index + 1 ORDER BY p.recorded_at DESC, p.rowid DESC LIMIT 1) AS unit_price_idr, EXISTS (SELECT 1 FROM invoices i WHERE i.sample_request_id = s.id AND ((s.status = 'WAITING_SAMPLE_PAYMENT' AND i.ref_type = 'SAMPLE_FEE') OR (s.status = 'WAITING_REVISION_PAYMENT' AND i.ref_type = 'REVISION_FEE' AND i.revision_index = s.revision_index)) AND (i.status = 'RESCHEDULED' OR (i.status = 'OPEN' AND (SELECT COALESCE(SUM(a.amount_idr), 0) FROM fund_allocations a WHERE a.invoice_id = i.id) >= i.total_idr))) AS fee_paid, EXISTS (SELECT 1 FROM invoices i WHERE i.sample_request_id = s.id AND i.ref_type = 'TEST_FEE' AND (i.status = 'RESCHEDULED' OR (i.status = 'OPEN' AND (SELECT COALESCE(SUM(a.amount_idr), 0) FROM fund_allocations a WHERE a.invoice_id = i.id) >= i.total_idr))) AS test_paid, (SELECT d.status FROM design_tickets d WHERE d.sample_request_id = s.id AND d.status <> 'CANCELLED' ORDER BY d.created_at DESC, d.rowid DESC LIMIT 1) AS design_status, (SELECT d.dummy_rejection_count FROM design_tickets d WHERE d.sample_request_id = s.id AND d.status <> 'CANCELLED' ORDER BY d.created_at DESC, d.rowid DESC LIMIT 1) AS dummy_round, ((s.is_dummy_required = 0 AND NOT EXISTS (SELECT 1 FROM design_tickets d WHERE d.sample_request_id = s.id AND d.status <> 'CANCELLED')) OR EXISTS (SELECT 1 FROM media_asset m WHERE m.owner_type = 'sample' AND m.owner_id = s.id AND m.purpose = 'MOCKUP')) AS mockup_ready, (SELECT m.status FROM production_mou m WHERE m.sample_request_id = s.id AND m.status NOT IN ('CANCELLED', 'REJECTED') ORDER BY m.created_at DESC, m.rowid DESC LIMIT 1) AS mou_status, (SELECT m.dp_amount_required_idr FROM production_mou m WHERE m.sample_request_id = s.id AND m.status = 'ACCEPTED' ORDER BY m.created_at DESC, m.rowid DESC LIMIT 1) AS mou_dp_idr, EXISTS (SELECT 1 FROM invoices i WHERE i.sample_request_id = s.id AND i.ref_type = 'DP_PRODUCTION_LEGAL' AND (i.status = 'RESCHEDULED' OR (i.status = 'OPEN' AND (SELECT COALESCE(SUM(a.amount_idr), 0) FROM fund_allocations a WHERE a.invoice_id = i.id) >= i.total_idr))) AS dp_paid, (SELECT CASE m.regulatory_path WHEN 'WITH_BPOM' THEN 4 ELSE 1 END - (SELECT COUNT(DISTINCT l.kind) FROM legal_documents l WHERE l.mou_id = m.id AND l.status IN ('ISSUED', 'NOT_REQUIRED') AND (m.regulatory_path = 'WITH_BPOM' OR l.kind = 'HALAL')) FROM production_mou m WHERE m.sample_request_id = s.id AND m.status = 'ACCEPTED' ORDER BY m.created_at DESC, m.rowid DESC LIMIT 1) AS legal_open, (SELECT CASE WHEN d.dummy_rejection_count = 0 THEN EXISTS (SELECT 1 FROM invoices i WHERE i.sample_request_id = s.id AND i.ref_type = 'DUMMY_FEE' AND i.revision_index = 0 AND (i.status = 'RESCHEDULED' OR (i.status = 'OPEN' AND (SELECT COALESCE(SUM(a.amount_idr), 0) FROM fund_allocations a WHERE a.invoice_id = i.id) >= i.total_idr))) ELSE NOT EXISTS (SELECT 1 FROM invoices i WHERE i.sample_request_id = s.id AND i.ref_type = 'DUMMY_FEE' AND i.revision_index = d.dummy_rejection_count AND i.status = 'OPEN' AND (SELECT COALESCE(SUM(a.amount_idr), 0) FROM fund_allocations a WHERE a.invoice_id = i.id) < i.total_idr) END FROM design_tickets d WHERE d.sample_request_id = s.id AND d.status <> 'CANCELLED' ORDER BY d.created_at DESC, d.rowid DESC LIMIT 1) AS dummy_paid, (SELECT m.status FROM production_mou m WHERE m.sample_request_id = s.id ORDER BY m.created_at DESC, m.rowid DESC LIMIT 1) IN ('REJECTED', 'CANCELLED') AS mou_closed FROM sample_requests s LEFT JOIN clients c ON c.id = s.client_id LEFT JOIN master_operator o ON o.id = s.pic_crm_id";
+  "SELECT s.*, c.client_code, c.name AS client_name, c.free_revision_limit, o.nama_operator AS pic_crm_name, (SELECT p.final_unit_price_idr FROM pricing_formulas p WHERE p.sample_request_id = s.id AND p.iteration_number = s.revision_index + 1 ORDER BY p.recorded_at DESC, p.rowid DESC LIMIT 1) AS unit_price_idr, EXISTS (SELECT 1 FROM invoices i WHERE i.sample_request_id = s.id AND ((s.status = 'WAITING_SAMPLE_PAYMENT' AND i.ref_type = 'SAMPLE_FEE') OR (s.status = 'WAITING_REVISION_PAYMENT' AND i.ref_type = 'REVISION_FEE' AND i.revision_index = s.revision_index)) AND (i.status = 'RESCHEDULED' OR (i.status = 'OPEN' AND (SELECT COALESCE(SUM(a.amount_idr), 0) FROM fund_allocations a WHERE a.invoice_id = i.id) >= i.total_idr))) AS fee_paid, EXISTS (SELECT 1 FROM invoices i WHERE i.sample_request_id = s.id AND i.ref_type = 'TEST_FEE' AND (i.status = 'RESCHEDULED' OR (i.status = 'OPEN' AND (SELECT COALESCE(SUM(a.amount_idr), 0) FROM fund_allocations a WHERE a.invoice_id = i.id) >= i.total_idr))) AS test_paid, (SELECT d.status FROM design_tickets d WHERE d.sample_request_id = s.id AND d.status <> 'CANCELLED' ORDER BY d.created_at DESC, d.rowid DESC LIMIT 1) AS design_status, (SELECT d.dummy_rejection_count FROM design_tickets d WHERE d.sample_request_id = s.id AND d.status <> 'CANCELLED' ORDER BY d.created_at DESC, d.rowid DESC LIMIT 1) AS dummy_round, ((s.is_dummy_required = 0 AND NOT EXISTS (SELECT 1 FROM design_tickets d WHERE d.sample_request_id = s.id AND d.status <> 'CANCELLED')) OR EXISTS (SELECT 1 FROM media_asset m WHERE m.owner_type = 'sample' AND m.owner_id = s.id AND m.purpose = 'MOCKUP')) AS mockup_ready, (SELECT m.status FROM production_mou m WHERE m.sample_request_id = s.id AND m.status NOT IN ('CANCELLED', 'REJECTED') ORDER BY m.created_at DESC, m.rowid DESC LIMIT 1) AS mou_status, (SELECT m.dp_amount_required_idr FROM production_mou m WHERE m.sample_request_id = s.id AND m.status = 'ACCEPTED' ORDER BY m.created_at DESC, m.rowid DESC LIMIT 1) AS mou_dp_idr, EXISTS (SELECT 1 FROM invoices i WHERE i.sample_request_id = s.id AND i.ref_type = 'DP_PRODUCTION_LEGAL' AND (i.status = 'RESCHEDULED' OR (i.status = 'OPEN' AND (SELECT COALESCE(SUM(a.amount_idr), 0) FROM fund_allocations a WHERE a.invoice_id = i.id) >= i.total_idr))) AS dp_paid, (SELECT CASE m.regulatory_path WHEN 'WITH_BPOM' THEN 4 ELSE 1 END - (SELECT COUNT(DISTINCT l.kind) FROM legal_documents l WHERE l.mou_id = m.id AND l.status IN ('ISSUED', 'NOT_REQUIRED') AND (m.regulatory_path = 'WITH_BPOM' OR l.kind = 'HALAL')) FROM production_mou m WHERE m.sample_request_id = s.id AND m.status = 'ACCEPTED' ORDER BY m.created_at DESC, m.rowid DESC LIMIT 1) AS legal_open, (SELECT CASE WHEN d.dummy_rejection_count = 0 THEN EXISTS (SELECT 1 FROM invoices i WHERE i.sample_request_id = s.id AND i.ref_type = 'DUMMY_FEE' AND i.revision_index = 0 AND (i.status = 'RESCHEDULED' OR (i.status = 'OPEN' AND (SELECT COALESCE(SUM(a.amount_idr), 0) FROM fund_allocations a WHERE a.invoice_id = i.id) >= i.total_idr))) ELSE NOT EXISTS (SELECT 1 FROM invoices i WHERE i.sample_request_id = s.id AND i.ref_type = 'DUMMY_FEE' AND i.revision_index = d.dummy_rejection_count AND i.status = 'OPEN' AND (SELECT COALESCE(SUM(a.amount_idr), 0) FROM fund_allocations a WHERE a.invoice_id = i.id) < i.total_idr) END FROM design_tickets d WHERE d.sample_request_id = s.id AND d.status <> 'CANCELLED' ORDER BY d.created_at DESC, d.rowid DESC LIMIT 1) AS dummy_paid, (SELECT m.status FROM production_mou m WHERE m.sample_request_id = s.id ORDER BY m.created_at DESC, m.rowid DESC LIMIT 1) IN ('REJECTED', 'CANCELLED') AS mou_closed, (SELECT b.material_status FROM production_batches b WHERE b.sample_request_id = s.id ORDER BY b.created_at DESC, b.rowid DESC LIMIT 1) AS batch_material, (SELECT b.sched_packing_on FROM production_batches b WHERE b.sample_request_id = s.id ORDER BY b.created_at DESC, b.rowid DESC LIMIT 1) AS batch_packing_on FROM sample_requests s LEFT JOIN clients c ON c.id = s.client_id LEFT JOIN master_operator o ON o.id = s.pic_crm_id";
 
 /** Satu harga per simpan (v2.2), hanya-tambah; terbaru per iterasi berlaku. */
 export const PRICE_INSERT_SQL =

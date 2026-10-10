@@ -43,6 +43,7 @@ const KIND_LABEL: Record<string, string> = {
   FORMULATION_TYPE: "formulation type",
   REGISTRATION_CATEGORY: "registration category",
   RND_REJECT_REASON: "RnD rejection reason",
+  SUPPLIER: "supplier",
 };
 
 type Summary = Record<string, unknown>;
@@ -111,6 +112,16 @@ function describe(entry: AuditEntry, operatorName: (id: number) => string) {
           "_",
           " ",
         )} for ${code}${record.certificate_no ? `: certificate ${String(record.certificate_no)}` : record.reference_no ? `: number ${String(record.reference_no)}` : ""}`;
+    }
+    case "batch.create":
+      return `Created work order ${String(s.batch_code ?? "")} from MoU ${String(s.mou_number ?? "")} for ${code}`;
+    case "batch.purchase_order":
+      return `Work order ${String(s.batch_code ?? "")} for ${code}: ${String(s.notes ?? "")}`;
+    case "batch.ready":
+      return `Confirmed the materials of work order ${String(s.batch_code ?? "")} for ${code} are ready`;
+    case "batch.schedule": {
+      const schedule = (s.schedule ?? {}) as Record<string, unknown>;
+      return `Scheduled work order ${String(s.batch_code ?? "")} for ${code}: packing on ${String(schedule.packing_on ?? "")}${schedule.reason ? ` (${String(schedule.reason)})` : ""}`;
     }
     case "mou.create":
       return `Drafted MoU ${String(s.mou_number ?? "")} for sample "${String(s.brand_name ?? "")}" of ${code}`;

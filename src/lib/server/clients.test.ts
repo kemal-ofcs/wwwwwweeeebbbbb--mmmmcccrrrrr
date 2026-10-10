@@ -121,7 +121,25 @@ describe("klien, jalur Web", () => {
     await domain.saveClientCodeSettings(client, {
       client_code_prefix: "cus",
       client_code_web_tag: "w1",
+      invoice_number_prefix: "fak",
+      mou_number_prefix: "MOU",
+      batch_code_prefix: "spk",
     });
+    // Awalan nomor dokumen lain ikut tersimpan dengan aturan yang sama (D-43).
+    expect(await domain.getClientCodeSettings(client)).toMatchObject({
+      invoice_number_prefix: "FAK",
+      mou_number_prefix: "MOU",
+      batch_code_prefix: "SPK",
+    });
+    await expect(
+      domain.saveClientCodeSettings(client, {
+        client_code_prefix: "CUS",
+        client_code_web_tag: "W1",
+        invoice_number_prefix: "INV",
+        mou_number_prefix: "MOU",
+        batch_code_prefix: "B4T",
+      }),
+    ).rejects.toThrow("The work order prefix must be 2-5 letters.");
     const second = await domain.registerClient(
       client,
       draft({ phone: "081299990000" }),
@@ -232,7 +250,7 @@ describe("klien, jalur Web", () => {
       domain.saveMasterOption(
         client,
         {
-          kind: "SUPPLIER",
+          kind: "WAREHOUSE",
           code: "X",
           label: "X",
         },
@@ -249,6 +267,9 @@ describe("klien, jalur Web", () => {
       domain.saveClientCodeSettings(client, {
         client_code_prefix: "KLN",
         client_code_web_tag: "01",
+        invoice_number_prefix: "INV",
+        mou_number_prefix: "MOU",
+        batch_code_prefix: "BAT",
       }),
     ).rejects.toThrow("That Web tag is already used by a device.");
   });

@@ -10,6 +10,10 @@ pub const DEFAULT_CLIENT_CODE_PREFIX: &str = "KLN";
 pub const DEFAULT_CLIENT_CODE_WEB_TAG: &str = "WB";
 pub const CLIENT_CODE_PREFIX_SETTING: &str = "client_code_prefix";
 pub const CLIENT_CODE_WEB_TAG_SETTING: &str = "client_code_web_tag";
+/// Awalan nomor dokumen lain (D-43); cermin `*_PREFIX_SETTING` di `client.ts`.
+pub const INVOICE_PREFIX_SETTING: &str = "invoice_number_prefix";
+pub const MOU_PREFIX_SETTING: &str = "mou_number_prefix";
+pub const BATCH_PREFIX_SETTING: &str = "batch_code_prefix";
 
 pub const CLIENT_LIFECYCLE_STATUSES: &[&str] = &["LEAD", "FIRST_ORDER_ACTIVE", "EXISTING_CLIENT"];
 pub const MASTER_OPTION_KINDS: &[&str] = &[
@@ -21,6 +25,8 @@ pub const MASTER_OPTION_KINDS: &[&str] = &[
     "REGISTRATION_CATEGORY",
     // Alasan RnD menolak tiket (v2.1, PRD E-23), wajib dipilih saat menolak.
     "RND_REJECT_REASON",
+    // Supplier bahan dan kemasan untuk PO PPIC (v3.1, PRD FR-12).
+    "SUPPLIER",
 ];
 
 pub const CLIENT_NAME_MIN: usize = 2;

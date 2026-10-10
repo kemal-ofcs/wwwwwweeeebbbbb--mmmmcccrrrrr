@@ -414,6 +414,7 @@ export function BusinessSettingsCard({ canManage }: { canManage: boolean }) {
                 ["telegram_chat_id_rnd", "RnD group"],
                 ["telegram_chat_id_finance", "Finance group"],
                 ["telegram_chat_id_design", "Design group"],
+                ["telegram_chat_id_production", "Production group"],
               ] as const
             ).map(([key, label]) => (
               <label key={key} className="app-label grid gap-1.5">

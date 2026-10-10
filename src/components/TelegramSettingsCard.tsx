@@ -48,6 +48,7 @@ const DIVISION_LABEL: Record<NotificationDivision, string> = {
   RND: "RnD",
   FINANCE: "Finance",
   DESIGN: "Design",
+  PRODUCTION: "Production",
 };
 
 function message(error: unknown, fallback: string) {

@@ -29,6 +29,8 @@ const DOMAIN_LABEL: Record<string, string> = {
   design: "Design",
   mou: "MoU",
   legal: "Legal document",
+  batch: "Work order",
+  "purchase-order": "Purchase order",
   invoice: "Invoice",
   fund: "Incoming payment",
   "finance-option": "Tax or discount",

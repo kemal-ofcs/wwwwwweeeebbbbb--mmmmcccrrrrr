@@ -84,6 +84,34 @@ export const SAMPLE_ACTION_PAST: Record<string, string> = {
   LEGAL_BPOM: "recorded the BPOM registration",
   LEGAL_HALAL: "recorded the halal certification",
   LEGAL_HKI: "recorded the trademark (HKI) registration",
+  // Work order produksi (v3.1) di linimasa yang sama.
+  BATCH_CREATE: "created the work order",
+  PO_ADD: "recorded a purchase order",
+  PO_ARRIVED: "recorded a purchase order as arrived",
+  PO_LATE: "reported a late purchase order",
+  PO_CANCEL: "cancelled a purchase order",
+  MATERIALS_READY: "confirmed the materials are ready",
+  BATCH_SCHEDULE: "scheduled the production",
+};
+
+/** Bahan work order dan PO (v3.1, PRD F-23). */
+export const MATERIAL_STATUS_LABEL: Record<string, string> = {
+  UNCHECKED: "Materials not checked",
+  WAITING_PO: "Waiting for purchase orders",
+  READY: "Materials ready",
+};
+
+export const MATERIAL_STATUS_TONE: Record<string, StatusTone> = {
+  UNCHECKED: "neutral",
+  WAITING_PO: "warning",
+  READY: "success",
+};
+
+export const PO_STATUS_LABEL: Record<string, string> = {
+  OPEN: "Open",
+  ARRIVED: "Arrived",
+  CANCELLED: "Cancelled",
+  SCHEDULED: "Scheduled",
 };
 
 /** Dokumen legal (v2.6, PRD F-21). */
@@ -242,7 +270,17 @@ export function nextSampleStep(row: SampleRequestRecord): string | null {
     return "CS: record the client's answer on the MoU.";
   if (row.dp_paid !== 1)
     return "Finance: create the Down payment invoice and allocate the client's payment to it.";
-  if ((row.legal_open ?? 0) > 0)
-    return "Legal and RnD: record the legal documents.";
-  return "All documents are done. Production planning comes next.";
+  // PPIC berjalan paralel dengan dokumen legal setelah DP lunas (OQ-22, D-43).
+  const legal =
+    (row.legal_open ?? 0) > 0
+      ? " Legal and RnD: record the legal documents."
+      : "";
+  if (!row.batch_material) return `PPIC: create the work order.${legal}`;
+  if (row.batch_material !== "READY")
+    return `PPIC: check the materials and record purchase orders.${legal}`;
+  if (!row.batch_packing_on)
+    return `Production SPV: schedule the production.${legal}`;
+  if (legal)
+    return "Legal and RnD: record the legal documents before production starts.";
+  return `Production scheduled: packing on ${row.batch_packing_on}.`;
 }

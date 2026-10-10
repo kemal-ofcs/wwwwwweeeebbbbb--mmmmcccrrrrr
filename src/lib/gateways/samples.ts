@@ -2,6 +2,11 @@
 
 import { requestWebApi } from "@/lib/client/api-client";
 import type { InvoiceRecord } from "@/lib/gateways/finance";
+import type {
+  BatchRecord,
+  PurchaseOrderRecord,
+  SupplierOption,
+} from "@/lib/gateways/production";
 import { isDesktopRuntime } from "@/lib/runtime/app-runtime";
 import { invokeDesktop } from "@/lib/runtime/desktop-commands";
 import type { DesignAction, DesignStatus } from "@/lib/validations/design";
@@ -96,6 +101,10 @@ export interface SampleRequestRecord {
    * null = belum pernah ada MoU.
    */
   mou_closed: number | null;
+  /** Status bahan work order (v3.1); null = belum ada work order. */
+  batch_material: string | null;
+  /** Tanggal packing terjadwal; '' = belum dijadwalkan SPV. */
+  batch_packing_on: string | null;
 }
 
 /**
@@ -203,6 +212,11 @@ export interface SampleDetail {
   approval_link_enabled: boolean;
   /** Dokumen legal semua MoU tiket ini (v2.6). */
   legal_documents: LegalDocumentRecord[];
+  /** Work order tiket ini (v3.1); null = PPIC belum membuatnya. */
+  batch: BatchRecord | null;
+  purchase_orders: PurchaseOrderRecord[];
+  /** Pilihan supplier untuk form PO. */
+  suppliers: SupplierOption[];
 }
 
 /** Satu baris `LEGAL_LIST_SQL` (v2.6, PRD F-21). */

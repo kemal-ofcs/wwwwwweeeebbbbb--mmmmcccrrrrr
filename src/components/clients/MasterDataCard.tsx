@@ -35,6 +35,7 @@ const KIND_TITLE: Record<MasterOptionKind, string> = {
   FORMULATION_TYPE: "Formulation types",
   REGISTRATION_CATEGORY: "Registration categories",
   RND_REJECT_REASON: "RnD rejection reasons",
+  SUPPLIER: "Suppliers",
 };
 
 const KIND_HINT: Record<MasterOptionKind, string> = {
@@ -46,6 +47,8 @@ const KIND_HINT: Record<MasterOptionKind, string> = {
     "The regulatory route, e.g. NA · Cosmetic, TR · Traditional, MD · Food.",
   RND_REJECT_REASON:
     "Why RnD turns a request down, e.g. CAP · Factory machine capacity.",
+  SUPPLIER:
+    "Who PPIC orders materials and packaging from, e.g. KIM · PT Kimia Jaya.",
 };
 
 function emptyDraft(kind: MasterOptionKind): MasterOptionDraft {

@@ -510,6 +510,40 @@ pub fn initialize(path: &Path) -> Result<(), String> {
       );
       CREATE INDEX IF NOT EXISTS idx_local_imported_records_client
         ON imported_records(client_id);
+      -- Work order produksi dan PO bahannya (v3.1, PRD F-23/F-24), cache cloud.
+      CREATE TABLE IF NOT EXISTS production_batches (
+        id TEXT PRIMARY KEY,
+        batch_code TEXT NOT NULL,
+        mou_id TEXT NOT NULL,
+        sample_request_id TEXT NOT NULL,
+        client_id TEXT NOT NULL,
+        material_status TEXT NOT NULL DEFAULT 'UNCHECKED',
+        sched_weighing_on TEXT NOT NULL DEFAULT '',
+        sched_mixing_on TEXT NOT NULL DEFAULT '',
+        sched_filling_on TEXT NOT NULL DEFAULT '',
+        sched_packing_on TEXT NOT NULL DEFAULT '',
+        needs_reschedule INTEGER NOT NULL DEFAULT 0,
+        schedule_updated_at TEXT NOT NULL DEFAULT '',
+        created_by INTEGER,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_local_production_batches_mou
+        ON production_batches(mou_id);
+      CREATE TABLE IF NOT EXISTS batch_purchase_orders (
+        id TEXT PRIMARY KEY,
+        batch_id TEXT NOT NULL,
+        po_number TEXT NOT NULL,
+        supplier_option_id TEXT NOT NULL,
+        eta_on TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'OPEN',
+        late_reason TEXT NOT NULL DEFAULT '',
+        created_by INTEGER,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_local_batch_purchase_orders_batch
+        ON batch_purchase_orders(batch_id);
       -- Foto: data ringkas ditarik dari cloud; `data_base64` terisi untuk foto
       -- buatan perangkat ini dan foto yang pernah dibuka ('' = belum diambil).
       CREATE TABLE IF NOT EXISTS media_asset (
@@ -661,6 +695,8 @@ const CLOUD_MIRRORED_TABLES: &[&str] = &[
     "production_mou",
     "legal_documents",
     "imported_records",
+    "production_batches",
+    "batch_purchase_orders",
     "media_asset",
 ];
 
@@ -985,6 +1021,8 @@ mod tests {
             "production_mou",
             "legal_documents",
             "imported_records",
+            "production_batches",
+            "batch_purchase_orders",
             "media_asset",
             "setting_gex_system",
             "desktop_sync_outbox",
