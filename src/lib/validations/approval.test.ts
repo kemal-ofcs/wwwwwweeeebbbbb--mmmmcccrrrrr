@@ -18,7 +18,13 @@ test("izin dan jawaban klien (izin_dan_jawaban_klien)", () => {
   expect(approvalPermission("SAMPLE")).toBe("samples.manage");
   expect(approvalPermission("DUMMY")).toBe("samples.manage");
   expect(approvalPermission("MOU")).toBe("mou.manage");
-  for (const action of ["CLIENT_ACC", "DUMMY_REVISE", "MOU_REJECT"]) {
+  expect(approvalPermission("RECEIPT")).toBe("samples.manage");
+  for (const action of [
+    "CLIENT_ACC",
+    "DUMMY_REVISE",
+    "MOU_REJECT",
+    "SHIP_COMPLAINT",
+  ]) {
     expect(isClientDecisionAction(action)).toBe(true);
   }
   for (const action of ["SAMPLE_SENT", "PRINT_DUMMY", "SEND_MOU", "CANCEL"]) {
@@ -40,6 +46,9 @@ test("pilihan jawaban per jenis", () => {
   expect(approvalStepAction("DUMMY", "REVISE")).toBe("DUMMY_REVISE");
   expect(approvalStepAction("DUMMY", "REJECT")).toBeNull();
   expect(approvalStepAction("MOU", "APPROVE")).toBe("MOU_ACCEPT");
+  expect(approvalStepAction("RECEIPT", "APPROVE")).toBe("SHIP_RECEIVED");
+  expect(approvalStepAction("RECEIPT", "REVISE")).toBe("SHIP_COMPLAINT");
+  expect(approvalStepAction("RECEIPT", "REJECT")).toBeNull();
 });
 
 describe("jawaban dari halaman klien", () => {

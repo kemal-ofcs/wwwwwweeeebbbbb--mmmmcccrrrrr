@@ -202,10 +202,16 @@ describe("role divisi", () => {
     ]);
     expect(byRole.crm).toEqual([
       "clients.view",
+      // Serah terima dan retensi (v3.6a, D-49).
+      "crm.manage",
       "dashboard.view",
       "home.view",
+      "leads.manage",
       "leads.view",
+      "mou.manage",
+      "notifications_crm.view",
       "production.view",
+      "samples.manage",
       "samples.view",
       "sync.view",
     ]);
@@ -214,6 +220,7 @@ describe("role divisi", () => {
       "home.view",
       "notifications_production.view",
       "production.view",
+      "qc.manage",
       "sync.view",
     ]);
   });

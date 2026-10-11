@@ -4,6 +4,7 @@ import type { Client } from "@libsql/client";
 import type { OperatorUser } from "@/lib/auth/operator-user";
 import { AuthorizationError } from "@/lib/auth/permission-assertion";
 import { type AuditActor, writeAudit } from "@/lib/server/audit";
+import { assertCrmOwner } from "@/lib/server/crm";
 import { ApiRequestError } from "@/lib/server/http/api-response";
 import {
   INTERACTION_NOTES_MAX,
@@ -136,7 +137,13 @@ export async function recordLeadInteraction(
     const row = lead.rows[0];
     if (!row) throw new ApiRequestError("Lead not found.", 404);
     const pic = row.pic_cs_id == null ? null : Number(row.pic_cs_id);
-    if (pic !== operator.id && !operatorCan(operator, "leads.reassign")) {
+    // Klien CRM (v3.6a): hanya pemegang `crm.manage`, tanpa syarat PIC CS.
+    const managed = await assertCrmOwner(transaction, leadId, operator);
+    if (
+      pic !== operator.id &&
+      !operatorCan(operator, "leads.reassign") &&
+      !managed
+    ) {
       throw new AuthorizationError(
         "Only the lead's CS can record on it. Ask an Admin to reassign the lead.",
         403,

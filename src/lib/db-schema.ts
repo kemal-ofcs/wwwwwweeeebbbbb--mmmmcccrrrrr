@@ -14,7 +14,7 @@ import { runDatabaseMigrations } from "./db-migrations";
  * Rust DAN migrasi `ALTER TABLE` di `db-migrations.ts`, supaya klien mana pun
  * bisa menyembuhkan database buatan klien lain.
  */
-export const CURRENT_SCHEMA_VERSION = 20;
+export const CURRENT_SCHEMA_VERSION = 24;
 
 /** Tabel yang wajib ada sebelum database dianggap siap dipakai. */
 export const REQUIRED_TABLES = [
@@ -81,6 +81,8 @@ export const REQUIRED_TABLES = [
   "batch_purchase_orders",
   // Pengiriman dan Surat Jalan (v3.4, PRD F-27), ikut sinkronisasi.
   "shipments",
+  // Komplain penerimaan dan keputusan QC (v3.5, PRD F-28), ikut sinkronisasi.
+  "qc_claims",
   // Foto (PRD F-07). Isi gambar tidak pernah ikut snapshot perangkat.
   "media_asset",
   // Notifikasi divisi (PRD FR-08). Ketiganya cloud-only.
@@ -234,6 +236,24 @@ export const PRODUCTION_PERMISSION_SEED_SQL = [
 export const SHIPPING_PERMISSION_SEED_SQL = [
   "INSERT OR IGNORE INTO role_permission (role_id, permission_key, is_allowed, updated_at, updated_by) SELECT r.id, p.permission_key, 1, datetime('now'), 'system' FROM app_role r JOIN app_permission p ON p.permission_key = 'shipping.manage' WHERE r.role_key IN ('logistics', 'production_spv') AND NOT EXISTS (SELECT 1 FROM setting_gex_system WHERE key = 'shipping_permissions_seeded');",
   "INSERT OR IGNORE INTO setting_gex_system (key, value) VALUES ('shipping_permissions_seeded', '1');",
+];
+
+/**
+ * Izin CRM (v3.6a, PRD F-29) untuk role CRM, sekali saja. WAJIB identik
+ * dengan seed yang sama di `turso.rs`.
+ */
+export const CRM_PERMISSION_SEED_SQL = [
+  "INSERT OR IGNORE INTO role_permission (role_id, permission_key, is_allowed, updated_at, updated_by) SELECT r.id, p.permission_key, 1, datetime('now'), 'system' FROM app_role r JOIN app_permission p ON p.permission_key IN ('crm.manage', 'leads.manage', 'notifications_crm.view', 'samples.manage', 'mou.manage', 'production.view') WHERE r.role_key = 'crm' AND NOT EXISTS (SELECT 1 FROM setting_gex_system WHERE key = 'crm_permissions_seeded');",
+  "INSERT OR IGNORE INTO setting_gex_system (key, value) VALUES ('crm_permissions_seeded', '1');",
+];
+
+/**
+ * Izin QC (v3.5, PRD F-28) untuk role QC, sekali saja. WAJIB identik dengan
+ * seed yang sama di `turso.rs`.
+ */
+export const QC_PERMISSION_SEED_SQL = [
+  "INSERT OR IGNORE INTO role_permission (role_id, permission_key, is_allowed, updated_at, updated_by) SELECT r.id, p.permission_key, 1, datetime('now'), 'system' FROM app_role r JOIN app_permission p ON p.permission_key = 'qc.manage' WHERE r.role_key = 'qc' AND NOT EXISTS (SELECT 1 FROM setting_gex_system WHERE key = 'qc_permissions_seeded');",
+  "INSERT OR IGNORE INTO setting_gex_system (key, value) VALUES ('qc_permissions_seeded', '1');",
 ];
 
 export async function initDatabaseSchema(client: Client) {
@@ -546,7 +566,8 @@ export async function initDatabaseSchema(client: Client) {
       updated_at TEXT NOT NULL,
       rnd_reject_reason_option_id TEXT NOT NULL DEFAULT '',
       revision_fee_idr INTEGER,
-      is_test_requested INTEGER NOT NULL DEFAULT 0
+      is_test_requested INTEGER NOT NULL DEFAULT 0,
+      repeat_of_id TEXT NOT NULL DEFAULT ''
       );`,
     // Satu baris per keputusan klien atas satu iterasi sampel (ACC/REVISE/REJECT).
     `CREATE TABLE IF NOT EXISTS sample_feedbacks (
@@ -735,7 +756,8 @@ export async function initDatabaseSchema(client: Client) {
       notes TEXT NOT NULL DEFAULT '',
       source_file TEXT NOT NULL DEFAULT '',
       imported_by INTEGER,
-      created_at TEXT NOT NULL
+      created_at TEXT NOT NULL,
+      quantity INTEGER
       );`,
     // Work order produksi (v3.1, PRD F-23/F-24): satu per MoU, tanpa UNIQUE
     // (`BATCH_ACTIVE_SQL`); jadwal dijaga `schedule_updated_at`.
@@ -796,6 +818,29 @@ export async function initDatabaseSchema(client: Client) {
       cancel_reason TEXT NOT NULL DEFAULT '',
       shipped_at TEXT NOT NULL DEFAULT '',
       forwarded_at TEXT NOT NULL DEFAULT '',
+      received_at TEXT NOT NULL DEFAULT '',
+      created_by INTEGER,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+      );`,
+    // Komplain penerimaan dan keputusan QC (v3.5, PRD F-28): satu klaim per
+    // pengiriman, diputuskan sekali (`CLAIM_DECIDE_SQL`).
+    `CREATE TABLE IF NOT EXISTS qc_claims (
+      id TEXT PRIMARY KEY,
+      shipment_id TEXT NOT NULL,
+      batch_id TEXT NOT NULL,
+      sample_request_id TEXT NOT NULL,
+      client_id TEXT NOT NULL,
+      complaint_notes TEXT NOT NULL,
+      affected_units INTEGER NOT NULL DEFAULT 0,
+      status TEXT NOT NULL DEFAULT 'OPEN',
+      fault_type TEXT NOT NULL DEFAULT '',
+      decision TEXT NOT NULL DEFAULT '',
+      remedy TEXT NOT NULL DEFAULT '',
+      remedy_notes TEXT NOT NULL DEFAULT '',
+      findings TEXT NOT NULL DEFAULT '',
+      decided_by INTEGER,
+      decided_at TEXT NOT NULL DEFAULT '',
       created_by INTEGER,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
@@ -896,6 +941,7 @@ export async function initDatabaseSchema(client: Client) {
     `CREATE INDEX IF NOT EXISTS idx_production_batches_mou ON production_batches(mou_id);`,
     `CREATE INDEX IF NOT EXISTS idx_batch_purchase_orders_batch ON batch_purchase_orders(batch_id);`,
     `CREATE INDEX IF NOT EXISTS idx_shipments_batch ON shipments(batch_id);`,
+    `CREATE INDEX IF NOT EXISTS idx_qc_claims_shipment ON qc_claims(shipment_id);`,
     `CREATE INDEX IF NOT EXISTS idx_approval_tokens_entity ON approval_tokens(entity_type, entity_id);`,
     `CREATE INDEX IF NOT EXISTS idx_media_asset_owner ON media_asset(owner_type, owner_id);`,
     `CREATE INDEX IF NOT EXISTS idx_notification_outbox_due ON notification_outbox(status, next_attempt_at);`,
@@ -933,6 +979,7 @@ export async function initDatabaseSchema(client: Client) {
       ('legal.manage', 'Record legal documents', 'Legal', 'Record BPOM, halal, and trademark (HKI) filings and certificates.', 1, 67),
       ('production.view', 'View production', 'Production', 'See work orders, materials, purchase orders, and production schedules.', 1, 68),
       ('ppic.manage', 'Plan production materials', 'Production', 'Create work orders, record purchase orders, and confirm materials are ready.', 1, 69),
+      ('qc.manage', 'Decide delivery complaints', 'Production', 'Investigate client complaints about delivered goods and decide whose fault it is.', 1, 69),
       ('shipping.manage', 'Ship orders', 'Production', 'Issue delivery notes, mark orders as shipped, and record tracking numbers.', 1, 69),
       ('production.manage', 'Schedule production', 'Production', 'Set and change the production schedule of each work order.', 1, 69),
       ('design.override_dummy_limit', 'Override the dummy rejection limit', 'Design', 'Print a dummy again after the client has rejected it as many times as the limit allows.', 1, 66),
@@ -954,6 +1001,8 @@ export async function initDatabaseSchema(client: Client) {
       ('notifications_rnd.view', 'RnD notifications', 'Notifications', 'See sample requests waiting for RnD review in the notification bell.', 1, 114),
       ('notifications_finance.view', 'Finance notifications', 'Notifications', 'See sample fees and revision fees waiting for Finance in the notification bell.', 1, 116),
       ('notifications_design.view', 'Design notifications', 'Notifications', 'See new design briefs and dummy revisions in the notification bell.', 1, 118),
+      ('notifications_crm.view', 'CRM notifications', 'Notifications', 'See clients handed over to CRM and clients due for a repeat order in the notification bell.', 1, 119),
+      ('crm.manage', 'Manage existing clients', 'Clients', 'Take over clients after their first order, record contact with them, and start their repeat orders.', 1, 57),
       ('notifications_production.view', 'Production notifications', 'Notifications', 'See new work orders and late purchase orders in the notification bell.', 1, 119),
       ('sync.view', 'View sync status', 'Sync', 'View the sync indicator and queue.', 1, 120),
       ('sync.retry', 'Retry sync and resolve conflicts', 'Sync', 'Trigger a manual sync and resolve conflicts.', 1, 130),
@@ -1010,6 +1059,10 @@ export async function initDatabaseSchema(client: Client) {
     ...PRODUCTION_PERMISSION_SEED_SQL,
     // Izin pengiriman (v3.4), sekali saja.
     ...SHIPPING_PERMISSION_SEED_SQL,
+    // Izin QC (v3.5), sekali saja.
+    ...QC_PERMISSION_SEED_SQL,
+    // Izin CRM (v3.6a), sekali saja.
+    ...CRM_PERMISSION_SEED_SQL,
 
     // Angka 1 di sini disengaja dan TIDAK boleh diikatkan ke
     // `CURRENT_SCHEMA_VERSION`: baris ini menandai fondasi versi 1, sedangkan

@@ -5,6 +5,7 @@ import type { InvoiceRecord } from "@/lib/gateways/finance";
 import type {
   BatchRecord,
   PurchaseOrderRecord,
+  QcClaimRecord,
   ShipmentRecord,
   SupplierOption,
 } from "@/lib/gateways/production";
@@ -118,6 +119,10 @@ export interface SampleRequestRecord {
   settlement_cleared: number | null;
   /** Status pengiriman aktif terakhir (v3.4); null = belum ada. */
   shipment_status: string | null;
+  /** Tiket asal bila ini repeat order (v3.6b); '' = tiket biasa. */
+  repeat_of_id: string;
+  /** Klaim QC terakhir (v3.5): OPEN/DECIDED, null bila tanpa komplain. */
+  claim_status: string | null;
 }
 
 /**
@@ -234,6 +239,8 @@ export interface SampleDetail {
   shipments: ShipmentRecord[];
   storage_sop_text: string;
   carriers: SupplierOption[];
+  /** Komplain penerimaan tiket ini dan keputusan QC (v3.5). */
+  claims: QcClaimRecord[];
 }
 
 /** Satu baris `LEGAL_LIST_SQL` (v2.6, PRD F-21). */

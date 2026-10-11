@@ -11,6 +11,7 @@ import {
   formatClientCode,
   nextClientSequence,
 } from "@/lib/validations/client";
+import { LEGAL_REPEAT_COPY_SQL } from "@/lib/validations/crm";
 import {
   applyMouAction,
   MOU_ACTIVE_SQL,
@@ -212,6 +213,11 @@ export async function createMou(
         actor.id,
         stamp,
       ],
+    });
+    // Repeat order (v3.6b): dokumen legal final tiket asal ikut MoU ini.
+    await transaction.execute({
+      sql: LEGAL_REPEAT_COPY_SQL,
+      args: [id, sampleId, stamp],
     });
     await writeAudit(transaction, actor, "mou.create", "sample", sampleId, {
       client_code: String(sample.client_code),

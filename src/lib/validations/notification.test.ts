@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { CRM_CLIENT_LIST_SQL } from "./crm";
 import * as rules from "./notification";
 import { BATCH_LIST_SQL } from "./production";
 
@@ -9,6 +10,7 @@ import { BATCH_LIST_SQL } from "./production";
 
 const {
   coldDigestWindow,
+  reorderDigestRange,
   companyClock,
   formatCompanyTime,
   isTelegramBotToken,
@@ -61,6 +63,52 @@ describe("notifikasi divisi", () => {
       date: "2026-10-03",
       hour: 7,
     });
+  });
+
+  test("rentang ringkasan repeat order (rentang_ringkasan_repeat_order)", () => {
+    const range = (last: string | null) =>
+      reorderDigestRange("2026-10-10", last);
+    expect(range(null)).toEqual(["2026-10-09", "2026-10-10"]);
+    expect(range("2026-10-07")).toEqual(["2026-10-07", "2026-10-10"]);
+    expect(range("2026-09-01")).toEqual(["2026-10-03", "2026-10-10"]);
+    expect(range("2026-10-10")).toBeNull();
+  });
+
+  test("teks pesan CRM (teks_pesan_crm)", () => {
+    const at = "2026-10-03 07:05:00";
+    const crm = {
+      client_name: "Aura Beauty",
+      client_code: "KLN-20261003-WB01",
+      crm_name: "Rendi",
+      from: "Sari",
+      notes: "Wants 5000 pcs",
+    };
+    expect(renderNotification("CLIENT_HANDOVER", crm, at, "Asia/Jakarta")).toBe(
+      "New client for CRM: Aura Beauty (KLN-20261003-WB01)\nCRM PIC: Rendi\nFirst order completed 2026-10-03 14:05 WIB",
+    );
+    expect(renderNotification("CRM_FORWARD", crm, at, "Asia/Jakarta")).toBe(
+      "Client asked CS for a new order: Aura Beauty (KLN-20261003-WB01)\nCRM PIC: Rendi, forwarded by Sari\nNotes: Wants 5000 pcs\nForwarded 2026-10-03 14:05 WIB",
+    );
+    const digest = {
+      date: "2026-12-01",
+      clients: [
+        {
+          client_name: "Aura Beauty",
+          client_code: "KLN-20261003-WB01",
+          crm_name: "",
+          reorder_on: "2026-12-01",
+        },
+      ],
+    };
+    expect(renderNotification("REORDER_DUE", digest, at, "Asia/Jakarta")).toBe(
+      "Clients due for a repeat order (2026-12-01): 1\n- Aura Beauty (KLN-20261003-WB01), PIC -, due 2026-12-01",
+    );
+  });
+
+  test("ringkasan repeat order memakai CRM_CLIENT_LIST_SQL yang sama", () => {
+    expect(rules.REORDER_DUE_CLIENTS_SQL).toContain(
+      `FROM (${CRM_CLIENT_LIST_SQL}) z WHERE`,
+    );
   });
 
   test("jendela ringkasan Cold", () => {
@@ -337,6 +385,31 @@ describe("notifikasi divisi", () => {
       renderNotification("BATCH_SCHEDULED", batch, at, "Asia/Jakarta"),
     ).toBe(
       "Production scheduled, packing on 2026-11-05: Aura Glow for Aura Beauty (KLN-20261003-WB01)\nWork order BAT-20261010-A101: -\nSaved 2026-10-03 14:05 WIB",
+    );
+    const claim = {
+      ...shipped,
+      complaint_notes: "5 bottles leaked",
+      fault_type: "INTERNAL",
+      remedy: "REPLACE",
+      findings: "Seal not tight",
+    };
+    expect(
+      renderNotification("DELIVERY_COMPLAINT", claim, at, "Asia/Jakarta"),
+    ).toBe(
+      "Delivery complaint, QC to investigate: Aura Glow for Aura Beauty (KLN-20261003-WB01)\nDelivery note SJ-20261120-A101: 5 bottles leaked\nReported 2026-10-03 14:05 WIB",
+    );
+    expect(renderNotification("CLAIM_DECIDED", claim, at, "Asia/Jakarta")).toBe(
+      "QC decided the complaint: Aura Glow for Aura Beauty (KLN-20261003-WB01)\nDelivery note SJ-20261120-A101: our fault, return approved (replace goods)\nFindings: Seal not tight\nDecided 2026-10-03 14:05 WIB",
+    );
+    expect(
+      renderNotification(
+        "CLAIM_DECIDED",
+        { ...claim, fault_type: "RECIPIENT" },
+        at,
+        "Asia/Jakarta",
+      ),
+    ).toBe(
+      "QC decided the complaint: Aura Glow for Aura Beauty (KLN-20261003-WB01)\nDelivery note SJ-20261120-A101: not our fault, return rejected\nFindings: Seal not tight\nDecided 2026-10-03 14:05 WIB",
     );
   });
 

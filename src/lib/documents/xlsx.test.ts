@@ -1,6 +1,12 @@
 import { expect, test } from "bun:test";
 import { deflateRawSync } from "node:zlib";
-import { buildXlsx, excelDay, readXlsx, serialToText } from "./xlsx";
+import {
+  buildXlsx,
+  buildXlsxWorkbook,
+  excelDay,
+  readXlsx,
+  serialToText,
+} from "./xlsx";
 
 test("ekspor dibaca kembali apa adanya", async () => {
   const bytes = buildXlsx([
@@ -78,4 +84,27 @@ test("bukan .xlsx ditolak dengan pesan yang jelas", async () => {
   await expect(readXlsx(new TextEncoder().encode("a,b\n1,2"))).rejects.toThrow(
     "The file is not a valid .xlsx file.",
   );
+});
+
+test("workbook banyak sheet: nama tab dibersihkan dan unik, sheet pertama terbaca", async () => {
+  const bytes = buildXlsxWorkbook([
+    {
+      name: "Summary",
+      rows: [
+        ["Metric", "Value"],
+        ["Leads", 3],
+      ],
+    },
+    { name: "Summary", rows: [["A"], ["b"]] },
+    { name: "Invoices/Funds: [2026]?", rows: [["Total"], [1500]] },
+  ]);
+  const files = new TextDecoder().decode(bytes);
+  expect(files).toContain('<sheet name="Summary" sheetId="1"');
+  expect(files).toContain('<sheet name="Summary 2" sheetId="2"');
+  expect(files).toContain('<sheet name="Invoices Funds   2026" sheetId="3"');
+  expect(files).toContain("xl/worksheets/sheet3.xml");
+  expect(await readXlsx(bytes)).toEqual([
+    ["Metric", "Value"],
+    ["Leads", "3"],
+  ]);
 });

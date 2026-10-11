@@ -3,6 +3,7 @@ import "server-only";
 import type { Client, Row, Transaction } from "@libsql/client";
 import { type AuditActor, writeAudit } from "@/lib/server/audit";
 import { loadBusinessSettings } from "@/lib/server/business-settings";
+import { assertCrmOwner } from "@/lib/server/crm";
 import { ApiRequestError } from "@/lib/server/http/api-response";
 import {
   clientEvidence,
@@ -330,6 +331,7 @@ export async function createSampleRequest(
     });
     const row = owner.rows[0];
     if (!row) throw new ApiRequestError("Client not found.", 404);
+    await assertCrmOwner(transaction, clientId, actor);
     const settings = await loadBusinessSettings(transaction);
     const draft = checked(input, settings.sample_fee_mode);
     await checkSampleReferences(transaction, draft, null);

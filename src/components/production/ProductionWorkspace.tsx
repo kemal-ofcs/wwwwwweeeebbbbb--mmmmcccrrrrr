@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   MATERIAL_STATUS_LABEL,
@@ -9,6 +10,8 @@ import { FeedbackBanner } from "@/components/ui/FeedbackBanner";
 import { Modal } from "@/components/ui/Modal";
 import { PageHeader } from "@/components/ui/PageHeader";
 import { StatusBadge } from "@/components/ui/StatusBadge";
+import { hasPermission } from "@/lib/auth/access";
+import { useAuth } from "@/lib/context/AuthContext";
 import {
   type BatchRecord,
   getProductionOverview,
@@ -16,6 +19,7 @@ import {
 } from "@/lib/gateways/production";
 import { SYNC_COMPLETED_EVENT } from "@/lib/gateways/sync-status";
 import {
+  orderCompleted,
   PRODUCTION_STAGES,
   STAGE_LABEL,
   shipGateError,
@@ -40,11 +44,14 @@ type View =
   | "cleared"
   | "shipping"
   | "forwarded"
+  | "complaints"
+  | "delivered"
   | "all";
 
 /**
  * Tab sebuah work order; `ready` hanya berisi MoU tanpa work order.
- * `shipment` = status pengiriman aktif (v3.4), null bila belum ada.
+ * `shipment` = status pengiriman aktif (v3.4), null bila belum ada;
+ * `COMPLAINT_OPEN`/`COMPLETED` = komplain menunggu QC atau order selesai (v3.5).
  */
 function inView(batch: BatchRecord, view: View, shipment: string | null) {
   const waiting = batch.stages_done === 0;
@@ -77,6 +84,10 @@ function inView(batch: BatchRecord, view: View, shipment: string | null) {
       return shipment === "PREPARED" || shipment === "SHIPPED";
     case "forwarded":
       return shipment === "FORWARDED";
+    case "complaints":
+      return shipment === "COMPLAINT_OPEN";
+    case "delivered":
+      return shipment === "COMPLETED";
     case "cleared":
       return (
         shipment === null &&
@@ -101,9 +112,16 @@ const EMPTY: ProductionOverview = {
   shipments: [],
   storage_sop_text: "",
   carriers: [],
+  claims: [],
+  approval_link_enabled: false,
 };
 
 export function ProductionWorkspace() {
+  const { user } = useAuth();
+  // Riwayat batch/pengiriman dari sheet lama (v3.7, PRD F-32).
+  const canImport =
+    hasPermission(user, "production.manage") ||
+    hasPermission(user, "shipping.manage");
   const [data, setData] = useState<ProductionOverview>(EMPTY);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -132,15 +150,26 @@ export function ProductionWorkspace() {
     return () => window.removeEventListener(SYNC_COMPLETED_EVENT, onSync);
   }, [refresh]);
 
-  // Status pengiriman aktif per work order (v3.4).
+  // Status pengiriman aktif per work order (v3.4), dan komplain/selesai (v3.5).
   const shipmentOf = useMemo(() => {
+    const claims = new Map(
+      data.claims.map((claim) => [claim.shipment_id, claim.status]),
+    );
     const map = new Map<string, string>();
     for (const shipment of data.shipments) {
-      if (shipment.status !== "CANCELLED")
-        map.set(shipment.batch_id, shipment.status);
+      if (shipment.status === "CANCELLED") continue;
+      const claim = claims.get(shipment.id) ?? null;
+      map.set(
+        shipment.batch_id,
+        orderCompleted(shipment.status, claim)
+          ? "COMPLETED"
+          : claim === "OPEN"
+            ? "COMPLAINT_OPEN"
+            : shipment.status,
+      );
     }
     return (batchId: string) => map.get(batchId) ?? null;
-  }, [data.shipments]);
+  }, [data.shipments, data.claims]);
   const counts = useMemo(() => {
     const count = (view: View) =>
       data.batches.filter((batch) => inView(batch, view, shipmentOf(batch.id)))
@@ -155,6 +184,8 @@ export function ProductionWorkspace() {
       cleared: count("cleared"),
       shipping: count("shipping"),
       forwarded: count("forwarded"),
+      complaints: count("complaints"),
+      delivered: count("delivered"),
       all: data.batches.length,
     };
   }, [data, shipmentOf]);
@@ -191,6 +222,13 @@ export function ProductionWorkspace() {
       <PageHeader
         title="Production"
         description="Work orders from accepted MoUs: materials, purchase orders, and the production schedule."
+        actions={
+          canImport ? (
+            <Link href="/import" className="app-btn app-btn-secondary">
+              Import Excel
+            </Link>
+          ) : null
+        }
       />
 
       {error ? (
@@ -216,6 +254,8 @@ export function ProductionWorkspace() {
               ["cleared", "Cleared to ship"],
               ["shipping", "Shipping"],
               ["forwarded", "Sent to client"],
+              ["complaints", "Complaints"],
+              ["delivered", "Delivered"],
               ["all", "All"],
             ] as const
           ).map(([value, label]) => (
@@ -369,6 +409,8 @@ export function ProductionWorkspace() {
             shipments={data.shipments}
             carriers={data.carriers}
             storageSopText={data.storage_sop_text}
+            claims={data.claims}
+            linkEnabled={data.approval_link_enabled}
             stageLog={data.stage_log.filter(
               (entry) =>
                 entry.sample_request_id === openBatch?.sample_request_id,

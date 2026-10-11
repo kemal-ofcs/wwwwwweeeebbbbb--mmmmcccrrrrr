@@ -32,13 +32,15 @@ export interface SheetImportReport {
 
 export interface ImportedRecord {
   id: string;
-  kind: "FORMULA" | "DESIGN";
+  kind: "FORMULA" | "DESIGN" | "BATCH" | "SHIPMENT";
   client_id: string;
   /** `YYYY-MM-DD`, atau '' bila sheet tidak mencatatnya. */
   record_date: string;
   code: string;
   title: string;
   amount_idr: number | null;
+  /** Jumlah unit Riwayat Batch/Pengiriman (v3.7). */
+  quantity: number | null;
   notes: string;
   source_file: string;
   created_at: string;

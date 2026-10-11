@@ -23,7 +23,7 @@ use super::{
 /// `CURRENT_SCHEMA_VERSION` di `web-desktop/src/lib/db-schema.ts` setiap kali
 /// migrasi baru ditambahkan, karena keduanya membaca tabel `schema_migration`
 /// yang sama di Turso.
-pub const CLIENT_SCHEMA_VERSION: i64 = 20;
+pub const CLIENT_SCHEMA_VERSION: i64 = 24;
 
 /// Hanya `cloud > client` yang berbahaya; `cloud <= client` adalah kondisi normal.
 fn is_client_schema_outdated(cloud_version: i64) -> bool {
@@ -216,6 +216,7 @@ const SNAPSHOT_TABLES: &[SnapshotTable] = &[
             "rnd_reject_reason_option_id",
             "revision_fee_idr",
             "is_test_requested",
+            "repeat_of_id",
         ],
         conflict_column: "id",
         entity_column: "id",
@@ -586,6 +587,38 @@ const SNAPSHOT_TABLES: &[SnapshotTable] = &[
             "cancel_reason",
             "shipped_at",
             "forwarded_at",
+            "received_at",
+            "created_by",
+            "created_at",
+            "updated_at",
+        ],
+        conflict_column: "id",
+        entity_column: "id",
+        delete_missing: true,
+        read_only: false,
+    },
+    // Komplain penerimaan dan keputusan QC (v3.5, PRD F-28). Baris lahir di
+    // event `shipment/transition` (SHIP_COMPLAINT); keputusannya rute sendiri.
+    SnapshotTable {
+        payload_key: "qcClaims",
+        domain: "qc-claim",
+        table: "qc_claims",
+        columns: &[
+            "id",
+            "shipment_id",
+            "batch_id",
+            "sample_request_id",
+            "client_id",
+            "complaint_notes",
+            "affected_units",
+            "status",
+            "fault_type",
+            "decision",
+            "remedy",
+            "remedy_notes",
+            "findings",
+            "decided_by",
+            "decided_at",
             "created_by",
             "created_at",
             "updated_at",
@@ -612,6 +645,7 @@ const SNAPSHOT_TABLES: &[SnapshotTable] = &[
             "source_file",
             "imported_by",
             "created_at",
+            "quantity",
         ],
         conflict_column: "id",
         entity_column: "id",
@@ -733,6 +767,14 @@ const CANONICAL_SYNC_ROUTES: &[(&str, &str)] = &[
     // Pengiriman (v3.4): Surat Jalan terbit, lalu setiap langkahnya.
     ("shipment", "create"),
     ("shipment", "transition"),
+    // Keputusan QC atas komplain penerimaan (v3.5).
+    ("qc-claim", "decide"),
+    // Serah terima CRM (v3.6a): pindah PIC CRM, dan CS meneruskan klien CRM
+    // (hanya notifikasi + audit di cloud).
+    ("client", "assign-crm"),
+    ("client", "forward-crm"),
+    // Repeat order (v3.6b): tiket baru langsung `CLIENT_ACC` dari tiket asal.
+    ("sample", "repeat"),
     ("media", "upload"),
     // Log audit hanya-dorong: tidak ada di `SNAPSHOT_TABLES` karena tumbuh
     // tanpa batas dan hanya dibaca dari cloud (layar Audit).

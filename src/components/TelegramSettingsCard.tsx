@@ -33,6 +33,9 @@ import {
 const EVENT_LABEL: Record<string, string> = {
   LEAD_NEW: "New lead",
   COLD_DIGEST: "Cold leads summary",
+  CLIENT_HANDOVER: "Client handed over to CRM",
+  CRM_FORWARD: "Client forwarded to CRM",
+  REORDER_DUE: "Repeat order summary",
   SAMPLE_RND_REVIEW: "Waiting for RnD review",
   SAMPLE_WAITING_PAYMENT: "Sample fee awaited",
   SAMPLE_PENDING_FEE: "Revision fee decision",
@@ -49,6 +52,7 @@ const DIVISION_LABEL: Record<NotificationDivision, string> = {
   FINANCE: "Finance",
   DESIGN: "Design",
   PRODUCTION: "Production",
+  CRM: "CRM",
 };
 
 function message(error: unknown, fallback: string) {

@@ -48,7 +48,13 @@ export async function saveDocument(
   return { path: null, savedToDevice: true };
 }
 
-export type ExportSubject = "clients" | "samples" | "invoices" | "funds";
+export type ExportSubject =
+  | "clients"
+  | "samples"
+  | "invoices"
+  | "funds"
+  // Workbook laporan dashboard (F-40b, D-52).
+  | "report";
 
 /**
  * Simpan .xlsx (v2.8, PRD D-41) lewat jalur yang sama dengan PDF. `export`

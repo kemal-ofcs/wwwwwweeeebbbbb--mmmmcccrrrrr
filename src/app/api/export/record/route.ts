@@ -15,7 +15,8 @@ import { assertSameOriginMutation } from "@/lib/server/http/request-security";
 
 export const runtime = "nodejs";
 
-const SUBJECTS = ["clients", "samples", "invoices", "funds"];
+// `report` = workbook laporan dashboard (F-40b, D-52).
+const SUBJECTS = ["clients", "samples", "invoices", "funds", "report"];
 
 /**
  * Ekspor CSV di Web (v2.8, PRD D-41): berkasnya dibuat browser dari daftar

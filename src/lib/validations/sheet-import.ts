@@ -1,7 +1,9 @@
 /**
  * Impor CSV Data Uang Masuk, Database Formulasi, dan Database Desain (PRD
- * F-22, v2.7, D-40). Uang masuk menjadi `incoming_funds`; formulasi dan
- * desain menjadi arsip hanya-baca `imported_records` di detail klien.
+ * F-22, v2.7, D-40), serta Riwayat Batch dan Riwayat Pengiriman (F-32, v3.7,
+ * D-51). Uang masuk menjadi `incoming_funds`; sisanya menjadi arsip
+ * hanya-baca `imported_records` di detail klien. Riwayat Pengiriman juga
+ * menandai kliennya `EXISTING_CLIENT` (order lama yang sudah selesai).
  *
  * Membaca CSV, menebak header, dan menebak urutan tanggal memakai helper
  * impor klien (`client-import.ts`). Bagian di bawah garis "Kembar" WAJIB
@@ -13,8 +15,15 @@
 import { parseStoredTimestamp, utcTimestamp } from "./client";
 import { type DateOrder, parseSheetDate } from "./client-import";
 import { FUND_DESCRIPTION_MAX, INVOICE_AMOUNT_MAX } from "./finance";
+import { MOU_UNITS_MAX } from "./mou";
 
-export const SHEET_KINDS = ["FUNDS", "FORMULA", "DESIGN"] as const;
+export const SHEET_KINDS = [
+  "FUNDS",
+  "FORMULA",
+  "DESIGN",
+  "BATCH",
+  "SHIPMENT",
+] as const;
 export type SheetKind = (typeof SHEET_KINDS)[number];
 
 export const ARCHIVE_CODE_MAX = 100;
@@ -130,6 +139,82 @@ export const SHEET_FIELDS: Record<
       example: "Box 30 ml, matte",
     },
   ],
+  BATCH: [
+    {
+      key: "date",
+      header: "Tanggal",
+      rule: "Required. The day production finished.",
+      example: "20/8/2025",
+    },
+    {
+      key: "client_code",
+      header: "Kode Klien",
+      rule: "Required. Must match a client in the app.",
+      example: "KLN-20261005-0101",
+    },
+    {
+      key: "code",
+      header: "Kode Batch",
+      rule: "Optional, up to 100 characters.",
+      example: "B-2508-01",
+    },
+    {
+      key: "title",
+      header: "Nama Produk",
+      rule: "Required, up to 200 characters.",
+      example: "Brightening serum 30 ml",
+    },
+    {
+      key: "quantity",
+      header: "Jumlah Unit",
+      rule: "Optional. Whole number of units.",
+      example: "5.000",
+    },
+    {
+      key: "notes",
+      header: "Catatan",
+      rule: "Optional, up to 1000 characters.",
+      example: "Batch pertama",
+    },
+  ],
+  SHIPMENT: [
+    {
+      key: "date",
+      header: "Tanggal Kirim",
+      rule: "Required. Counts as a completed order for CRM.",
+      example: "25/8/2025",
+    },
+    {
+      key: "client_code",
+      header: "Kode Klien",
+      rule: "Required. Must match a client in the app.",
+      example: "KLN-20261005-0101",
+    },
+    {
+      key: "code",
+      header: "No. Surat Jalan / Resi",
+      rule: "Optional, up to 100 characters.",
+      example: "JNE123456",
+    },
+    {
+      key: "title",
+      header: "Nama Produk",
+      rule: "Required, up to 200 characters.",
+      example: "Brightening serum 30 ml",
+    },
+    {
+      key: "quantity",
+      header: "Jumlah Unit",
+      rule: "Optional. Whole number of units.",
+      example: "5.000",
+    },
+    {
+      key: "notes",
+      header: "Catatan",
+      rule: "Optional, up to 1000 characters.",
+      example: "JNE, gudang klien Bandung",
+    },
+  ],
 };
 export type SheetFieldKey =
   | "date"
@@ -137,6 +222,7 @@ export type SheetFieldKey =
   | "code"
   | "title"
   | "amount"
+  | "quantity"
   | "notes";
 
 // ---------------------------------------------------------------------------
@@ -146,7 +232,13 @@ export type SheetFieldKey =
 /** Izin per jenis sheet (keputusan G); `null` = jenis tidak dikenal. */
 export function sheetImportPermission(
   kind: string,
-): "finance.manage" | "rnd.manage" | "design.manage" | null {
+):
+  | "finance.manage"
+  | "rnd.manage"
+  | "design.manage"
+  | "production.manage"
+  | "shipping.manage"
+  | null {
   switch (kind) {
     case "FUNDS":
       return "finance.manage";
@@ -154,6 +246,11 @@ export function sheetImportPermission(
       return "rnd.manage";
     case "DESIGN":
       return "design.manage";
+    // Riwayat produksi dan pengiriman lama (v3.7, keputusan E).
+    case "BATCH":
+      return "production.manage";
+    case "SHIPMENT":
+      return "shipping.manage";
     default:
       return null;
   }
@@ -191,6 +288,24 @@ export function parseSheetAmount(raw: string): SheetValue<number> {
   return { value };
 }
 
+/**
+ * Jumlah unit dari sheet: "5000", "5.000", "5,000". Padanan
+ * `parse_sheet_quantity`.
+ */
+export function parseSheetQuantity(raw: string): SheetValue<number> {
+  const text = raw.trim();
+  if (text === "") return { empty: true };
+  if (!/^\d+$/.test(text) && !/^\d{1,3}([.,]\d{3})+$/.test(text)) {
+    return { error: `The unit count "${text}" could not be read.` };
+  }
+  const digits = text.replace(/[.,]/g, "");
+  const value = digits.length > 9 ? Number.POSITIVE_INFINITY : Number(digits);
+  if (value < 1 || value > MOU_UNITS_MAX) {
+    return { error: `The unit count "${text}" is out of range.` };
+  }
+  return { value };
+}
+
 /** Tanggal sheet → `YYYY-MM-DD` (tanggal saja, jam diabaikan). */
 export function parseSheetDay(
   raw: string,
@@ -211,6 +326,7 @@ export interface SheetRowInput {
   code: string;
   title: string;
   amount: string;
+  quantity: string;
   notes: string;
 }
 
@@ -222,6 +338,8 @@ export interface SheetRow {
   code: string;
   title: string;
   amount_idr: number | null;
+  /** Jumlah unit Riwayat Batch/Pengiriman (v3.7); null di jenis lain. */
+  quantity: number | null;
   notes: string;
 }
 
@@ -244,6 +362,7 @@ export function sheetRowInput(value: unknown): SheetRowInput {
     code: field("code"),
     title: field("title"),
     amount: field("amount"),
+    quantity: field("quantity"),
     notes: field("notes"),
   };
 }
@@ -255,9 +374,15 @@ export function validateSheetRow(
   order: DateOrder,
 ): { row: SheetRow } | { error: string } {
   const funds = kind === "FUNDS";
+  const history = kind === "BATCH" || kind === "SHIPMENT";
   const date = parseSheetDay(input.date, order);
   if ("error" in date) return date;
-  if (funds && "empty" in date) return { error: "Tanggal is empty." };
+  if ((funds || history) && "empty" in date) {
+    return {
+      error:
+        kind === "SHIPMENT" ? "Tanggal Kirim is empty." : "Tanggal is empty.",
+    };
+  }
   const clientCode = input.client_code.trim();
   if (!funds && clientCode === "") return { error: "Kode Klien is empty." };
   const code = funds ? "" : input.code.trim();
@@ -267,7 +392,7 @@ export function validateSheetRow(
   const title = funds ? "" : input.title.trim();
   if (!funds && title === "") {
     return {
-      error: kind === "FORMULA" ? "Nama Produk is empty." : "Brand is empty.",
+      error: kind === "DESIGN" ? "Brand is empty." : "Nama Produk is empty.",
     };
   }
   if (length(title) > ARCHIVE_TITLE_MAX) {
@@ -276,11 +401,15 @@ export function validateSheetRow(
     };
   }
   const amount =
-    kind === "DESIGN"
+    kind === "DESIGN" || history
       ? { empty: true as const }
       : parseSheetAmount(input.amount);
   if ("error" in amount) return amount;
   if (funds && "empty" in amount) return { error: "Nominal is empty." };
+  const quantity = history
+    ? parseSheetQuantity(input.quantity)
+    : { empty: true as const };
+  if ("error" in quantity) return quantity;
   const notes = input.notes.trim();
   const notesMax = funds ? FUND_DESCRIPTION_MAX : ARCHIVE_NOTES_MAX;
   if (length(notes) > notesMax) {
@@ -294,6 +423,7 @@ export function validateSheetRow(
       code,
       title,
       amount_idr: "value" in amount ? amount.value : null,
+      quantity: "value" in quantity ? quantity.value : null,
       notes,
     },
   };
@@ -398,9 +528,16 @@ export const SHEET_FUND_KEYS_SQL =
 export const SHEET_ARCHIVE_KEYS_SQL =
   "SELECT kind, client_id, code, title, record_date FROM imported_records;";
 
-/** ?1 id, ?2 jenis, ?3 klien, ?4 tanggal, ?5 kode, ?6 judul, ?7 harga, ?8 catatan, ?9 berkas, ?10 pengimpor, ?11 waktu. */
+/** ?1 id, ?2 jenis, ?3 klien, ?4 tanggal, ?5 kode, ?6 judul, ?7 harga, ?8 catatan, ?9 berkas, ?10 pengimpor, ?11 waktu, ?12 jumlah unit. */
 export const IMPORTED_RECORD_INSERT_SQL =
-  "INSERT INTO imported_records (id, kind, client_id, record_date, code, title, amount_idr, notes, source_file, imported_by, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11) ON CONFLICT(id) DO NOTHING;";
+  "INSERT INTO imported_records (id, kind, client_id, record_date, code, title, amount_idr, notes, source_file, imported_by, created_at, quantity) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12) ON CONFLICT(id) DO NOTHING;";
 
 export const IMPORTED_RECORD_LIST_SQL =
-  "SELECT id, kind, client_id, record_date, code, title, amount_idr, notes, source_file, created_at FROM imported_records WHERE client_id = ?1 ORDER BY record_date DESC, created_at DESC, rowid DESC;";
+  "SELECT id, kind, client_id, record_date, code, title, amount_idr, quantity, notes, source_file, created_at FROM imported_records WHERE client_id = ?1 ORDER BY record_date DESC, created_at DESC, rowid DESC;";
+
+/**
+ * Riwayat Pengiriman = order lama yang sudah selesai (v3.7, keputusan D):
+ * klien diserahkan ke CRM tanpa PIC dan tanpa notifikasi. ?1 klien, ?2 waktu.
+ */
+export const IMPORT_HANDOVER_SQL =
+  "UPDATE clients SET lifecycle_status = 'EXISTING_CLIENT', updated_at = ?2 WHERE id = ?1 AND lifecycle_status <> 'EXISTING_CLIENT';";

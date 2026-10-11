@@ -14,6 +14,7 @@ import {
   timezoneOffsetHours,
   utcTimestamp,
 } from "./client";
+import { QC_REMEDY_LABEL, type QcRemedy } from "./production";
 import { formatRupiah } from "./sample";
 
 export const NOTIFICATION_DIVISIONS = [
@@ -23,6 +24,8 @@ export const NOTIFICATION_DIVISIONS = [
   "DESIGN",
   // PPIC, SPV, QC, dan Logistik berbagi satu grup (v3.1, D-43).
   "PRODUCTION",
+  // Serah terima dan repeat order (v3.6a, D-49).
+  "CRM",
 ] as const;
 export type NotificationDivision = (typeof NOTIFICATION_DIVISIONS)[number];
 
@@ -33,6 +36,7 @@ export const NOTIFICATION_PERMISSIONS = {
   FINANCE: "notifications_finance.view",
   DESIGN: "notifications_design.view",
   PRODUCTION: "notifications_production.view",
+  CRM: "notifications_crm.view",
 } as const satisfies Record<NotificationDivision, string>;
 
 export const NOTIFICATION_EVENT_TYPES = [
@@ -65,6 +69,13 @@ export const NOTIFICATION_EVENT_TYPES = [
   "SHIP_CLEARED",
   // Barang keluar: CS meneruskan resi dan Surat Jalan ke klien (v3.4).
   "SHIPMENT_SHIPPED",
+  // Komplain penerimaan ke CS + Production, keputusan QC ke CS (v3.5).
+  "DELIVERY_COMPLAINT",
+  "CLAIM_DECIDED",
+  // CRM (v3.6a): klien baru, diteruskan CS, ringkasan repeat order harian.
+  "CLIENT_HANDOVER",
+  "CRM_FORWARD",
+  "REORDER_DUE",
 ] as const;
 export type NotificationEventType = (typeof NOTIFICATION_EVENT_TYPES)[number];
 
@@ -151,6 +162,23 @@ export function coldDigestWindow(
   return from && to ? [from[0], to[0]] : null;
 }
 
+/**
+ * Rentang tanggal perkiraan repeat order untuk ringkasan hari ini:
+ * `(dari, sampai]`. Tanpa ringkasan sebelumnya hanya hari ini; hari yang
+ * terlewat dikejar paling banyak 7 hari. Padanan `reorder_digest_range`.
+ */
+export function reorderDigestRange(
+  today: string,
+  lastDigestDate: string | null,
+): [string, string] | null {
+  const earliest = shiftDate(today, -COLD_DIGEST_MAX_CATCH_UP_DAYS);
+  const yesterday = shiftDate(today, -1);
+  if (!earliest || !yesterday) return null;
+  const last = lastDigestDate ?? yesterday;
+  const from = last < earliest ? earliest : last;
+  return from >= today ? null : [from, today];
+}
+
 // ---------------------------------------------------------------------------
 // Teks pesan (teks polos: tanpa parse_mode, jadi nama klien tidak perlu di-escape)
 // ---------------------------------------------------------------------------
@@ -177,6 +205,7 @@ const APPROVAL_KIND_LABEL: Record<string, string> = {
   SAMPLE: "Sample",
   DUMMY: "Packaging dummy",
   MOU: "MoU",
+  RECEIPT: "Delivery",
 };
 const APPROVAL_DECISION_LABEL: Record<string, string> = {
   APPROVE: "approved",
@@ -306,12 +335,52 @@ export function renderNotification(
         `Shipped ${when}`,
       ].join("\n");
     }
+    case "DELIVERY_COMPLAINT":
+      return [
+        `Delivery complaint, QC to investigate: ${sample}`,
+        `Delivery note ${text(payload, "delivery_note_no")}: ${text(payload, "complaint_notes")}`,
+        `Reported ${when}`,
+      ].join("\n");
+    case "CLAIM_DECIDED":
+      return [
+        `QC decided the complaint: ${sample}`,
+        text(payload, "fault_type") === "INTERNAL"
+          ? `Delivery note ${text(payload, "delivery_note_no")}: our fault, return approved (${QC_REMEDY_LABEL[text(payload, "remedy") as QcRemedy] ?? text(payload, "remedy")})`
+          : `Delivery note ${text(payload, "delivery_note_no")}: not our fault, return rejected`,
+        `Findings: ${text(payload, "findings")}`,
+        `Decided ${when}`,
+      ].join("\n");
     case "SHIP_CLEARED":
       return [
         `Cleared to ship: ${sample}`,
         `Work order ${text(payload, "batch_code")}: ${text(payload, "carton_count")} cartons are paid for and can leave the factory.`,
         `Cleared ${when}`,
       ].join("\n");
+    case "CLIENT_HANDOVER":
+      return [
+        `New client for CRM: ${client}`,
+        `CRM PIC: ${orDash(text(payload, "crm_name"))}`,
+        `First order completed ${when}`,
+      ].join("\n");
+    case "CRM_FORWARD":
+      return [
+        `Client asked CS for a new order: ${client}`,
+        `CRM PIC: ${orDash(text(payload, "crm_name"))}, forwarded by ${orDash(text(payload, "from"))}`,
+        `Notes: ${text(payload, "notes")}`,
+        `Forwarded ${when}`,
+      ].join("\n");
+    case "REORDER_DUE": {
+      const clients = Array.isArray(payload.clients)
+        ? (payload.clients as Payload[])
+        : [];
+      return [
+        `Clients due for a repeat order (${text(payload, "date")}): ${clients.length}`,
+        ...clients.map(
+          (row) =>
+            `- ${text(row, "client_name")} (${text(row, "client_code")}), PIC ${orDash(text(row, "crm_name"))}, due ${text(row, "reorder_on")}`,
+        ),
+      ].join("\n");
+    }
     case "COLD_DIGEST": {
       const leads = Array.isArray(payload.leads)
         ? (payload.leads as Payload[])
@@ -419,9 +488,37 @@ export const NOTIFY_SHIP_CLEARED_SQL =
 export const NOTIFY_SHIPPED_SQL =
   "INSERT INTO notification_outbox (id, event_type, target_division, payload_json, occurred_at, status, attempts, next_attempt_at, created_at) SELECT 'shipped:' || ?1, 'SHIPMENT_SHIPPED', 'CS', json_object('sample_id', s.id, 'client_code', COALESCE(c.client_code, ''), 'client_name', COALESCE(c.name, ''), 'brand_name', s.brand_name, 'delivery_note_no', h.delivery_note_no, 'method', h.method, 'carrier', COALESCE(o.label, ''), 'tracking_no', h.tracking_no, 'driver_name', h.driver_name, 'vehicle_plate', h.vehicle_plate), h.shipped_at, CASE WHEN EXISTS (SELECT 1 FROM telegram_config t WHERE t.id = 'default' AND t.is_active = 1 AND TRIM(COALESCE(t.bot_token, '')) <> '') AND TRIM(COALESCE((SELECT g.value FROM setting_gex_system g WHERE g.key = 'telegram_chat_id_cs'), '')) <> '' THEN 'PENDING' ELSE 'SKIPPED' END, 0, datetime('now'), datetime('now') FROM shipments h JOIN sample_requests s ON s.id = h.sample_request_id LEFT JOIN clients c ON c.id = h.client_id LEFT JOIN master_option o ON o.id = h.carrier_option_id WHERE h.id = ?2 AND h.status = 'SHIPPED' LIMIT 1 ON CONFLICT(id) DO NOTHING;";
 
+/** Komplain penerimaan, ke grup CS dan Production (v3.5). ?1 = id klaim. */
+export const NOTIFY_COMPLAINT_SQL =
+  "INSERT INTO notification_outbox (id, event_type, target_division, payload_json, occurred_at, status, attempts, next_attempt_at, created_at) SELECT 'complaint:' || q.id || ':' || d.division, 'DELIVERY_COMPLAINT', d.division, json_object('sample_id', s.id, 'client_code', COALESCE(c.client_code, ''), 'client_name', COALESCE(c.name, ''), 'brand_name', s.brand_name, 'delivery_note_no', h.delivery_note_no, 'affected_units', q.affected_units, 'complaint_notes', q.complaint_notes), q.created_at, CASE WHEN EXISTS (SELECT 1 FROM telegram_config t WHERE t.id = 'default' AND t.is_active = 1 AND TRIM(COALESCE(t.bot_token, '')) <> '') AND TRIM(COALESCE((SELECT g.value FROM setting_gex_system g WHERE g.key = CASE d.division WHEN 'CS' THEN 'telegram_chat_id_cs' ELSE 'telegram_chat_id_production' END), '')) <> '' THEN 'PENDING' ELSE 'SKIPPED' END, 0, datetime('now'), datetime('now') FROM qc_claims q JOIN shipments h ON h.id = q.shipment_id JOIN sample_requests s ON s.id = q.sample_request_id LEFT JOIN clients c ON c.id = q.client_id CROSS JOIN (SELECT 'CS' AS division UNION ALL SELECT 'PRODUCTION') d WHERE q.id = ?1 ON CONFLICT(id) DO NOTHING;";
+
+/** Keputusan QC atas komplain, ke grup CS (v3.5). ?1 = id klaim. */
+export const NOTIFY_CLAIM_DECIDED_SQL =
+  "INSERT INTO notification_outbox (id, event_type, target_division, payload_json, occurred_at, status, attempts, next_attempt_at, created_at) SELECT 'claim-decided:' || q.id, 'CLAIM_DECIDED', 'CS', json_object('sample_id', s.id, 'client_code', COALESCE(c.client_code, ''), 'client_name', COALESCE(c.name, ''), 'brand_name', s.brand_name, 'delivery_note_no', h.delivery_note_no, 'fault_type', q.fault_type, 'remedy', q.remedy, 'findings', q.findings), q.decided_at, CASE WHEN EXISTS (SELECT 1 FROM telegram_config t WHERE t.id = 'default' AND t.is_active = 1 AND TRIM(COALESCE(t.bot_token, '')) <> '') AND TRIM(COALESCE((SELECT g.value FROM setting_gex_system g WHERE g.key = 'telegram_chat_id_cs'), '')) <> '' THEN 'PENDING' ELSE 'SKIPPED' END, 0, datetime('now'), datetime('now') FROM qc_claims q JOIN shipments h ON h.id = q.shipment_id JOIN sample_requests s ON s.id = q.sample_request_id LEFT JOIN clients c ON c.id = q.client_id WHERE q.id = ?1 AND q.status = 'DECIDED' LIMIT 1 ON CONFLICT(id) DO NOTHING;";
+
 /** Jadwal produksi disimpan, ke grup CS (v3.1). ?1 = id log, ?2 = id work order. */
 export const NOTIFY_BATCH_SCHEDULED_SQL =
   "INSERT INTO notification_outbox (id, event_type, target_division, payload_json, occurred_at, status, attempts, next_attempt_at, created_at) SELECT 'schedule:' || ?1, 'BATCH_SCHEDULED', 'CS', json_object('sample_id', s.id, 'client_code', COALESCE(c.client_code, ''), 'client_name', COALESCE(c.name, ''), 'brand_name', s.brand_name, 'batch_code', b.batch_code, 'packing_on', b.sched_packing_on, 'notes', COALESCE(l.notes, '')), b.schedule_updated_at, CASE WHEN EXISTS (SELECT 1 FROM telegram_config t WHERE t.id = 'default' AND t.is_active = 1 AND TRIM(COALESCE(t.bot_token, '')) <> '') AND TRIM(COALESCE((SELECT g.value FROM setting_gex_system g WHERE g.key = 'telegram_chat_id_cs'), '')) <> '' THEN 'PENDING' ELSE 'SKIPPED' END, 0, datetime('now'), datetime('now') FROM production_batches b JOIN sample_requests s ON s.id = b.sample_request_id LEFT JOIN clients c ON c.id = b.client_id LEFT JOIN sample_status_log l ON l.id = ?1 WHERE b.id = ?2 LIMIT 1 ON CONFLICT(id) DO NOTHING;";
+
+/** Klien baru untuk CRM, sekali per klien (v3.6a). ?1 = id klien. */
+export const NOTIFY_HANDOVER_SQL =
+  "INSERT INTO notification_outbox (id, event_type, target_division, payload_json, occurred_at, status, attempts, next_attempt_at, created_at) SELECT 'handover:' || c.id, 'CLIENT_HANDOVER', 'CRM', json_object('client_id', c.id, 'client_code', c.client_code, 'client_name', c.name, 'crm_name', COALESCE(o.nama_operator, '')), c.updated_at, CASE WHEN EXISTS (SELECT 1 FROM telegram_config t WHERE t.id = 'default' AND t.is_active = 1 AND TRIM(COALESCE(t.bot_token, '')) <> '') AND TRIM(COALESCE((SELECT g.value FROM setting_gex_system g WHERE g.key = 'telegram_chat_id_crm'), '')) <> '' THEN 'PENDING' ELSE 'SKIPPED' END, 0, datetime('now'), datetime('now') FROM clients c LEFT JOIN master_operator o ON o.id = c.assigned_crm_id WHERE c.id = ?1 AND c.lifecycle_status = 'EXISTING_CLIENT' ON CONFLICT(id) DO NOTHING;";
+
+/** CS meneruskan klien CRM (E-33). ?1 id, ?2 klien, ?3 catatan, ?4 operator, ?5 waktu. */
+export const NOTIFY_CRM_FORWARD_SQL =
+  "INSERT INTO notification_outbox (id, event_type, target_division, payload_json, occurred_at, status, attempts, next_attempt_at, created_at) SELECT 'crm-forward:' || ?1, 'CRM_FORWARD', 'CRM', json_object('client_id', c.id, 'client_code', c.client_code, 'client_name', c.name, 'crm_name', COALESCE(o.nama_operator, ''), 'from', COALESCE(f.nama_operator, ''), 'notes', ?3), ?5, CASE WHEN EXISTS (SELECT 1 FROM telegram_config t WHERE t.id = 'default' AND t.is_active = 1 AND TRIM(COALESCE(t.bot_token, '')) <> '') AND TRIM(COALESCE((SELECT g.value FROM setting_gex_system g WHERE g.key = 'telegram_chat_id_crm'), '')) <> '' THEN 'PENDING' ELSE 'SKIPPED' END, 0, datetime('now'), datetime('now') FROM clients c LEFT JOIN master_operator o ON o.id = c.assigned_crm_id LEFT JOIN master_operator f ON f.id = ?4 WHERE c.id = ?2 ON CONFLICT(id) DO NOTHING;";
+
+/** Ringkasan repeat order untuk satu tanggal, dan tanggal ringkasan terakhir. */
+export const REORDER_DIGEST_STATE_SQL =
+  "SELECT (SELECT COUNT(*) FROM notification_outbox WHERE id = ?1) AS done, COALESCE((SELECT MAX(id) FROM notification_outbox WHERE id LIKE 'reorder-due:%'), '') AS last_id;";
+
+/** Klien yang jatuh tempo di rentang `reorderDigestRange` (?1 eksklusif, ?2 inklusif). */
+export const REORDER_DUE_CLIENTS_SQL =
+  "SELECT z.client_code, z.client_name, z.crm_name, z.reorder_on FROM (SELECT z.*, CASE WHEN z.last_completed_at = '' THEN '' ELSE date(z.last_completed_at, z.tz_shift, '+' || z.reorder_days || ' days') END AS reorder_on, date('now', z.tz_shift) AS today, (SELECT COUNT(*) FROM sample_requests r WHERE r.client_id = z.id AND r.id <> z.last_sample_id AND r.created_at >= z.last_completed_at AND r.status NOT IN ('RND_REJECTED', 'CLIENT_REJECT', 'CANCELLED')) AS open_tickets FROM (SELECT c.id, c.client_code, c.name AS client_name, c.city, c.assigned_crm_id, COALESCE(o.nama_operator, '') AS crm_name, MAX(COALESCE(CASE h.status WHEN 'RECEIVED' THEN h.received_at ELSE (SELECT MAX(q.decided_at) FROM qc_claims q WHERE q.shipment_id = h.id AND q.status = 'DECIDED') END, ''), COALESCE((SELECT MAX(i.record_date) FROM imported_records i WHERE i.client_id = c.id AND i.kind = 'SHIPMENT'), '')) AS last_completed_at, COALESCE(s.id, '') AS last_sample_id, COALESCE(s.brand_name, (SELECT i.title FROM imported_records i WHERE i.client_id = c.id AND i.kind = 'SHIPMENT' ORDER BY i.record_date DESC, i.created_at DESC LIMIT 1), '') AS brand_name, COALESCE(s.packaging, '') AS packaging, COALESCE(h.unit_count, (SELECT i.quantity FROM imported_records i WHERE i.client_id = c.id AND i.kind = 'SHIPMENT' ORDER BY i.record_date DESC, i.created_at DESC LIMIT 1), 0) AS last_units, COALESCE((SELECT f.formula_code FROM sample_formulas f WHERE f.sample_request_id = s.id ORDER BY f.iteration_number DESC, f.recorded_at DESC LIMIT 1), '') AS last_formula_code, COALESCE((SELECT MAX(MAX(l.last_followup_at, l.last_client_response_at)) FROM leads l WHERE l.client_id = c.id), '') AS last_contact_at, COALESCE((SELECT CAST(g.value AS INTEGER) FROM setting_gex_system g WHERE g.key = 'crm_reorder_days'), 60) AS reorder_days, CASE COALESCE((SELECT t.timezone FROM company_profile t WHERE t.id = 'default_company'), '') WHEN 'Asia/Makassar' THEN '+8 hours' WHEN 'Asia/Jayapura' THEN '+9 hours' ELSE '+7 hours' END AS tz_shift FROM clients c LEFT JOIN shipments h ON h.id = (SELECT x.id FROM shipments x WHERE x.client_id = c.id AND (x.status = 'RECEIVED' OR (x.status = 'COMPLAINED' AND EXISTS (SELECT 1 FROM qc_claims q WHERE q.shipment_id = x.id AND q.status = 'DECIDED'))) ORDER BY x.updated_at DESC, x.id DESC LIMIT 1) LEFT JOIN sample_requests s ON s.id = h.sample_request_id LEFT JOIN master_operator o ON o.id = c.assigned_crm_id WHERE c.lifecycle_status = 'EXISTING_CLIENT') z) z WHERE z.open_tickets = 0 AND z.reorder_on > ?1 AND z.reorder_on <= ?2 ORDER BY z.reorder_on, z.client_code LIMIT 50;";
+
+/** ?1 = id, ?2 = payload, ?3 = status (`PENDING`/`SKIPPED`). */
+export const REORDER_DIGEST_INSERT_SQL =
+  "INSERT INTO notification_outbox (id, event_type, target_division, payload_json, occurred_at, status, attempts, next_attempt_at, created_at) VALUES (?1, 'REORDER_DUE', 'CRM', ?2, datetime('now'), ?3, 0, datetime('now'), datetime('now')) ON CONFLICT(id) DO NOTHING;";
 
 /** Ringkasan Cold yang sudah ada untuk satu tanggal, dan tanggal ringkasan terakhir. */
 export const COLD_DIGEST_STATE_SQL =
@@ -463,15 +560,16 @@ export const NOTIFICATION_PENDING_COUNT_SQL =
   "SELECT COUNT(*) AS total FROM notification_outbox WHERE status = 'PENDING';";
 
 /**
- * Lonceng: ?1-?5 = boleh melihat CS/RnD/Finance/Desain/Production (0/1). Ringkasan Cold
- * kosong hanya penanda tanggal, tidak pernah ditampilkan.
+ * Lonceng: ?1-?6 = boleh melihat CS/RnD/Finance/Desain/Production/CRM (0/1).
+ * Ringkasan Cold dan repeat order yang kosong hanya penanda tanggal, tidak
+ * pernah ditampilkan.
  */
 export const NOTIFICATION_BELL_LIST_SQL =
-  "SELECT id, event_type, target_division, payload_json, occurred_at, created_at FROM notification_outbox WHERE ((?1 = 1 AND target_division = 'CS') OR (?2 = 1 AND target_division = 'RND') OR (?3 = 1 AND target_division = 'FINANCE') OR (?4 = 1 AND target_division = 'DESIGN') OR (?5 = 1 AND target_division = 'PRODUCTION')) AND NOT (event_type = 'COLD_DIGEST' AND json_array_length(payload_json, '$.leads') = 0) ORDER BY created_at DESC, rowid DESC LIMIT 30;";
+  "SELECT id, event_type, target_division, payload_json, occurred_at, created_at FROM notification_outbox WHERE ((?1 = 1 AND target_division = 'CS') OR (?2 = 1 AND target_division = 'RND') OR (?3 = 1 AND target_division = 'FINANCE') OR (?4 = 1 AND target_division = 'DESIGN') OR (?5 = 1 AND target_division = 'PRODUCTION') OR (?6 = 1 AND target_division = 'CRM')) AND NOT (event_type IN ('COLD_DIGEST', 'REORDER_DUE') AND json_array_length(payload_json, CASE event_type WHEN 'COLD_DIGEST' THEN '$.leads' ELSE '$.clients' END) = 0) ORDER BY created_at DESC, rowid DESC LIMIT 30;";
 
-/** ?6 = operator id. Belum dibaca = lahir sesudah operator terakhir membuka lonceng. */
+/** ?7 = operator id. Belum dibaca = lahir sesudah operator terakhir membuka lonceng. */
 export const NOTIFICATION_UNREAD_COUNT_SQL =
-  "SELECT COUNT(*) AS total FROM notification_outbox WHERE ((?1 = 1 AND target_division = 'CS') OR (?2 = 1 AND target_division = 'RND') OR (?3 = 1 AND target_division = 'FINANCE') OR (?4 = 1 AND target_division = 'DESIGN') OR (?5 = 1 AND target_division = 'PRODUCTION')) AND NOT (event_type = 'COLD_DIGEST' AND json_array_length(payload_json, '$.leads') = 0) AND created_at > COALESCE((SELECT seen_at FROM notification_seen WHERE operator_id = ?6), '');";
+  "SELECT COUNT(*) AS total FROM notification_outbox WHERE ((?1 = 1 AND target_division = 'CS') OR (?2 = 1 AND target_division = 'RND') OR (?3 = 1 AND target_division = 'FINANCE') OR (?4 = 1 AND target_division = 'DESIGN') OR (?5 = 1 AND target_division = 'PRODUCTION') OR (?6 = 1 AND target_division = 'CRM')) AND NOT (event_type IN ('COLD_DIGEST', 'REORDER_DUE') AND json_array_length(payload_json, CASE event_type WHEN 'COLD_DIGEST' THEN '$.leads' ELSE '$.clients' END) = 0) AND created_at > COALESCE((SELECT seen_at FROM notification_seen WHERE operator_id = ?7), '');";
 
 /** Waktu database, zona perusahaan, dan konfigurasi bot dalam satu baris. */
 export const NOTIFICATION_CONTEXT_SQL =
@@ -479,7 +577,7 @@ export const NOTIFICATION_CONTEXT_SQL =
 
 /** Kunci setelan bisnis yang dibutuhkan pengirim (dibaca lewat `readBusinessSettings`). */
 export const NOTIFICATION_SETTINGS_SQL =
-  "SELECT key, value FROM setting_gex_system WHERE key IN ('lead_hot_max_days', 'lead_warm_max_days', 'telegram_chat_id_cs', 'telegram_chat_id_rnd', 'telegram_chat_id_finance', 'telegram_chat_id_design', 'telegram_chat_id_production');";
+  "SELECT key, value FROM setting_gex_system WHERE key IN ('lead_hot_max_days', 'lead_warm_max_days', 'telegram_chat_id_cs', 'telegram_chat_id_rnd', 'telegram_chat_id_finance', 'telegram_chat_id_design', 'telegram_chat_id_production', 'telegram_chat_id_crm');";
 
 /** ?1 = token baru (kosong = pertahankan yang lama, aturan 11), ?2 = aktif, ?3 = pelaku. */
 export const TELEGRAM_CONFIG_SAVE_SQL =

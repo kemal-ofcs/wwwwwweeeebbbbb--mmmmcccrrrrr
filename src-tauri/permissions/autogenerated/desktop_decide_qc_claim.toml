@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-desktop-decide-qc-claim"
+description = "Enables the desktop_decide_qc_claim command without any pre-configured scope."
+commands.allow = ["desktop_decide_qc_claim"]
+
+[[permission]]
+identifier = "deny-desktop-decide-qc-claim"
+description = "Denies the desktop_decide_qc_claim command without any pre-configured scope."
+commands.deny = ["desktop_decide_qc_claim"]

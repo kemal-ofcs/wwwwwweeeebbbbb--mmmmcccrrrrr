@@ -1,6 +1,7 @@
 "use client";
 
 import { type FormEvent, useRef, useState } from "react";
+import { ClientApproval } from "@/components/samples/ClientApproval";
 import { EvidencePicker } from "@/components/samples/EvidencePicker";
 import { SHIPMENT_STATUS_LABEL } from "@/components/samples/labels";
 import { FeedbackBanner } from "@/components/ui/FeedbackBanner";
@@ -10,6 +11,7 @@ import { useAuth } from "@/lib/context/AuthContext";
 import {
   type BatchRecord,
   createShipment,
+  type QcClaimRecord,
   recordShipmentStep,
   type ShipmentRecord,
   type SupplierOption,
@@ -17,6 +19,7 @@ import {
 import { requestSyncNow } from "@/lib/gateways/sync-status";
 import {
   CARTON_COUNT_MAX,
+  COMPLAINT_NOTES_MAX,
   type DeliveryMethod,
   PRODUCTION_REASON_MAX,
   SHIP_ADDRESS_MAX,
@@ -24,6 +27,7 @@ import {
   TRACKING_NO_MAX,
 } from "@/lib/validations/production";
 import { deviceToday } from "./ProductionPanel";
+import { QcClaimSection } from "./QcClaimSection";
 import {
   downloadDeliveryNote,
   downloadStorageSop,
@@ -32,8 +36,9 @@ import {
 
 /**
  * Pengiriman satu work order (v3.4, PRD F-27): Surat Jalan, kirim, resi, dan
- * diteruskan ke klien. Aturannya diputuskan backend (`production.ts` ↔
- * `production.rs`); tombol hanya menawarkan langkah yang sah.
+ * diteruskan ke klien, lalu jawaban klien atas barangnya (v3.5, F-28):
+ * diterima baik atau komplain untuk QC. Aturannya diputuskan backend
+ * (`production.ts` ↔ `production.rs`); tombol hanya menawarkan langkah yang sah.
  */
 
 interface Draft {
@@ -89,6 +94,8 @@ export function ShipmentSection({
   carriers,
   storageSopText,
   shipBlock,
+  claims,
+  linkEnabled,
   onChanged,
 }: {
   batch: BatchRecord;
@@ -97,6 +104,10 @@ export function ShipmentSection({
   storageSopText: string;
   /** `shipGateError` work order ini; null = siap kirim. */
   shipBlock: string | null;
+  /** Komplain penerimaan dan keputusan QC (v3.5). */
+  claims: QcClaimRecord[];
+  /** Alamat Web persetujuan disetel: tautan konfirmasi penerimaan. */
+  linkEnabled: boolean;
   onChanged: () => void;
 }) {
   const { user } = useAuth();
@@ -114,6 +125,9 @@ export function ShipmentSection({
     tracking_no: string;
     reason: string;
     evidence_base64: string;
+    complaint_notes: string;
+    affected_units: string;
+    photo_base64: string;
   } | null>(null);
   const isSubmittingRef = useRef(false);
 
@@ -177,14 +191,37 @@ export function ShipmentSection({
   const submitStep = (event: FormEvent) => {
     event.preventDefault();
     if (!step || !active) return;
+    const { complaint_notes, affected_units, ...rest } = step;
     void run(
-      () => recordShipmentStep(active.id, { ...step, shipment: null }),
+      () =>
+        recordShipmentStep(active.id, {
+          ...rest,
+          shipment: null,
+          complaint:
+            step.action === "SHIP_COMPLAINT"
+              ? {
+                  complaint_notes,
+                  affected_units: Number(affected_units || 0),
+                }
+              : undefined,
+        }),
       () => setStep(null),
     );
   };
 
   const openStep = (action: ShipmentAction) =>
-    setStep({ action, tracking_no: "", reason: "", evidence_base64: "" });
+    setStep({
+      action,
+      tracking_no: "",
+      reason: "",
+      evidence_base64: "",
+      complaint_notes: "",
+      affected_units: "",
+      photo_base64: "",
+    });
+  // Barang di jalan: klien bisa menjawab sebelum CS meneruskan resi (v3.5).
+  const inTransit =
+    active?.status === "SHIPPED" || active?.status === "FORWARDED";
 
   const copyMessage = async () => {
     if (!active) return;
@@ -281,7 +318,13 @@ export function ShipmentSection({
               <span className="font-mono">{active.delivery_note_no}</span>
             </span>
             <StatusBadge
-              tone={active.status === "PREPARED" ? "info" : "success"}
+              tone={
+                active.status === "PREPARED"
+                  ? "info"
+                  : active.status === "COMPLAINED"
+                    ? "warning"
+                    : "success"
+              }
             >
               {SHIPMENT_STATUS_LABEL[active.status] ?? active.status}
             </StatusBadge>
@@ -355,7 +398,7 @@ export function ShipmentSection({
                 </>
               ) : null}
               {canShip &&
-              active.status !== "PREPARED" &&
+              inTransit &&
               active.method === "CARRIER" &&
               !active.tracking_no ? (
                 <button
@@ -383,6 +426,26 @@ export function ShipmentSection({
                     className="app-btn app-btn-primary"
                   >
                     Mark sent to client
+                  </button>
+                </>
+              ) : null}
+              {canForward && inTransit ? (
+                <>
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={() => openStep("SHIP_RECEIVED")}
+                    className="app-btn app-btn-secondary"
+                  >
+                    Client received it
+                  </button>
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={() => openStep("SHIP_COMPLAINT")}
+                    className="app-btn app-btn-secondary"
+                  >
+                    Client reports a problem
                   </button>
                 </>
               ) : null}
@@ -438,6 +501,61 @@ export function ShipmentSection({
                   delivery note.
                 </p>
               ) : null}
+              {step.action === "SHIP_COMPLAINT" ? (
+                <>
+                  <label className="app-label grid gap-1.5 sm:col-span-2">
+                    What is wrong?
+                    <textarea
+                      required
+                      rows={3}
+                      maxLength={COMPLAINT_NOTES_MAX}
+                      value={step.complaint_notes}
+                      onChange={(event) =>
+                        setStep({
+                          ...step,
+                          complaint_notes: event.target.value,
+                        })
+                      }
+                      className="app-input min-h-20 py-2 font-normal"
+                    />
+                  </label>
+                  <label className="app-label grid gap-1.5">
+                    Units affected (optional)
+                    <input
+                      type="number"
+                      inputMode="numeric"
+                      min={0}
+                      max={active.unit_count}
+                      value={step.affected_units}
+                      onChange={(event) =>
+                        setStep({ ...step, affected_units: event.target.value })
+                      }
+                      className="app-input font-normal"
+                    />
+                  </label>
+                  <div className="sm:col-span-2">
+                    <EvidencePicker
+                      value={step.photo_base64}
+                      onChange={(value) =>
+                        setStep({ ...step, photo_base64: value })
+                      }
+                      label="Photo of the problem (optional)"
+                      hint="A photo from the client of the damaged or missing goods."
+                    />
+                  </div>
+                </>
+              ) : null}
+              {step.action === "SHIP_RECEIVED" ||
+              step.action === "SHIP_COMPLAINT" ? (
+                <div className="sm:col-span-2">
+                  <EvidencePicker
+                    value={step.evidence_base64}
+                    onChange={(value) =>
+                      setStep({ ...step, evidence_base64: value })
+                    }
+                  />
+                </div>
+              ) : null}
               <div className="flex flex-wrap gap-2 sm:col-span-2">
                 <button
                   type="submit"
@@ -459,6 +577,24 @@ export function ShipmentSection({
           )}
         </div>
       ) : null}
+      {active && inTransit && !step && !form ? (
+        <ClientApproval
+          entityType="RECEIPT"
+          entityId={active.id}
+          linkEnabled={linkEnabled}
+          canCreate={canForward}
+          title={`Delivery ${active.delivery_note_no} for ${active.brand_name}`}
+          lines={[
+            `${active.unit_count.toLocaleString("id-ID")} units in ${active.carton_count} cartons, shipped ${active.ship_on}.`,
+            "Has everything arrived in good condition? Answer APPROVE if it has, or REVISE and tell us what is wrong.",
+          ]}
+          decisions={["APPROVE", "REVISE"]}
+        />
+      ) : null}
+      <QcClaimSection
+        claims={claims.filter((claim) => claim.batch_id === batch.id)}
+        onChanged={onChanged}
+      />
 
       {form ? (
         <form

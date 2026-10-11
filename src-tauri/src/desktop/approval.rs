@@ -6,7 +6,7 @@
 //! Konstanta di sini WAJIB identik dengan `src/lib/validations/approval.ts`
 //! (dites per karakter dari sisi TS).
 
-pub const APPROVAL_ENTITY_TYPES: &[&str] = &["SAMPLE", "DUMMY", "MOU"];
+pub const APPROVAL_ENTITY_TYPES: &[&str] = &["SAMPLE", "DUMMY", "MOU", "RECEIPT"];
 
 /// Padanan `approvalPermission`.
 pub fn approval_permission(entity_type: &str) -> &'static str {
@@ -26,6 +26,8 @@ pub const CLIENT_DECISION_ACTIONS: &[&str] = &[
     "MOU_ACCEPT",
     "MOU_REVISE",
     "MOU_REJECT",
+    "SHIP_RECEIVED",
+    "SHIP_COMPLAINT",
 ];
 
 /// Padanan `isClientDecisionAction`.
@@ -54,7 +56,7 @@ pub fn approval_url(base_url: &str, token: &str) -> String {
     format!("{base_url}/approve?t={token}")
 }
 
-pub const APPROVAL_INSERT_SQL: &str = "INSERT INTO approval_tokens (id, token_hash, entity_type, entity_id, sample_request_id, base_status, base_revision, expires_at, created_by, created_at) SELECT ?3, ?4, t.entity_type, t.entity_id, t.sample_request_id, t.status, t.revision, datetime('now', '+' || ?5 || ' days'), ?6, datetime('now') FROM (SELECT 'SAMPLE' AS entity_type, s.id AS entity_id, s.id AS sample_request_id, s.status, s.revision_index AS revision FROM sample_requests s WHERE ?1 = 'SAMPLE' AND s.id = ?2 UNION ALL SELECT 'DUMMY', d.id, d.sample_request_id, d.status, d.dummy_rejection_count FROM design_tickets d WHERE ?1 = 'DUMMY' AND d.id = ?2 UNION ALL SELECT 'MOU', m.id, m.sample_request_id, m.status, 0 FROM production_mou m WHERE ?1 = 'MOU' AND m.id = ?2) t WHERE t.status = CASE t.entity_type WHEN 'SAMPLE' THEN 'SAMPLE_SENT' WHEN 'DUMMY' THEN 'DUMMY_SENT' ELSE 'SENT' END;";
+pub const APPROVAL_INSERT_SQL: &str = "INSERT INTO approval_tokens (id, token_hash, entity_type, entity_id, sample_request_id, base_status, base_revision, expires_at, created_by, created_at) SELECT ?3, ?4, t.entity_type, t.entity_id, t.sample_request_id, t.status, t.revision, datetime('now', '+' || ?5 || ' days'), ?6, datetime('now') FROM (SELECT 'SAMPLE' AS entity_type, s.id AS entity_id, s.id AS sample_request_id, s.status, s.revision_index AS revision FROM sample_requests s WHERE ?1 = 'SAMPLE' AND s.id = ?2 UNION ALL SELECT 'DUMMY', d.id, d.sample_request_id, d.status, d.dummy_rejection_count FROM design_tickets d WHERE ?1 = 'DUMMY' AND d.id = ?2 UNION ALL SELECT 'MOU', m.id, m.sample_request_id, m.status, 0 FROM production_mou m WHERE ?1 = 'MOU' AND m.id = ?2 UNION ALL SELECT 'RECEIPT', h.id, h.sample_request_id, CASE WHEN h.status IN ('SHIPPED', 'FORWARDED') THEN 'IN_TRANSIT' ELSE h.status END, 0 FROM shipments h WHERE ?1 = 'RECEIPT' AND h.id = ?2) t WHERE t.status = CASE t.entity_type WHEN 'SAMPLE' THEN 'SAMPLE_SENT' WHEN 'DUMMY' THEN 'DUMMY_SENT' WHEN 'RECEIPT' THEN 'IN_TRANSIT' ELSE 'SENT' END;";
 pub const APPROVAL_REVOKE_OTHERS_SQL: &str = "UPDATE approval_tokens SET revoked_at = datetime('now') WHERE entity_type = ?1 AND entity_id = ?2 AND id <> ?3 AND used_at IS NULL AND revoked_at IS NULL;";
 
 #[cfg(test)]
@@ -68,7 +70,8 @@ mod tests {
         assert_eq!(approval_permission("SAMPLE"), "samples.manage");
         assert_eq!(approval_permission("DUMMY"), "samples.manage");
         assert_eq!(approval_permission("MOU"), "mou.manage");
-        for action in ["CLIENT_ACC", "DUMMY_REVISE", "MOU_REJECT"] {
+        assert_eq!(approval_permission("RECEIPT"), "samples.manage");
+        for action in ["CLIENT_ACC", "DUMMY_REVISE", "MOU_REJECT", "SHIP_COMPLAINT"] {
             assert!(is_client_decision_action(action), "{action}");
         }
         for action in ["SAMPLE_SENT", "PRINT_DUMMY", "SEND_MOU", "CANCEL"] {

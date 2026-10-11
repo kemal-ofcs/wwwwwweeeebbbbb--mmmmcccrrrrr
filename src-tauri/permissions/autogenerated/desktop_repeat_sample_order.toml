@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-desktop-repeat-sample-order"
+description = "Enables the desktop_repeat_sample_order command without any pre-configured scope."
+commands.allow = ["desktop_repeat_sample_order"]
+
+[[permission]]
+identifier = "deny-desktop-repeat-sample-order"
+description = "Denies the desktop_repeat_sample_order command without any pre-configured scope."
+commands.deny = ["desktop_repeat_sample_order"]

@@ -82,6 +82,10 @@ export const PERMISSION_CATALOG = [
   // Pengiriman (v3.4, PRD F-27): Surat Jalan, kirim, resi. Meneruskan resi
   // ke klien memakai `samples.manage` (CS).
   { key: "shipping.manage", name: "Ship orders", group: "Production" },
+  // Komplain penerimaan (v3.5, PRD F-28): QC memutuskan salah siapa.
+  { key: "qc.manage", name: "Decide delivery complaints", group: "Production" },
+  // Serah terima CS -> CRM (v3.6a, D-49): klien EXISTING_CLIENT dikelola CRM.
+  { key: "crm.manage", name: "Manage existing clients", group: "Clients" },
   {
     key: "design.override_dummy_limit",
     name: "Override the dummy rejection limit",
@@ -171,6 +175,11 @@ export const PERMISSION_CATALOG = [
   {
     key: "notifications_production.view",
     name: "Production notifications",
+    group: "Notifications",
+  },
+  {
+    key: "notifications_crm.view",
+    name: "CRM notifications",
     group: "Notifications",
   },
   {

@@ -30,6 +30,8 @@ const mou = await import("@/lib/server/mou");
 const approval = await import("@/lib/server/approval");
 const legal = await import("@/lib/server/legal");
 const production = await import("@/lib/server/production");
+const crm = await import("@/lib/server/crm");
+const dashboard = await import("@/lib/server/dashboard");
 
 let client: Client;
 let directory: string;
@@ -273,6 +275,8 @@ describe("tiket sampel, jalur Web", () => {
         dp_percentage_bp: 5000,
         approval_web_url: "",
         approval_token_ttl_days: 3,
+        telegram_chat_id_crm: "",
+        crm_reorder_days: 60,
       },
       ADMIN,
     );
@@ -694,7 +698,8 @@ describe("tiket sampel, jalur Web", () => {
         String(row.keys).split(",").sort().join(","),
       ]),
     ).toEqual([
-      ["crm", "samples.view"],
+      // Repeat order (v3.6b, D-50): CRM menjalankan tiket repeat sampai MoU.
+      ["crm", "samples.manage,samples.view"],
       ["cs", "samples.manage,samples.view"],
     ]);
   });
@@ -1085,6 +1090,7 @@ describe("tiket sampel, jalur Web", () => {
       "admin",
       "operator",
       "cs",
+      "crm",
     ]);
   });
 
@@ -1838,6 +1844,221 @@ describe("tiket sampel, jalur Web", () => {
       "SELECT COUNT(*) AS total FROM notification_outbox WHERE event_type = 'SHIPMENT_SHIPPED' AND target_division = 'CS';",
     );
     expect(Number(shippedNotices.rows[0]?.total)).toBe(1);
+
+    // v3.5 (F-28): jawaban klien atas barang lewat tautan, lalu keputusan QC.
+    const QC = { id: 9, role: "QC" };
+    await expect(
+      shipStep(second.id, {
+        action: "SHIP_RECEIVED",
+        evidence_base64: "",
+      }),
+    ).rejects.toThrow("Attach a screenshot of the client's reply.");
+    await expect(
+      shipStep(second.id, {
+        action: "SHIP_COMPLAINT",
+        evidence_base64: EVIDENCE,
+        complaint: { complaint_notes: "Leaking", affected_units: 991 },
+      }),
+    ).rejects.toThrow(
+      "The affected units cannot be more than the units shipped.",
+    );
+    await client.execute(
+      "INSERT INTO setting_gex_system (key, value) VALUES ('approval_web_url', 'https://crm.company.id') ON CONFLICT(key) DO UPDATE SET value = excluded.value;",
+    );
+    const receipt = await approval.createApprovalLink(
+      client,
+      { entity_type: "RECEIPT", entity_id: second.id },
+      CS,
+    );
+    const receiptToken = new URL(receipt.url).searchParams.get("t") ?? "";
+    const receiptView = await approval.readApproval(client, receiptToken);
+    expect(receiptView.valid && receiptView.decisions).toEqual([
+      "APPROVE",
+      "REVISE",
+    ]);
+    expect(
+      await approval.respondApproval(client, receiptToken, {
+        decision: "REVISE",
+        responder_name: "Rina",
+        notes: "Two cartons were crushed",
+      }),
+    ).toEqual({ decision: "REVISE" });
+    expect(await shipOf()).toMatchObject({
+      shipment_status: "COMPLAINED",
+      claim_status: "OPEN",
+    });
+    const [claim] = (await production.listProduction(client)).claims;
+    expect(claim).toMatchObject({
+      shipment_id: second.id,
+      complaint_notes: "Rina (approval link): Two cartons were crushed",
+      affected_units: 0,
+      status: "OPEN",
+    });
+    const claimId = String(claim?.id);
+    const decide = (decision: Record<string, unknown>) =>
+      production.decideQcClaim(client, { claim_id: claimId, decision }, QC);
+    await expect(
+      decide({ fault_type: "INTERNAL", findings: "Seal not tight" }),
+    ).rejects.toThrow("Choose how the client is put right.");
+    expect(
+      await decide({
+        fault_type: "INTERNAL",
+        findings: "Seal not tight",
+        remedy: "REPLACE",
+        remedy_notes: "Ship 2 cartons",
+      }),
+    ).toEqual({ id: claimId, decision: "RETURN_APPROVED" });
+    await expect(
+      decide({ fault_type: "RECIPIENT", findings: "Courier" }),
+    ).rejects.toThrow("This complaint is already decided.");
+    expect((await shipOf()).claim_status).toBe("DECIDED");
+    const claimLog = await client.execute({
+      sql: "SELECT action, notes FROM sample_status_log WHERE sample_request_id = ? AND action IN ('SHIP_COMPLAINT', 'QC_DECIDE') ORDER BY recorded_at, rowid;",
+      args: [sample.id],
+    });
+    expect(claimLog.rows.map((row) => `${row.action}: ${row.notes}`)).toEqual([
+      "SHIP_COMPLAINT: Complaint: Rina (approval link): Two cartons were crushed",
+      "QC_DECIDE: Internal fault, return approved (replace goods): Seal not tight",
+    ]);
+    const claimNotices = await client.execute(
+      "SELECT event_type || ':' || target_division AS kind FROM notification_outbox WHERE event_type IN ('DELIVERY_COMPLAINT', 'CLAIM_DECIDED') ORDER BY kind;",
+    );
+    expect(claimNotices.rows.map((row) => String(row.kind))).toEqual([
+      "CLAIM_DECIDED:CS",
+      "DELIVERY_COMPLAINT:CS",
+      "DELIVERY_COMPLAINT:PRODUCTION",
+    ]);
+
+    // v3.6a (F-29): order selesai = klien diserahkan ke CRM, CS baca-saja.
+    const handed = await client.execute({
+      sql: "SELECT c.lifecycle_status, c.assigned_crm_id, s.pic_crm_id FROM clients c JOIN sample_requests s ON s.client_id = c.id WHERE s.id = ?;",
+      args: [sample.id],
+    });
+    expect(handed.rows[0]?.lifecycle_status).toBe("EXISTING_CLIENT");
+    expect(handed.rows[0]?.assigned_crm_id ?? null).toBe(
+      handed.rows[0]?.pic_crm_id ?? null,
+    );
+    await expect(
+      samples.createSampleRequest(client, draft(owner.id), CS),
+    ).rejects.toThrow("This client is managed by CRM (PIC:");
+    const crmView = async () =>
+      (await crm.listCrm(client)).clients.find((row) => row.id === owner.id);
+    expect(await crmView()).toMatchObject({
+      brand_name: "Aura Batch",
+      open_tickets: 0,
+      last_units: 990,
+    });
+    expect(String((await crmView())?.last_completed_at)).not.toBe("");
+    await expect(
+      crm.assignCrm(client, { client_id: owner.id, operator_id: 7 }, ADMIN),
+    ).rejects.toThrow("Choose an active CRM operator.");
+    await crm.assignCrm(client, { client_id: owner.id, operator_id: 8 }, ADMIN);
+    expect(await crmView()).toMatchObject({ crm_name: "Dewi CRM" });
+    await crm.forwardToCrm(
+      client,
+      { client_id: owner.id, forward: { notes: "Wants 5000 pcs" } },
+      CS,
+    );
+    const CRM_STAFF = { id: 8, role: "CRM", permissions: ["crm.manage"] };
+    await samples.createSampleRequest(
+      client,
+      draft(owner.id, { brand_name: "Aura Repeat" }),
+      CRM_STAFF as never,
+    );
+    expect(await crmView()).toMatchObject({ open_tickets: 1 });
+    const crmNotices = await client.execute(
+      "SELECT event_type FROM notification_outbox WHERE target_division = 'CRM' ORDER BY event_type;",
+    );
+    expect(crmNotices.rows.map((row) => String(row.event_type))).toEqual([
+      "CLIENT_HANDOVER",
+      "CRM_FORWARD",
+    ]);
+
+    // v3.6b (F-30): repeat order dari tiket yang ordernya selesai.
+    const drafts = await client.execute({
+      sql: "SELECT id FROM sample_requests WHERE client_id = ? AND status = 'DRAFT';",
+      args: [owner.id],
+    });
+    await expect(
+      crm.repeatSampleOrder(
+        client,
+        { source_id: String(drafts.rows[0]?.id) },
+        CRM_STAFF,
+      ),
+    ).rejects.toThrow("Only an approved sample can start a repeat order.");
+    const repeat = await crm.repeatSampleOrder(
+      client,
+      { source_id: sample.id },
+      CRM_STAFF,
+    );
+    const repeated = (await samples.getSampleRequest(client, repeat.id, false))
+      .request;
+    expect(repeated).toMatchObject({
+      status: "CLIENT_ACC",
+      repeat_of_id: sample.id,
+      brand_name: "Aura Batch",
+      is_dummy_required: 0,
+      unit_price_idr: 32_500,
+      pic_crm_id: 8,
+    });
+    const repeatMou = await mou.createMou(
+      client,
+      {
+        sample_id: repeat.id,
+        terms: {
+          total_units: 1000,
+          production_lead_time_days: 30,
+          regulatory_path: "WHITE_LABEL",
+          notes: "",
+        },
+      },
+      CRM_STAFF,
+      false,
+    );
+    const legalCopies = await client.execute({
+      sql: "SELECT id, kind, status FROM legal_documents WHERE mou_id = ? ORDER BY kind;",
+      args: [repeatMou.id],
+    });
+    expect(
+      legalCopies.rows.map((row) => `${row.id}|${row.kind}|${row.status}`),
+    ).toEqual([`${repeatMou.id}:HALAL|HALAL|NOT_REQUIRED`]);
+
+    // F-40a: dashboard menghitung dari data yang sama, dipotong izin.
+    const dashboardToday = String(
+      (await client.execute("SELECT date('now', '+7 hours') AS today;")).rows[0]
+        ?.today,
+    );
+    const range = {
+      from: `${Number(dashboardToday.slice(0, 4)) - 1}-12-01`,
+      to: dashboardToday,
+    };
+    const full = await dashboard.getDashboard(client, range, {
+      isSuperadmin: true,
+      permissions: [],
+    });
+    expect(Object.keys(full.sections)).toEqual([
+      "sales",
+      "samples",
+      "finance",
+      "production",
+      "crm",
+    ]);
+    expect(full.sections.crm).toMatchObject({ repeat_started: 1 });
+    expect(Number(full.sections.crm?.orders_completed)).toBeGreaterThan(0);
+    expect(Number(full.sections.production?.complaints)).toBeGreaterThan(0);
+    expect(Number(full.sections.finance?.received_idr)).toBeGreaterThan(0);
+    const limited = await dashboard.getDashboard(client, range, {
+      isSuperadmin: false,
+      permissions: ["clients.view"],
+    });
+    expect(Object.keys(limited.sections)).toEqual(["sales", "crm"]);
+    await expect(
+      dashboard.getDashboard(
+        client,
+        { from: today, to: "2020-01-01" },
+        { isSuperadmin: true, permissions: [] },
+      ),
+    ).rejects.toThrow("Choose a valid period of up to two years.");
   });
 
   test("izin produksi untuk role divisi, sekali saja", async () => {

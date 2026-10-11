@@ -1,8 +1,10 @@
 /**
  * Persetujuan klien: tautan sekali pakai dan jalur manual (PRD F-18, v2.5b,
- * D-38). Satu mesin untuk tiga hal yang menunggu jawaban klien: sampel yang
- * dikirim (`SAMPLE_SENT`), dummy yang dikirim (`DUMMY_SENT`), dan MoU yang
- * dikirim (`SENT`).
+ * D-38). Satu mesin untuk empat hal yang menunggu jawaban klien: sampel yang
+ * dikirim (`SAMPLE_SENT`), dummy yang dikirim (`DUMMY_SENT`), MoU yang
+ * dikirim (`SENT`), dan barang produksi yang dikirim (v3.5, `RECEIPT`:
+ * `SHIPPED`/`FORWARDED` dibaca sebagai `IN_TRANSIT`, supaya tautan tidak gugur
+ * hanya karena CS meneruskan resi).
  *
  * Tabel `approval_tokens` cloud-only dan hanya memegang hash token. Tautan
  * dibuat perangkat atau Web langsung di cloud (keputusan J); jawabannya
@@ -12,7 +14,12 @@
  * `src-tauri/src/desktop/approval.rs` (dites per karakter).
  */
 
-export const APPROVAL_ENTITY_TYPES = ["SAMPLE", "DUMMY", "MOU"] as const;
+export const APPROVAL_ENTITY_TYPES = [
+  "SAMPLE",
+  "DUMMY",
+  "MOU",
+  "RECEIPT",
+] as const;
 export type ApprovalEntityType = (typeof APPROVAL_ENTITY_TYPES)[number];
 
 export const APPROVAL_DECISIONS = ["APPROVE", "REVISE", "REJECT"] as const;
@@ -51,6 +58,12 @@ export function approvalStepAction(
     },
     DUMMY: { APPROVE: "DUMMY_ACC", REVISE: "DUMMY_REVISE", REJECT: null },
     MOU: { APPROVE: "MOU_ACCEPT", REVISE: "MOU_REVISE", REJECT: "MOU_REJECT" },
+    // Penerimaan (v3.5): "ada masalah" = komplain, tidak ada "tolak".
+    RECEIPT: {
+      APPROVE: "SHIP_RECEIVED",
+      REVISE: "SHIP_COMPLAINT",
+      REJECT: null,
+    },
   };
   return actions[type][decision];
 }
@@ -69,6 +82,8 @@ export const CLIENT_DECISION_ACTIONS = [
   "MOU_ACCEPT",
   "MOU_REVISE",
   "MOU_REJECT",
+  "SHIP_RECEIVED",
+  "SHIP_COMPLAINT",
 ] as const;
 
 export function isClientDecisionAction(action: unknown) {
@@ -156,14 +171,14 @@ export function approvalUrl(baseUrl: string, token: string) {
 
 /** Keadaan terkini hal yang disetujui: ?1 jenis, ?2 id. */
 export const APPROVAL_TARGET_SQL =
-  "SELECT 'SAMPLE' AS entity_type, s.id AS entity_id, s.id AS sample_request_id, s.status, s.revision_index AS revision FROM sample_requests s WHERE ?1 = 'SAMPLE' AND s.id = ?2 UNION ALL SELECT 'DUMMY', d.id, d.sample_request_id, d.status, d.dummy_rejection_count FROM design_tickets d WHERE ?1 = 'DUMMY' AND d.id = ?2 UNION ALL SELECT 'MOU', m.id, m.sample_request_id, m.status, 0 FROM production_mou m WHERE ?1 = 'MOU' AND m.id = ?2";
+  "SELECT 'SAMPLE' AS entity_type, s.id AS entity_id, s.id AS sample_request_id, s.status, s.revision_index AS revision FROM sample_requests s WHERE ?1 = 'SAMPLE' AND s.id = ?2 UNION ALL SELECT 'DUMMY', d.id, d.sample_request_id, d.status, d.dummy_rejection_count FROM design_tickets d WHERE ?1 = 'DUMMY' AND d.id = ?2 UNION ALL SELECT 'MOU', m.id, m.sample_request_id, m.status, 0 FROM production_mou m WHERE ?1 = 'MOU' AND m.id = ?2 UNION ALL SELECT 'RECEIPT', h.id, h.sample_request_id, CASE WHEN h.status IN ('SHIPPED', 'FORWARDED') THEN 'IN_TRANSIT' ELSE h.status END, 0 FROM shipments h WHERE ?1 = 'RECEIPT' AND h.id = ?2";
 
 /**
  * ?1 jenis, ?2 id hal itu, ?3 id token, ?4 hash token, ?5 masa berlaku
  * (hari), ?6 pembuat. Hanya menulis bila hal itu di cloud sedang menunggu
  * jawaban klien; kedaluwarsa dihitung database (keputusan L).
  */
-export const APPROVAL_INSERT_SQL = `INSERT INTO approval_tokens (id, token_hash, entity_type, entity_id, sample_request_id, base_status, base_revision, expires_at, created_by, created_at) SELECT ?3, ?4, t.entity_type, t.entity_id, t.sample_request_id, t.status, t.revision, datetime('now', '+' || ?5 || ' days'), ?6, datetime('now') FROM (${APPROVAL_TARGET_SQL}) t WHERE t.status = CASE t.entity_type WHEN 'SAMPLE' THEN 'SAMPLE_SENT' WHEN 'DUMMY' THEN 'DUMMY_SENT' ELSE 'SENT' END;`;
+export const APPROVAL_INSERT_SQL = `INSERT INTO approval_tokens (id, token_hash, entity_type, entity_id, sample_request_id, base_status, base_revision, expires_at, created_by, created_at) SELECT ?3, ?4, t.entity_type, t.entity_id, t.sample_request_id, t.status, t.revision, datetime('now', '+' || ?5 || ' days'), ?6, datetime('now') FROM (${APPROVAL_TARGET_SQL}) t WHERE t.status = CASE t.entity_type WHEN 'SAMPLE' THEN 'SAMPLE_SENT' WHEN 'DUMMY' THEN 'DUMMY_SENT' WHEN 'RECEIPT' THEN 'IN_TRANSIT' ELSE 'SENT' END;`;
 
 /** Tautan baru membatalkan tautan lama untuk hal yang sama. ?3 = token baru. */
 export const APPROVAL_REVOKE_OTHERS_SQL =

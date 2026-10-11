@@ -1,6 +1,7 @@
 import type { StatusTone } from "@/components/ui/StatusBadge";
 import type { SampleRequestRecord } from "@/lib/gateways/samples";
 import {
+  orderCompleted,
   PRODUCTION_STAGES,
   SHIP_NO_SETTLEMENT,
   SHIP_STORAGE_UNBILLED,
@@ -110,6 +111,12 @@ export const SAMPLE_ACTION_PAST: Record<string, string> = {
   SHIP_DISPATCH: "marked the order as shipped",
   SHIP_TRACKING: "recorded the tracking number",
   SHIP_FORWARD: "forwarded the tracking number to the client",
+  // Jawaban klien dan keputusan QC (v3.5).
+  SHIP_RECEIVED: "recorded the goods as received",
+  SHIP_COMPLAINT: "recorded a complaint about the goods",
+  QC_DECIDE: "decided the complaint",
+  // Repeat order (v3.6b).
+  REPEAT_ORDER: "started a repeat order",
 };
 
 /** Status pengiriman (v3.4, PRD F-27). */
@@ -118,6 +125,8 @@ export const SHIPMENT_STATUS_LABEL: Record<string, string> = {
   SHIPPED: "Shipped",
   FORWARDED: "Sent to client",
   CANCELLED: "Cancelled",
+  RECEIVED: "Received",
+  COMPLAINED: "Complaint",
 };
 
 /** Bahan work order dan PO (v3.1, PRD F-23). */
@@ -324,6 +333,10 @@ export function nextSampleStep(row: SampleRequestRecord): string | null {
       return "CS: forward the tracking number and delivery note to the client.";
     if (row.shipment_status === "FORWARDED")
       return "Waiting for the client to confirm receipt.";
+    // Jawaban klien (v3.5): komplain menunggu QC; selesai = tanpa langkah.
+    if (row.shipment_status === "COMPLAINED" && row.claim_status === "OPEN")
+      return "QC: investigate the complaint and record the decision.";
+    if (orderCompleted(row.shipment_status, row.claim_status)) return null;
     if (row.ship_block)
       return "Finance: allocate the client's payment to the open settlement, shipping, or storage invoices.";
     return "Cleared to ship: Logistics records the shipment.";

@@ -5,7 +5,12 @@ import {
   savePdf,
 } from "@/components/finance/invoice-download";
 import { buildTermsPdf } from "@/lib/documents/invoice-pdf";
-import type { ShipmentRecord } from "@/lib/gateways/production";
+import type { QcClaimRecord, ShipmentRecord } from "@/lib/gateways/production";
+import {
+  claimReportNumber,
+  QC_REMEDY_LABEL,
+  type QcRemedy,
+} from "@/lib/validations/production";
 
 /**
  * Surat Jalan dan SOP Penyimpanan (v3.4, PRD F-27, keputusan E/F): dibuat di
@@ -13,7 +18,7 @@ import type { ShipmentRecord } from "@/lib/gateways/production";
  * lewat gateway dokumen. Mengembalikan pesan untuk ditampilkan.
  */
 
-function deliverTo(shipment: ShipmentRecord) {
+function deliverTo(shipment: ShipmentRecord | QcClaimRecord) {
   const client = [shipment.client_code, shipment.client_name]
     .filter(Boolean)
     .join(" · ");
@@ -61,6 +66,65 @@ export async function downloadDeliveryNote(shipment: ShipmentRecord) {
       footer:
         "Check the cartons on arrival. Report damaged or missing goods on this delivery note before signing.",
       signatures: [`For ${company.name}`, "Carrier", "Received by"],
+    }),
+  );
+}
+
+/**
+ * Berita Acara keputusan QC (v3.5, keputusan D): satu per Surat Jalan,
+ * ditandatangani QC, CS, dan klien.
+ */
+export async function downloadClaimReport(claim: QcClaimRecord) {
+  const company = await companyLetterhead();
+  const number = claimReportNumber(claim.delivery_note_no);
+  const internal = claim.fault_type === "INTERNAL";
+  const remedy =
+    QC_REMEDY_LABEL[claim.remedy as QcRemedy] ?? (claim.remedy || "-");
+  return savePdf(
+    `${number}.pdf`,
+    buildTermsPdf("QC CLAIM REPORT", {
+      company: { name: company.name, lines: company.lines },
+      logo: company.logo,
+      number,
+      issued_on: claim.decided_at.slice(0, 10),
+      stamp: "",
+      party_label: "Client",
+      party: deliverTo(claim),
+      terms_label: "Delivery",
+      terms: [
+        { label: "Product", value: claim.brand_name },
+        { label: "Delivery note", value: claim.delivery_note_no },
+        { label: "Work order", value: claim.batch_code },
+        { label: "Shipped on", value: claim.ship_on },
+        {
+          label: "Units shipped",
+          value: claim.unit_count.toLocaleString("id-ID"),
+        },
+        {
+          label: "Units affected",
+          value: claim.affected_units
+            ? claim.affected_units.toLocaleString("id-ID")
+            : "-",
+        },
+        {
+          label: "Fault",
+          value: internal
+            ? "Ours (production or packing)"
+            : "Recipient or courier",
+        },
+        {
+          label: "Decision",
+          value: internal ? `Return approved: ${remedy}` : "Return rejected",
+        },
+      ],
+      notes_label: "Complaint and QC findings",
+      notes: [
+        `Complaint: ${claim.complaint_notes}`,
+        `QC findings: ${claim.findings}`,
+        ...(claim.remedy_notes ? [`Follow-up: ${claim.remedy_notes}`] : []),
+      ].join("\n"),
+      footer: "",
+      signatures: ["Quality control", "Customer service", "Client"],
     }),
   );
 }

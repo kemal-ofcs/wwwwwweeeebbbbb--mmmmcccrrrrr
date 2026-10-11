@@ -371,8 +371,9 @@ pub fn ship_summary(row: &Value) -> Value {
 }
 
 /// Pengiriman dan Surat Jalan (v3.4, PRD F-27, D-47).
-pub const SHIPMENT_STATUSES: &[&str] = &["PREPARED", "SHIPPED", "FORWARDED", "CANCELLED"];
-pub const SHIPMENT_ACTIONS: &[&str] = &["SHIP_UPDATE", "SHIP_CANCEL", "SHIP_DISPATCH", "SHIP_TRACKING", "SHIP_FORWARD"];
+pub const SHIPMENT_STATUSES: &[&str] = &["PREPARED", "SHIPPED", "FORWARDED", "CANCELLED", "RECEIVED", "COMPLAINED"];
+pub const SHIPMENT_ACTIONS: &[&str] =
+    &["SHIP_UPDATE", "SHIP_CANCEL", "SHIP_DISPATCH", "SHIP_TRACKING", "SHIP_FORWARD", "SHIP_RECEIVED", "SHIP_COMPLAINT"];
 pub const SHIPMENT_CREATE_ACTION: &str = "SHIP_PREPARE";
 pub const DELIVERY_METHODS: &[&str] = &["CARRIER", "FLEET"];
 pub const DEFAULT_DELIVERY_NOTE_PREFIX: &str = "SJ";
@@ -492,14 +493,17 @@ pub fn apply_shipment_action(status: &str, method: &str, tracking_no: &str, acti
                 Ok("FORWARDED")
             }
         }
-        "SHIP_UPDATE" | "SHIP_CANCEL" | "SHIP_DISPATCH" | "SHIP_TRACKING" | "SHIP_FORWARD" => wrong,
+        "SHIP_RECEIVED" if status == "SHIPPED" || status == "FORWARDED" => Ok("RECEIVED"),
+        "SHIP_COMPLAINT" if status == "SHIPPED" || status == "FORWARDED" => Ok("COMPLAINED"),
+        "SHIP_UPDATE" | "SHIP_CANCEL" | "SHIP_DISPATCH" | "SHIP_TRACKING" | "SHIP_FORWARD" | "SHIP_RECEIVED"
+        | "SHIP_COMPLAINT" => wrong,
         _ => Err("This shipment step does not exist."),
     }
 }
 
 /// Padanan `shipmentActionPermission`.
 pub fn shipment_action_permission(action: &str) -> &'static str {
-    if action == "SHIP_FORWARD" {
+    if action == "SHIP_FORWARD" || RECEIPT_ACTIONS.contains(&action) {
         "samples.manage"
     } else {
         "shipping.manage"
@@ -551,9 +555,133 @@ pub fn shipment_log_notes(action: &str, input: &ShipmentLogInput<'_>) -> String 
             format!("Shipped by {}{tracking}", input.carrier_label)
         }
         "SHIP_TRACKING" => format!("Tracking number {}", input.tracking_no),
+        "SHIP_RECEIVED" => "Received in good condition".to_owned(),
         _ => "Tracking number and delivery note sent to the client".to_owned(),
     }
 }
+
+/// Penerimaan klien dan klaim QC (v3.5, PRD F-28, D-48).
+pub const RECEIPT_ACTIONS: &[&str] = &["SHIP_RECEIVED", "SHIP_COMPLAINT"];
+
+/// Padanan `COMPLAINT_NOTES_MAX`/`QC_FINDINGS_MAX`: muat di linimasa (1000).
+pub const COMPLAINT_NOTES_MAX: usize = 950;
+pub const QC_FINDINGS_MAX: usize = 900;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ComplaintInput {
+    pub complaint_notes: String,
+    pub affected_units: i64,
+}
+
+impl ComplaintInput {
+    pub fn to_json(&self) -> Value {
+        json!({ "complaint_notes": self.complaint_notes, "affected_units": self.affected_units })
+    }
+}
+
+/// Padanan `validateComplaint`.
+pub fn validate_complaint(raw: &Value, unit_count: i64) -> Result<ComplaintInput, &'static str> {
+    let notes = text(raw, "complaint_notes")
+        .filter(|notes| !notes.is_empty() && notes.chars().count() <= COMPLAINT_NOTES_MAX)
+        .ok_or("Describe the problem, up to 950 characters.")?;
+    let affected = raw
+        .get("affected_units")
+        .and_then(Value::as_i64)
+        .filter(|units| (0..=unit_count).contains(units))
+        .ok_or("The affected units cannot be more than the units shipped.")?;
+    Ok(ComplaintInput { complaint_notes: notes, affected_units: affected })
+}
+
+/// Padanan `complaintLogNotes`.
+pub fn complaint_log_notes(complaint: &ComplaintInput) -> String {
+    if complaint.affected_units > 0 {
+        format!("Complaint ({} units): {}", complaint.affected_units, complaint.complaint_notes)
+    } else {
+        format!("Complaint: {}", complaint.complaint_notes)
+    }
+}
+
+pub const QC_FAULT_TYPES: &[&str] = &["INTERNAL", "RECIPIENT"];
+pub const QC_REMEDIES: &[&str] = &["REPLACE", "CREDIT", "OTHER"];
+pub const CLAIM_DECIDE_ACTION: &str = "QC_DECIDE";
+
+/// Padanan `QC_REMEDY_LABEL`.
+pub fn qc_remedy_label(remedy: &str) -> &str {
+    match remedy {
+        "REPLACE" => "replace goods",
+        "CREDIT" => "credit or refund",
+        "OTHER" => "other",
+        other => other,
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ClaimDecision {
+    pub fault_type: &'static str,
+    pub decision: &'static str,
+    pub remedy: String,
+    pub remedy_notes: String,
+    pub findings: String,
+}
+
+impl ClaimDecision {
+    pub fn to_json(&self) -> Value {
+        json!({
+            "fault_type": self.fault_type,
+            "decision": self.decision,
+            "remedy": self.remedy,
+            "remedy_notes": self.remedy_notes,
+            "findings": self.findings,
+        })
+    }
+}
+
+/// Padanan `validateClaimDecision`.
+pub fn validate_claim_decision(raw: &Value) -> Result<ClaimDecision, &'static str> {
+    let fault = raw
+        .get("fault_type")
+        .and_then(Value::as_str)
+        .and_then(|fault| QC_FAULT_TYPES.iter().copied().find(|known| *known == fault))
+        .ok_or("Choose whose fault it is.")?;
+    let findings = text(raw, "findings")
+        .filter(|findings| !findings.is_empty() && findings.chars().count() <= QC_FINDINGS_MAX)
+        .ok_or("Write what QC found, up to 900 characters.")?;
+    let notes = text(raw, "remedy_notes")
+        .filter(|notes| notes.chars().count() <= PRODUCTION_REASON_MAX)
+        .ok_or("Notes are up to 500 characters.")?;
+    let internal = fault == "INTERNAL";
+    let remedy = text(raw, "remedy").unwrap_or_default();
+    if internal && !QC_REMEDIES.contains(&remedy.as_str()) {
+        return Err("Choose how the client is put right.");
+    }
+    Ok(ClaimDecision {
+        fault_type: fault,
+        decision: if internal { "RETURN_APPROVED" } else { "RETURN_REJECTED" },
+        remedy: if internal { remedy } else { String::new() },
+        remedy_notes: if internal { notes } else { String::new() },
+        findings,
+    })
+}
+
+/// Padanan `claimDecideError`.
+pub fn claim_decide_error(status: &str) -> Option<&'static str> {
+    (status != "OPEN").then_some("This complaint is already decided.")
+}
+
+/// Padanan `claimLogNotes`.
+pub fn claim_log_notes(decision: &ClaimDecision) -> String {
+    if decision.fault_type == "RECIPIENT" {
+        return format!("Recipient fault, return rejected: {}", decision.findings);
+    }
+    format!(
+        "Internal fault, return approved ({}): {}",
+        qc_remedy_label(&decision.remedy),
+        decision.findings
+    )
+}
+
+pub const CLAIM_CHANGED_ELSEWHERE: &str =
+    "This complaint was changed on another device first. Open it again to see the latest version.";
 
 pub const SHIPMENT_CHANGED_ELSEWHERE: &str =
     "This shipment was changed on another device first. Open it again to see the latest version.";
@@ -583,13 +711,98 @@ pub const SHIPMENT_LIST_SQL: &str = "SELECT h.*, COALESCE(o.label, '') AS carrie
 pub const SHIPMENT_ACTIVE_SQL: &str = "SELECT COUNT(*) AS total FROM shipments WHERE batch_id = ?1 AND status <> 'CANCELLED' AND id <> ?2;";
 pub const SHIPMENT_INSERT_SQL: &str = "INSERT INTO shipments (id, batch_id, sample_request_id, client_id, delivery_note_no, method, carrier_option_id, tracking_no, driver_name, driver_phone, vehicle_plate, carton_count, unit_count, ship_on, ship_to_address, notes, status, cancel_reason, shipped_at, forwarded_at, created_by, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, '', ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, 'PREPARED', '', '', '', ?16, ?17, ?17) ON CONFLICT(id) DO NOTHING;";
 pub const SHIPMENT_UPDATE_SQL: &str = "UPDATE shipments SET method = ?2, carrier_option_id = ?3, driver_name = ?4, driver_phone = ?5, vehicle_plate = ?6, carton_count = ?7, unit_count = ?8, ship_on = ?9, ship_to_address = ?10, notes = ?11, updated_at = ?12 WHERE id = ?1 AND status = 'PREPARED' AND updated_at = ?13;";
-pub const SHIPMENT_STEP_SQL: &str = "UPDATE shipments SET status = ?2, tracking_no = CASE WHEN ?3 <> '' THEN ?3 ELSE tracking_no END, cancel_reason = CASE WHEN ?2 = 'CANCELLED' THEN ?4 ELSE cancel_reason END, shipped_at = CASE WHEN ?2 = 'SHIPPED' AND shipped_at = '' THEN ?5 ELSE shipped_at END, forwarded_at = CASE WHEN ?2 = 'FORWARDED' AND forwarded_at = '' THEN ?5 ELSE forwarded_at END, updated_at = ?5 WHERE id = ?1 AND status = ?6 AND updated_at = ?7;";
+pub const SHIPMENT_STEP_SQL: &str = "UPDATE shipments SET status = ?2, tracking_no = CASE WHEN ?3 <> '' THEN ?3 ELSE tracking_no END, cancel_reason = CASE WHEN ?2 = 'CANCELLED' THEN ?4 ELSE cancel_reason END, shipped_at = CASE WHEN ?2 = 'SHIPPED' AND shipped_at = '' THEN ?5 ELSE shipped_at END, forwarded_at = CASE WHEN ?2 = 'FORWARDED' AND forwarded_at = '' THEN ?5 ELSE forwarded_at END, received_at = CASE WHEN ?2 IN ('RECEIVED', 'COMPLAINED') AND received_at = '' THEN ?5 ELSE received_at END, updated_at = ?5 WHERE id = ?1 AND status = ?6 AND updated_at = ?7;";
+
+pub const CLAIM_LIST_SQL: &str = "SELECT q.*, h.delivery_note_no, h.method, h.tracking_no, h.driver_name, h.vehicle_plate, h.ship_on, h.unit_count, h.carton_count, h.ship_to_address, COALESCE(o.label, '') AS carrier_label, b.batch_code, m.mou_number, s.brand_name, c.client_code, c.name AS client_name, COALESCE(d.nama_operator, '') AS decided_by_name FROM qc_claims q JOIN shipments h ON h.id = q.shipment_id JOIN production_batches b ON b.id = q.batch_id JOIN production_mou m ON m.id = b.mou_id JOIN sample_requests s ON s.id = q.sample_request_id LEFT JOIN clients c ON c.id = q.client_id LEFT JOIN master_option o ON o.id = h.carrier_option_id LEFT JOIN master_operator d ON d.id = q.decided_by";
+pub const CLAIM_INSERT_SQL: &str = "INSERT INTO qc_claims (id, shipment_id, batch_id, sample_request_id, client_id, complaint_notes, affected_units, status, fault_type, decision, remedy, remedy_notes, findings, decided_by, decided_at, created_by, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'OPEN', '', '', '', '', '', NULL, '', ?8, ?9, ?9) ON CONFLICT(id) DO NOTHING;";
+pub const CLAIM_DECIDE_SQL: &str = "UPDATE qc_claims SET status = 'DECIDED', fault_type = ?2, decision = ?3, remedy = ?4, remedy_notes = ?5, findings = ?6, decided_by = ?7, decided_at = ?8, updated_at = ?8 WHERE id = ?1 AND status = 'OPEN' AND updated_at = ?9;";
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
     // Vektor kembar dengan `src/lib/validations/production.test.ts`.
+
+    #[test]
+    fn penerimaan_dan_klaim_qc() {
+        // Vektor kembar dengan "penerimaan dan klaim QC" di `production.test.ts`.
+        let step = |status: &str, action: &str| apply_shipment_action(status, "CARRIER", "JNE123", action).unwrap_or_else(|message| message);
+        assert_eq!(step("SHIPPED", "SHIP_RECEIVED"), "RECEIVED");
+        assert_eq!(step("FORWARDED", "SHIP_RECEIVED"), "RECEIVED");
+        assert_eq!(step("FORWARDED", "SHIP_COMPLAINT"), "COMPLAINED");
+        assert_eq!(step("PREPARED", "SHIP_RECEIVED"), "This step is not available for the shipment's current status.");
+        assert_eq!(step("RECEIVED", "SHIP_COMPLAINT"), "This step is not available for the shipment's current status.");
+        assert_eq!(shipment_action_permission("SHIP_RECEIVED"), "samples.manage");
+        assert_eq!(shipment_action_permission("SHIP_COMPLAINT"), "samples.manage");
+        assert_eq!(
+            shipment_log_notes("SHIP_RECEIVED", &ShipmentLogInput {
+                delivery_note_no: "",
+                method: "",
+                carrier_label: "",
+                tracking_no: "",
+                driver_name: "",
+                vehicle_plate: "",
+                reason: "",
+            }),
+            "Received in good condition"
+        );
+
+        let complaint = validate_complaint(&json!({ "complaint_notes": " 5 bottles leaked ", "affected_units": 5 }), 990).unwrap();
+        assert_eq!(complaint, ComplaintInput { complaint_notes: "5 bottles leaked".into(), affected_units: 5 });
+        assert_eq!(complaint_log_notes(&complaint), "Complaint (5 units): 5 bottles leaked");
+        let link = validate_complaint(&json!({ "complaint_notes": "Box crushed", "affected_units": 0 }), 990).unwrap();
+        assert_eq!(complaint_log_notes(&link), "Complaint: Box crushed");
+        assert_eq!(
+            validate_complaint(&json!({ "complaint_notes": "", "affected_units": 1 }), 990).unwrap_err(),
+            "Describe the problem, up to 950 characters."
+        );
+        assert_eq!(
+            validate_complaint(&json!({ "complaint_notes": "x", "affected_units": 991 }), 990).unwrap_err(),
+            "The affected units cannot be more than the units shipped."
+        );
+
+        let internal = validate_claim_decision(&json!({
+            "fault_type": "INTERNAL",
+            "findings": " Seal not tight ",
+            "remedy": "REPLACE",
+            "remedy_notes": "Ship 5 bottles",
+        }))
+        .unwrap();
+        assert_eq!(
+            internal,
+            ClaimDecision {
+                fault_type: "INTERNAL",
+                decision: "RETURN_APPROVED",
+                remedy: "REPLACE".into(),
+                remedy_notes: "Ship 5 bottles".into(),
+                findings: "Seal not tight".into(),
+            }
+        );
+        assert_eq!(claim_log_notes(&internal), "Internal fault, return approved (replace goods): Seal not tight");
+        let recipient = validate_claim_decision(&json!({
+            "fault_type": "RECIPIENT",
+            "findings": "Courier dropped the cartons",
+            "remedy": "REPLACE",
+            "remedy_notes": "ignored",
+        }))
+        .unwrap();
+        assert_eq!((recipient.decision, recipient.remedy.as_str()), ("RETURN_REJECTED", ""));
+        assert_eq!(claim_log_notes(&recipient), "Recipient fault, return rejected: Courier dropped the cartons");
+        assert_eq!(
+            validate_claim_decision(&json!({ "fault_type": "CLIENT", "findings": "x" })).unwrap_err(),
+            "Choose whose fault it is."
+        );
+        assert_eq!(
+            validate_claim_decision(&json!({ "fault_type": "INTERNAL", "findings": "x" })).unwrap_err(),
+            "Choose how the client is put right."
+        );
+        assert_eq!(
+            validate_claim_decision(&json!({ "fault_type": "RECIPIENT", "findings": "" })).unwrap_err(),
+            "Write what QC found, up to 900 characters."
+        );
+        assert_eq!(claim_decide_error("OPEN"), None);
+        assert_eq!(claim_decide_error("DECIDED"), Some("This complaint is already decided."));
+    }
 
     #[test]
     fn pengiriman_mengikuti_aturan() {

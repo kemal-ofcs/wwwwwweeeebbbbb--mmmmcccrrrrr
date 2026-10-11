@@ -67,6 +67,10 @@ function describe(entry: AuditEntry, operatorName: (id: number) => string) {
       return `Registered lead ${code} (${String(s.name ?? "")})`;
     case "client.update":
       return `Edited client ${code} (${String(s.name ?? "")})`;
+    case "client.assign_crm":
+      return `Assigned client ${code} to CRM ${String(s.crm_name ?? "")}`;
+    case "client.forward_crm":
+      return `Forwarded client ${code} to CRM: ${String(s.notes ?? "")}`;
     case "client.import":
       return `Imported ${String(s.added ?? 0)} clients from ${String(
         s.file_name || "a CSV file",
@@ -124,6 +128,8 @@ function describe(entry: AuditEntry, operatorName: (id: number) => string) {
       return `Issued delivery note ${String(s.delivery_note_no ?? "")} for work order ${String(s.batch_code ?? "")} of ${code}`;
     case "shipment.step":
       return `Delivery note ${String(s.delivery_note_no ?? "")} for ${code}: ${String(s.notes ?? "")}`;
+    case "qc_claim.decide":
+      return `QC decided the complaint on delivery note ${String(s.delivery_note_no ?? "")} for ${code}: ${String(s.notes ?? "")}`;
     case "batch.stage":
       return `Work order ${String(s.batch_code ?? "")} for ${code}: ${String(s.notes ?? "")}`;
     case "batch.schedule": {

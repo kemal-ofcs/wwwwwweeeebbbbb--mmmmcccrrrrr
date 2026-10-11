@@ -4,7 +4,10 @@ import type { Client, Row, Transaction } from "@libsql/client";
 import { type AuditActor, writeAudit } from "@/lib/server/audit";
 import { loadBusinessSettings } from "@/lib/server/business-settings";
 import { companyTimezone, getClientCodeSettings } from "@/lib/server/clients";
+import { handOverToCrm } from "@/lib/server/crm";
 import { ApiRequestError } from "@/lib/server/http/api-response";
+import { clientEvidence } from "@/lib/server/media";
+import type { StepOptions } from "@/lib/server/samples";
 import {
   companyDateStamp,
   formatClientCode,
@@ -16,6 +19,8 @@ import {
   NOTIFY_BATCH_CREATED_SQL,
   NOTIFY_BATCH_PACKED_SQL,
   NOTIFY_BATCH_SCHEDULED_SQL,
+  NOTIFY_CLAIM_DECIDED_SQL,
+  NOTIFY_COMPLAINT_SQL,
   NOTIFY_PO_LATE_SQL,
   NOTIFY_SHIPPED_SQL,
 } from "@/lib/validations/notification";
@@ -35,6 +40,15 @@ import {
   BATCH_WAITING_PO_SQL,
   batchRequestError,
   CARRIER_LIST_SQL,
+  CLAIM_CHANGED_ELSEWHERE,
+  CLAIM_DECIDE_ACTION,
+  CLAIM_DECIDE_SQL,
+  CLAIM_INSERT_SQL,
+  CLAIM_LIST_SQL,
+  type ComplaintInput,
+  claimDecideError,
+  claimLogNotes,
+  complaintLogNotes,
   MATERIALS_READY_ACTION,
   MOU_WITHOUT_BATCH_WHERE,
   materialsReadyError,
@@ -71,6 +85,8 @@ import {
   stageLogNotes,
   TRACKING_INVALID,
   validateBatchSchedule,
+  validateClaimDecision,
+  validateComplaint,
   validatePoDelay,
   validatePurchaseOrder,
   validateShipment,
@@ -166,6 +182,7 @@ export async function listProduction(client: Client) {
     client,
     `${MOU_LIST_SQL}${MOU_WITHOUT_BATCH_WHERE} ORDER BY m.status_changed_at, m.id;`,
   );
+  const settings = await loadBusinessSettings(client);
   return {
     ready: ready.filter((row) => Number(row.dp_cleared) === 1),
     batches: await rows(
@@ -183,8 +200,14 @@ export async function listProduction(client: Client) {
       client,
       `${SHIPMENT_LIST_SQL} ORDER BY h.created_at, h.id;`,
     ),
-    storage_sop_text: (await loadBusinessSettings(client)).storage_sop_text,
+    storage_sop_text: settings.storage_sop_text,
+    approval_link_enabled: settings.approval_web_url !== "",
     carriers: await rows(client, CARRIER_LIST_SQL),
+    // Komplain penerimaan dan keputusan QC (v3.5).
+    claims: await rows(
+      client,
+      `${CLAIM_LIST_SQL} ORDER BY q.created_at, q.id;`,
+    ),
   };
 }
 
@@ -243,6 +266,11 @@ export async function sampleProduction(client: Client, sampleId: string) {
     ),
     storage_sop_text: (await loadBusinessSettings(client)).storage_sop_text,
     carriers: await rows(client, CARRIER_LIST_SQL),
+    claims: await rows(
+      client,
+      `${CLAIM_LIST_SQL} WHERE q.sample_request_id = ? ORDER BY q.created_at, q.id;`,
+      [sampleId],
+    ),
   };
 }
 
@@ -802,15 +830,48 @@ export async function createShipment(
   }
 }
 
+/** Foto opsional yang ikut sebuah langkah; `null` bila tidak dilampirkan. */
+function optionalPhoto(purpose: string, data: unknown) {
+  if (typeof data !== "string" || !data) return null;
+  const media = validateMediaUpload(purpose, data);
+  if ("error" in media) invalid(media.error);
+  return { purpose, data, size: media.byte_size };
+}
+
+async function insertPhoto(
+  transaction: Transaction,
+  sampleId: string,
+  photo: { purpose: string; data: string; size: number } | null,
+  actor: AuditActor,
+  stamp: string,
+) {
+  if (!photo) return;
+  await transaction.execute({
+    sql: MEDIA_INSERT_SQL,
+    args: [
+      crypto.randomUUID(),
+      sampleId,
+      photo.purpose,
+      photo.size,
+      photo.data,
+      actor.id,
+      stamp,
+    ],
+  });
+}
+
 /**
  * Satu langkah pengiriman (v3.4, keputusan A). `step` = `{ action, shipment,
- * tracking_no, reason, evidence_base64 }`. Izin per langkah diperiksa route
- * (`shipmentActionPermission`). Cermin `desktop_record_shipment_step`.
+ * tracking_no, reason, evidence_base64, complaint, photo_base64 }`. Izin per
+ * langkah diperiksa route (`shipmentActionPermission`). Jawaban klien
+ * (v3.5) wajib membawa tangkapan layar kecuali lewat tautan persetujuan,
+ * yang memakai transaksi pemanggil. Cermin `desktop_record_shipment_step`.
  */
 export async function recordShipmentStep(
   client: Client,
   input: Draft,
   actor: AuditActor,
+  options: StepOptions = {},
 ) {
   const shipmentId = id(input.shipment_id);
   const step =
@@ -836,17 +897,27 @@ export async function recordShipmentStep(
   }
   const reason =
     action === "SHIP_CANCEL" ? shipmentCancelReason(step.reason) : "";
-  let evidence: { data: string; size: number } | null = null;
-  if (
-    action === "SHIP_DISPATCH" &&
-    typeof step.evidence_base64 === "string" &&
-    step.evidence_base64
-  ) {
-    const media = validateMediaUpload("SHIPMENT_PROOF", step.evidence_base64);
-    if ("error" in media) invalid(media.error);
-    evidence = { data: step.evidence_base64, size: media.byte_size };
-  }
-  const transaction = await client.transaction("write");
+  // Bukti serah terima (opsional) atau balasan klien (wajib, aturan 46).
+  const reply = clientEvidence(
+    action,
+    step.evidence_base64,
+    options.viaLink === true,
+  );
+  const evidence =
+    action === "SHIP_DISPATCH"
+      ? optionalPhoto("SHIPMENT_PROOF", step.evidence_base64)
+      : reply && {
+          purpose: reply.purpose,
+          data: reply.data_base64,
+          size: reply.byte_size,
+        };
+  const damage =
+    action === "SHIP_COMPLAINT"
+      ? optionalPhoto("COMPLAINT", step.photo_base64)
+      : null;
+  const own = !options.transaction;
+  const transaction =
+    options.transaction ?? (await client.transaction("write"));
   try {
     const [current] = await rows(
       transaction,
@@ -866,15 +937,26 @@ export async function recordShipmentStep(
       action,
     );
     if ("error" in next) invalid(next.error);
-    const notes = shipmentLogNotes(action, {
-      delivery_note_no: field("delivery_note_no"),
-      method: field("method"),
-      carrier_label: field("carrier_label"),
-      tracking_no: tracking || field("tracking_no"),
-      driver_name: field("driver_name"),
-      vehicle_plate: field("vehicle_plate"),
-      reason,
-    });
+    let complaint: ComplaintInput | null = null;
+    if (action === "SHIP_COMPLAINT") {
+      const checked = validateComplaint(
+        step.complaint,
+        Number(current.unit_count),
+      );
+      if ("error" in checked) invalid(checked.error);
+      complaint = checked.complaint;
+    }
+    const notes = complaint
+      ? complaintLogNotes(complaint)
+      : shipmentLogNotes(action, {
+          delivery_note_no: field("delivery_note_no"),
+          method: field("method"),
+          carrier_label: field("carrier_label"),
+          tracking_no: tracking || field("tracking_no"),
+          driver_name: field("driver_name"),
+          vehicle_plate: field("vehicle_plate"),
+          reason,
+        });
     const { stamp } = await clock(transaction);
     const changed = update
       ? await transaction.execute({
@@ -911,20 +993,8 @@ export async function recordShipmentStep(
       throw new ApiRequestError(SHIPMENT_CHANGED_ELSEWHERE, 409);
     }
     const sampleId = field("sample_request_id");
-    if (evidence) {
-      await transaction.execute({
-        sql: MEDIA_INSERT_SQL,
-        args: [
-          crypto.randomUUID(),
-          sampleId,
-          "SHIPMENT_PROOF",
-          evidence.size,
-          evidence.data,
-          actor.id,
-          stamp,
-        ],
-      });
-    }
+    await insertPhoto(transaction, sampleId, evidence, actor, stamp);
+    await insertPhoto(transaction, sampleId, damage, actor, stamp);
     const logId = crypto.randomUUID();
     await log(transaction, {
       id: logId,
@@ -943,6 +1013,30 @@ export async function recordShipmentStep(
         args: [logId, shipmentId],
       });
     }
+    let claimId: string | null = null;
+    if (complaint) {
+      // Satu klaim per komplain, diputuskan QC (keputusan B).
+      claimId = crypto.randomUUID();
+      await transaction.execute({
+        sql: CLAIM_INSERT_SQL,
+        args: [
+          claimId,
+          shipmentId,
+          field("batch_id"),
+          sampleId,
+          field("client_id"),
+          complaint.complaint_notes,
+          complaint.affected_units,
+          actor.id,
+          stamp,
+        ],
+      });
+      await transaction.execute({ sql: NOTIFY_COMPLAINT_SQL, args: [claimId] });
+    }
+    if (action === "SHIP_RECEIVED") {
+      // Order selesai: klien diserahkan ke CRM (v3.6a, keputusan B).
+      await handOverToCrm(transaction, field("client_id"), stamp);
+    }
     await writeAudit(transaction, actor, "shipment.step", "sample", sampleId, {
       client_code: field("client_code"),
       brand_name: field("brand_name"),
@@ -950,8 +1044,94 @@ export async function recordShipmentStep(
       action,
       notes,
     });
+    if (own) await transaction.commit();
+    return { id: shipmentId, status: next.status, claim_id: claimId };
+  } finally {
+    if (own) transaction.close();
+  }
+}
+
+/**
+ * Keputusan QC atas komplain penerimaan (v3.5, keputusan B/C), sekali saja.
+ * `decision` = `{ fault_type, findings, remedy, remedy_notes,
+ * evidence_base64 }`. Cermin `desktop_decide_qc_claim`.
+ */
+export async function decideQcClaim(
+  client: Client,
+  input: Draft,
+  actor: AuditActor,
+) {
+  const claimId = id(input.claim_id);
+  const checked = validateClaimDecision(input.decision);
+  if ("error" in checked) invalid(checked.error);
+  const decision = checked.decision;
+  const raw =
+    input.decision && typeof input.decision === "object"
+      ? (input.decision as Draft)
+      : {};
+  const finding = optionalPhoto("QC_EVIDENCE", raw.evidence_base64);
+  const transaction = await client.transaction("write");
+  try {
+    const [claim] = await rows(
+      transaction,
+      `${CLAIM_LIST_SQL} WHERE q.id = ?;`,
+      [claimId],
+    );
+    if (!claim) throw new ApiRequestError("Complaint not found.", 404);
+    const blocked = claimDecideError(String(claim.status));
+    if (blocked) throw new ApiRequestError(blocked, 409);
+    const { stamp } = await clock(transaction);
+    const changed = await transaction.execute({
+      sql: CLAIM_DECIDE_SQL,
+      args: [
+        claimId,
+        decision.fault_type,
+        decision.decision,
+        decision.remedy,
+        decision.remedy_notes,
+        decision.findings,
+        actor.id,
+        stamp,
+        String(claim.updated_at),
+      ],
+    });
+    if (changed.rowsAffected === 0) {
+      throw new ApiRequestError(CLAIM_CHANGED_ELSEWHERE, 409);
+    }
+    const sampleId = String(claim.sample_request_id);
+    await insertPhoto(transaction, sampleId, finding, actor, stamp);
+    const notes = claimLogNotes(decision);
+    await log(transaction, {
+      id: crypto.randomUUID(),
+      sampleId,
+      from: "OPEN",
+      to: "DECIDED",
+      action: CLAIM_DECIDE_ACTION,
+      notes,
+      actor,
+      stamp,
+    });
+    await transaction.execute({
+      sql: NOTIFY_CLAIM_DECIDED_SQL,
+      args: [claimId],
+    });
+    // Komplain diputuskan = order selesai: serah terima ke CRM (v3.6a).
+    await handOverToCrm(transaction, String(claim.client_id ?? ""), stamp);
+    await writeAudit(
+      transaction,
+      actor,
+      "qc_claim.decide",
+      "sample",
+      sampleId,
+      {
+        client_code: String(claim.client_code ?? ""),
+        brand_name: String(claim.brand_name ?? ""),
+        delivery_note_no: String(claim.delivery_note_no),
+        notes,
+      },
+    );
     await transaction.commit();
-    return { id: shipmentId, status: next.status };
+    return { id: claimId, decision: decision.decision };
   } finally {
     transaction.close();
   }

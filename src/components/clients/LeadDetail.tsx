@@ -8,6 +8,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { CrmForward } from "@/components/crm/CrmForward";
 import { FeedbackBanner } from "@/components/ui/FeedbackBanner";
 import { Modal } from "@/components/ui/Modal";
 import { hasPermission } from "@/lib/auth/access";
@@ -70,6 +71,13 @@ interface LeadDetailProps {
   onClose: () => void;
 }
 
+const IMPORTED_KIND_LABEL: Record<string, string> = {
+  FORMULA: "Formula",
+  DESIGN: "Design",
+  BATCH: "Batch",
+  SHIPMENT: "Shipment",
+};
+
 export function LeadDetail({
   client,
   optionLabel,
@@ -82,7 +90,16 @@ export function LeadDetail({
 }: LeadDetailProps) {
   const leadId = client.lead_id ?? "";
   const { user } = useAuth();
-  const canRequestSample = hasPermission(user, "samples.manage");
+  // Klien CRM (v3.6a, E-33): tanpa `crm.manage`, CS hanya membaca dan
+  // meneruskan permintaan; pemegangnya boleh mencatat tanpa syarat PIC CS.
+  const crmManaged = client.lifecycle_status === "EXISTING_CLIENT";
+  const canCrm = hasPermission(user, "crm.manage");
+  const crmLocked = crmManaged && !canCrm;
+  const canRequestSample = hasPermission(user, "samples.manage") && !crmLocked;
+  const canWrite =
+    (canRecord ||
+      (crmManaged && canCrm && hasPermission(user, "leads.manage"))) &&
+    !crmLocked;
   const [history, setHistory] = useState<LeadInteractionRecord[]>([]);
   const [imported, setImported] = useState<ImportedRecord[]>([]);
   const [operators, setOperators] = useState<OperatorDirectoryEntry[]>([]);
@@ -215,7 +232,8 @@ export function LeadDetail({
             {client.needs_notes}
           </p>
         ) : null}
-        {canEditClient ? (
+        {crmLocked ? <CrmForward clientId={client.id} /> : null}
+        {canEditClient && !crmLocked ? (
           <button
             type="button"
             onClick={onEditClient}
@@ -238,7 +256,7 @@ export function LeadDetail({
           <FeedbackBanner tone="success">{notice}</FeedbackBanner>
         ) : null}
 
-        {canRecord ? (
+        {canWrite ? (
           <form
             onSubmit={submitInteraction}
             className="space-y-3 border-t border-surface-container pt-4"
@@ -404,7 +422,8 @@ export function LeadDetail({
               Imported history
             </h3>
             <p className="mt-1 text-body-sm text-on-surface-variant">
-              Formulas and designs brought in from the old sheets. Read only.
+              Formulas, designs, batches, and shipments brought in from the old
+              sheets. Read only.
             </p>
             <ol className="mt-2 space-y-3">
               {imported.map((item) => (
@@ -413,11 +432,14 @@ export function LeadDetail({
                     {item.title}
                     <span className="font-normal text-on-surface-variant">
                       {" "}
-                      · {item.kind === "FORMULA" ? "Formula" : "Design"}
+                      · {IMPORTED_KIND_LABEL[item.kind] ?? item.kind}
                       {item.code ? ` ${item.code}` : ""}
                       {item.record_date ? ` · ${item.record_date}` : ""}
                       {item.amount_idr !== null
                         ? ` · ${formatRupiah(item.amount_idr)}`
+                        : ""}
+                      {item.quantity !== null
+                        ? ` · ${item.quantity.toLocaleString("en-US")} units`
                         : ""}
                     </span>
                   </p>

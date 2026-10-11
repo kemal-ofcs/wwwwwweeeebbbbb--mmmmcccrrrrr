@@ -21,6 +21,13 @@ const KIND_TITLE: Record<string, string> = {
   SAMPLE: "Sample approval",
   DUMMY: "Packaging dummy approval",
   MOU: "MoU approval",
+  RECEIPT: "Delivery confirmation",
+};
+
+/** Penerimaan barang (v3.5): bukan setuju/revisi, tetapi baik/ada masalah. */
+const RECEIPT_LABEL: Partial<Record<ApprovalDecision, string>> = {
+  APPROVE: "Received in good condition",
+  REVISE: "There is a problem",
 };
 
 const DECISION_LABEL: Record<ApprovalDecision, string> = {
@@ -59,6 +66,11 @@ export default function ApprovePage() {
       );
   }, []);
 
+  const label = (option: ApprovalDecision) =>
+    (view?.valid && view.entity_type === "RECEIPT"
+      ? RECEIPT_LABEL[option]
+      : undefined) ?? DECISION_LABEL[option];
+
   const submit = async (event: FormEvent) => {
     event.preventDefault();
     if (!decision || isSubmittingRef.current) return;
@@ -71,7 +83,7 @@ export default function ApprovePage() {
         responder_name: name,
         notes,
       });
-      setDone(DECISION_LABEL[decision]);
+      setDone(label(decision));
     } catch (cause) {
       const message =
         cause instanceof Error ? cause.message : "Your answer was not sent.";
@@ -173,7 +185,7 @@ export default function ApprovePage() {
                   checked={decision === option}
                   onChange={() => setDecision(option)}
                 />
-                {DECISION_LABEL[option]}
+                {label(option)}
               </label>
             ))}
           </fieldset>
@@ -189,9 +201,11 @@ export default function ApprovePage() {
             />
           </label>
           <label className="app-label grid gap-1.5">
-            {decision === "REVISE"
-              ? "What should we change?"
-              : "Notes (optional)"}
+            {decision !== "REVISE"
+              ? "Notes (optional)"
+              : view.entity_type === "RECEIPT"
+                ? "What is wrong with the goods?"
+                : "What should we change?"}
             <textarea
               required={decision === "REVISE"}
               rows={4}

@@ -998,11 +998,11 @@ pub async fn desktop_retry_failed_notifications(
     notifications::telegram_settings(&turso).await
 }
 
-/// Divisi lonceng yang boleh dilihat sesi ini (urutan CS, RnD, Finance, Desain, Production).
+/// Divisi lonceng yang boleh dilihat sesi ini (urutan `NOTIFICATION_DIVISIONS`).
 /// Setiap izin diperiksa lewat `require_permission`, termasuk gerbang lisensi;
 /// tanpa satu pun, penolakan terakhir dikembalikan.
-fn notification_access(state: &DesktopState) -> Result<(OperatorUser, [bool; 5]), CommandError> {
-    let mut allowed = [false; 5];
+fn notification_access(state: &DesktopState) -> Result<(OperatorUser, [bool; 6]), CommandError> {
+    let mut allowed = [false; 6];
     let mut granted = None;
     let mut denied = None;
     for (index, division) in notifications::NOTIFICATION_DIVISIONS.iter().enumerate() {
@@ -1991,7 +1991,7 @@ pub async fn desktop_update_company_profile(
 //   4. Picu sinkronisasi latar setelah commit, jangan sebelum.
 // ===========================================================================
 
-use super::{approval, clients, design, finance, legal, mou, production, samples, sheet_import};
+use super::{approval, clients, crm, dashboard, design, finance, legal, mou, production, samples, sheet_import};
 
 fn draft_text(draft: &Value, key: &str) -> String {
     draft
@@ -2861,10 +2861,16 @@ pub async fn desktop_import_sheet(
                         sheet_import::IMPORTED_RECORD_INSERT_SQL,
                         rusqlite::params![
                             &id, &kind, owner, &row.date, &row.code, &row.title, row.amount_idr, &row.notes,
-                            &file_name, operator.id, &now
+                            &file_name, operator.id, &now, row.quantity
                         ],
                     )
                     .map_err(|_| failed())?;
+                if kind == "SHIPMENT" {
+                    // Order lama selesai (v3.7, keputusan D): klien ke CRM.
+                    transaction
+                        .execute(sheet_import::IMPORT_HANDOVER_SQL, rusqlite::params![owner, &now])
+                        .map_err(|_| failed())?;
+                }
                 sync::enqueue(
                     &transaction,
                     &client_id,
@@ -2879,6 +2885,7 @@ pub async fn desktop_import_sheet(
                         "code": row.code,
                         "title": row.title,
                         "amount_idr": row.amount_idr,
+                        "quantity": row.quantity,
                         "notes": row.notes,
                         "source_file": file_name,
                         "imported_by": operator.id,
@@ -2980,6 +2987,7 @@ pub async fn desktop_update_client(
                 current["product_category_option_id"].as_str().unwrap_or_default(),
             )),
         )?;
+        crm_owner_gate(&connection, &id, &operator)?;
         shared_phone(&connection, &client, &draft.phone, &id)?;
         (draft, current)
     };
@@ -3347,7 +3355,8 @@ pub async fn desktop_record_lead_interaction(
             .optional()
             .map_err(|_| CommandError::internal())?
             .ok_or_else(|| CommandError::new("LEAD_NOT_FOUND", "Lead not found."))?;
-        if pic != Some(operator.id) && !operator_can(&operator, "leads.reassign") {
+        let managed = crm_owner_gate(&connection, &lead_id, &operator)?;
+        if pic != Some(operator.id) && !operator_can(&operator, "leads.reassign") && !managed {
             return Err(CommandError::new(
                 "LEAD_NOT_OWNED",
                 "Only the lead's CS can record on it. Ask an Admin to reassign the lead.",
@@ -3926,6 +3935,11 @@ pub fn desktop_get_sample_request(state: State<'_, DesktopState>, id: String) ->
         )?,
         "storage_sop_text": business_settings(&connection).storage_sop_text,
         "carriers": query_json(&connection, production::CARRIER_LIST_SQL, &[])?,
+        "claims": query_json(
+            &connection,
+            &format!("{} WHERE q.sample_request_id = ? ORDER BY q.created_at, q.id;", production::CLAIM_LIST_SQL),
+            &[&id],
+        )?,
     }))
 }
 
@@ -4037,6 +4051,7 @@ pub async fn desktop_create_sample_request(
             .optional()
             .map_err(|_| CommandError::internal())?
             .ok_or_else(|| CommandError::new("CLIENT_NOT_FOUND", "Client not found."))?;
+        crm_owner_gate(&connection, &client_id, &operator)?;
         let mode = business_settings(&connection).sample_fee_mode;
         let draft = samples::validate_sample_draft(&request, mode).map_err(sample_invalid)?;
         check_sample_references(&connection, &draft, None)?;
@@ -4613,6 +4628,15 @@ fn client_evidence(action: &str, data: Option<String>) -> Result<Option<(String,
     Ok(Some((clients::new_uuid(), data, size as i64)))
 }
 
+/// Foto opsional yang ikut sebuah langkah; `None` bila tidak dilampirkan.
+fn optional_photo(purpose: &str, data: Option<&str>) -> Result<Option<(String, String, i64)>, CommandError> {
+    let Some(data) = data.filter(|data| !data.is_empty()) else {
+        return Ok(None);
+    };
+    let size = samples::validate_media_upload(purpose, data).map_err(sample_invalid)?;
+    Ok(Some((clients::new_uuid(), data.to_owned(), size as i64)))
+}
+
 /// Bawa tangkapan layar di payload supaya cloud menyimpannya di transaksi yang sama.
 fn with_evidence(mut payload: Value, evidence: &Option<(String, String, i64)>) -> Value {
     if let Some((id, data, _)) = evidence {
@@ -4840,6 +4864,13 @@ pub fn desktop_list_production(state: State<'_, DesktopState>) -> Result<Value, 
         )?,
         "storage_sop_text": business_settings(&connection).storage_sop_text,
         "carriers": query_json(&connection, production::CARRIER_LIST_SQL, &[])?,
+        "approval_link_enabled": !business_settings(&connection).approval_web_url.is_empty(),
+        // Komplain penerimaan dan keputusan QC (v3.5).
+        "claims": query_json(
+            &connection,
+            &format!("{} ORDER BY q.created_at, q.id;", production::CLAIM_LIST_SQL),
+            &[],
+        )?,
     }))
 }
 
@@ -5299,8 +5330,9 @@ pub async fn desktop_create_shipment(
 }
 
 /// Satu langkah pengiriman: koreksi, batal, kirim, resi, atau diteruskan ke
-/// klien (keputusan A). `step` = `{ action, shipment, tracking_no, reason,
-/// evidence_base64 }`. Cermin `recordShipmentStep`.
+/// klien (keputusan A), atau jawaban klien atas barangnya (v3.5). `step` =
+/// `{ action, shipment, tracking_no, reason, evidence_base64, complaint,
+/// photo_base64 }`. Cermin `recordShipmentStep`.
 #[tauri::command]
 pub async fn desktop_record_shipment_step(
     state: State<'_, DesktopState>,
@@ -5345,36 +5377,48 @@ pub async fn desktop_record_shipment_step(
         _ => String::new(),
     };
     let reason = if action == "SHIP_CANCEL" { shipment_cancel_reason(&step)? } else { String::new() };
-    let evidence = match step
-        .get("evidence_base64")
-        .and_then(Value::as_str)
-        .filter(|data| action == "SHIP_DISPATCH" && !data.is_empty())
-    {
-        Some(data) => {
-            let size = samples::validate_media_upload("SHIPMENT_PROOF", data).map_err(sample_invalid)?;
-            Some((clients::new_uuid(), data.to_owned(), size as i64))
-        }
-        None => None,
+    // Bukti serah terima (opsional) atau balasan klien (wajib, aturan 46).
+    let evidence_data = step.get("evidence_base64").and_then(Value::as_str);
+    let (evidence_purpose, evidence) = if action == "SHIP_DISPATCH" {
+        ("SHIPMENT_PROOF", optional_photo("SHIPMENT_PROOF", evidence_data)?)
+    } else {
+        ("CLIENT_RESPONSE", client_evidence(&action, evidence_data.map(str::to_owned))?)
     };
+    let complaint = if action == "SHIP_COMPLAINT" {
+        let units = current["unit_count"].as_i64().unwrap_or(0);
+        Some(production::validate_complaint(step.get("complaint").unwrap_or(&Value::Null), units).map_err(production_invalid)?)
+    } else {
+        None
+    };
+    let damage = if action == "SHIP_COMPLAINT" {
+        optional_photo("COMPLAINT", step.get("photo_base64").and_then(Value::as_str))?
+    } else {
+        None
+    };
+    let claim_id = complaint.as_ref().map(|_| clients::new_uuid());
     let sample_id = field("sample_request_id");
     let base_updated_at = field("updated_at");
     let tracking_for_log = if tracking.is_empty() { field("tracking_no") } else { tracking.clone() };
-    let notes = production::shipment_log_notes(
-        &action,
-        &production::ShipmentLogInput {
-            delivery_note_no: &field("delivery_note_no"),
-            method: &field("method"),
-            carrier_label: &field("carrier_label"),
-            tracking_no: &tracking_for_log,
-            driver_name: &field("driver_name"),
-            vehicle_plate: &field("vehicle_plate"),
-            reason: &reason,
-        },
-    );
+    let notes = match &complaint {
+        Some(complaint) => production::complaint_log_notes(complaint),
+        None => production::shipment_log_notes(
+            &action,
+            &production::ShipmentLogInput {
+                delivery_note_no: &field("delivery_note_no"),
+                method: &field("method"),
+                carrier_label: &field("carrier_label"),
+                tracking_no: &tracking_for_log,
+                driver_name: &field("driver_name"),
+                vehicle_plate: &field("vehicle_plate"),
+                reason: &reason,
+            },
+        ),
+    };
     let log_id = clients::new_uuid();
-    let payload = json!({
+    let mut payload = json!({
         "id": shipment_id,
         "batch_id": field("batch_id"),
+        "client_id": field("client_id"),
         "sample_request_id": sample_id,
         "action": action,
         "base_status": base_status,
@@ -5387,6 +5431,13 @@ pub async fn desktop_record_shipment_step(
         "recorded_by": operator.id,
         "log": { "id": log_id, "notes": notes },
     });
+    if let (Some(complaint), Some(claim_id)) = (&complaint, &claim_id) {
+        payload["complaint"] = complaint.to_json();
+        payload["claim_id"] = json!(claim_id);
+    }
+    if let Some((id, data, _)) = &damage {
+        payload["photo"] = json!({ "id": id, "data_base64": data });
+    }
     let payload = with_evidence(payload, &evidence);
     let audit = AuditEntry {
         actor: &operator,
@@ -5431,17 +5482,382 @@ pub async fn desktop_record_shipment_step(
         if changed == 0 {
             return Err(production_invalid(production::SHIPMENT_CHANGED_ELSEWHERE));
         }
-        insert_evidence(transaction, "SHIPMENT_PROOF", &evidence, &sample_id, operator.id, &now)?;
+        insert_evidence(transaction, evidence_purpose, &evidence, &sample_id, operator.id, &now)?;
+        insert_evidence(transaction, "COMPLAINT", &damage, &sample_id, operator.id, &now)?;
         transaction
             .execute(
                 samples::SAMPLE_STATUS_LOG_INSERT_SQL,
                 rusqlite::params![&log_id, &sample_id, &base_status, status, &action, &notes, "", operator.id, &now],
             )
             .map_err(|_| CommandError::internal())?;
+        if let (Some(complaint), Some(claim_id)) = (&complaint, &claim_id) {
+            // Satu klaim per komplain, diputuskan QC (keputusan B).
+            transaction
+                .execute(
+                    production::CLAIM_INSERT_SQL,
+                    rusqlite::params![
+                        claim_id,
+                        &shipment_id,
+                        field("batch_id"),
+                        &sample_id,
+                        field("client_id"),
+                        &complaint.complaint_notes,
+                        complaint.affected_units,
+                        operator.id,
+                        &now
+                    ],
+                )
+                .map_err(|_| CommandError::internal())?;
+        }
+        if action == "SHIP_RECEIVED" {
+            // Order selesai: klien diserahkan ke CRM (v3.6a, keputusan B).
+            transaction
+                .execute(crm::CLIENT_HANDOVER_SQL, rusqlite::params![field("client_id"), &now])
+                .map_err(|_| CommandError::internal())?;
+        }
         Ok(())
     })?;
     let _ = sync::synchronize(&state).await;
-    Ok(json!({ "id": shipment_id, "status": status }))
+    Ok(json!({ "id": shipment_id, "status": status, "claim_id": claim_id }))
+}
+
+/// Repeat order (v3.6b, D-50): tiket baru langsung `CLIENT_ACC` dari tiket
+/// yang ordernya selesai, beserta formula dan harga terakhirnya. Cermin
+/// `repeatSampleOrder`.
+#[tauri::command]
+pub async fn desktop_repeat_sample_order(
+    state: State<'_, DesktopState>,
+    source_id: String,
+) -> Result<Value, CommandError> {
+    let operator = require_permission(&state, "crm.manage")?;
+    let now = clients::utc_timestamp(storage::now_epoch_seconds());
+    let source = {
+        let connection = storage::database(&state.data_dir)?;
+        query_json(&connection, crm::REPEAT_SOURCE_SQL, &[&source_id])?
+            .into_iter()
+            .next()
+            .ok_or_else(|| CommandError::new("SAMPLE_NOT_FOUND", "Sample request not found."))?
+    };
+    if let Some(message) = crm::repeat_order_error(
+        source["status"].as_str().unwrap_or_default(),
+        source["completed"].as_i64() == Some(1),
+    ) {
+        return Err(sample_invalid(message));
+    }
+    let id = clients::new_uuid();
+    let log_id = clients::new_uuid();
+    let payload = json!({
+        "id": id,
+        "source_id": source_id,
+        "created_by": operator.id,
+        "updated_at": now,
+        "log": { "id": log_id, "notes": crm::REPEAT_ORDER_NOTES },
+    });
+    let audit = AuditEntry {
+        actor: &operator,
+        action: "sample.repeat",
+        entity_type: "sample",
+        entity_id: &id,
+        summary: json!({
+            "client_code": source["client_code"],
+            "brand_name": source["brand_name"],
+            "source_id": source_id,
+        }),
+        on_behalf_of: None,
+    };
+    commit_with_outbox(&state, "sample", "repeat", &id, payload, Some(audit), |transaction| {
+        let inserted = transaction
+            .execute(crm::SAMPLE_REPEAT_INSERT_SQL, rusqlite::params![&id, &source_id, operator.id, &now])
+            .map_err(|_| CommandError::internal())?;
+        if inserted == 0 {
+            return Err(sample_invalid(samples::SAMPLE_CHANGED_ELSEWHERE));
+        }
+        for sql in [crm::FORMULA_REPEAT_COPY_SQL, crm::PRICE_REPEAT_COPY_SQL] {
+            transaction
+                .execute(sql, rusqlite::params![&id, &source_id, &now])
+                .map_err(|_| CommandError::internal())?;
+        }
+        transaction
+            .execute(
+                samples::SAMPLE_STATUS_LOG_INSERT_SQL,
+                rusqlite::params![
+                    &log_id,
+                    &id,
+                    "",
+                    "CLIENT_ACC",
+                    crm::REPEAT_ORDER_ACTION,
+                    crm::REPEAT_ORDER_NOTES,
+                    "",
+                    operator.id,
+                    &now
+                ],
+            )
+            .map_err(|_| CommandError::internal())?;
+        Ok(())
+    })?;
+    let _ = sync::synchronize(&state).await;
+    Ok(json!({ "id": id }))
+}
+
+/// Dashboard eksekutif (F-40a, D-52): bagian yang izinnya dipegang, dihitung
+/// dari data perangkat (hasil sinkronisasi terakhir). Cermin `getDashboard`.
+#[tauri::command]
+pub fn desktop_get_dashboard(state: State<'_, DesktopState>, from: String, to: String) -> Result<Value, CommandError> {
+    let operator = require_permission(&state, "dashboard.view")?;
+    let (from, to) =
+        dashboard::validate_dashboard_range(&from, &to).map_err(|message| CommandError::new("DASHBOARD_INVALID", message))?;
+    let connection = storage::database(&state.data_dir)?;
+    let mut sections = serde_json::Map::new();
+    for (section, permission) in dashboard::DASHBOARD_SECTIONS {
+        let Some(sql) = dashboard::dashboard_section_sql(section).filter(|_| operator_can(&operator, permission)) else {
+            continue;
+        };
+        let row = query_json(&connection, sql, &[&from, &to])?.into_iter().next().unwrap_or(Value::Null);
+        sections.insert((*section).to_owned(), row);
+    }
+    Ok(json!({ "from": from, "to": to, "sections": sections }))
+}
+
+/// Gerbang CS (v3.6a, D-49 keputusan D1): klien `EXISTING_CLIENT` dikelola
+/// CRM. `id` = id klien atau id lead. `Ok(true)` = klien dikelola CRM dan
+/// operator memegang `crm.manage`.
+fn crm_owner_gate(connection: &rusqlite::Connection, id: &str, operator: &OperatorUser) -> Result<bool, CommandError> {
+    use rusqlite::OptionalExtension;
+    let row = connection
+        .query_row(crm::CRM_OWNER_SQL, [id], |row| Ok((row.get::<_, String>(2)?, row.get::<_, String>(3)?)))
+        .optional()
+        .map_err(|_| CommandError::internal())?;
+    let Some((lifecycle, crm_name)) = row else {
+        return Ok(false);
+    };
+    if let Some(message) = crm::crm_owner_error(&lifecycle, operator_can(operator, "crm.manage"), &crm_name) {
+        return Err(CommandError::new("CLIENT_MANAGED_BY_CRM", message));
+    }
+    Ok(lifecycle == "EXISTING_CLIENT")
+}
+
+/// Operator CRM aktif untuk pilihan PIC CRM (direktori operator perangkat).
+const CRM_OPERATORS_SQL: &str =
+    "SELECT id, nama_operator FROM master_operator WHERE role = 'crm' AND COALESCE(status, 'Active') = 'Active' ORDER BY nama_operator;";
+
+/// Antrean CRM (v3.6a, keputusan G): kartu klien `EXISTING_CLIENT` dan pilihan
+/// PIC CRM. Cermin `listCrm`.
+#[tauri::command]
+pub fn desktop_list_crm(state: State<'_, DesktopState>) -> Result<Value, CommandError> {
+    require_permission(&state, "clients.view")?;
+    let connection = storage::database(&state.data_dir)?;
+    Ok(json!({
+        "clients": query_json(
+            &connection,
+            &format!("{} ORDER BY reorder_on, client_code;", crm::CRM_CLIENT_LIST_SQL),
+            &[],
+        )?,
+        "operators": query_json(&connection, CRM_OPERATORS_SQL, &[])?,
+    }))
+}
+
+/// Ambil atau pindahkan PIC CRM sebuah klien (keputusan C). Cermin `assignCrm`.
+#[tauri::command]
+pub async fn desktop_assign_crm(
+    state: State<'_, DesktopState>,
+    client_id: String,
+    operator_id: i64,
+) -> Result<Value, CommandError> {
+    use rusqlite::OptionalExtension;
+    let operator = require_permission(&state, "crm.manage")?;
+    let now = clients::utc_timestamp(storage::now_epoch_seconds());
+    let (code, name) = {
+        let connection = storage::database(&state.data_dir)?;
+        let name: Option<String> = connection
+            .query_row(
+                "SELECT nama_operator FROM master_operator WHERE id = ? AND role = 'crm' AND COALESCE(status, 'Active') = 'Active';",
+                [operator_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|_| CommandError::internal())?;
+        let name = name.ok_or_else(|| CommandError::new("CRM_INVALID", crm::CRM_OPERATOR_INVALID))?;
+        let code: String = connection
+            .query_row("SELECT client_code FROM clients WHERE id = ?;", [&client_id], |row| row.get(0))
+            .optional()
+            .map_err(|_| CommandError::internal())?
+            .ok_or_else(|| CommandError::new("CLIENT_NOT_FOUND", "Client not found."))?;
+        (code, name)
+    };
+    let payload = json!({
+        "id": client_id,
+        "assigned_crm_id": operator_id,
+        "updated_at": now,
+        "recorded_by": operator.id,
+    });
+    let audit = AuditEntry {
+        actor: &operator,
+        action: "client.assign_crm",
+        entity_type: "client",
+        entity_id: &client_id,
+        summary: json!({ "client_code": code, "crm_name": name }),
+        on_behalf_of: None,
+    };
+    commit_with_outbox(&state, "client", "assign-crm", &client_id, payload, Some(audit), |transaction| {
+        let changed = transaction
+            .execute(crm::CRM_ASSIGN_SQL, rusqlite::params![&client_id, operator_id, &now])
+            .map_err(|_| CommandError::internal())?;
+        if changed == 0 {
+            return Err(CommandError::new("CRM_INVALID", crm::CRM_NOT_HANDED_OVER));
+        }
+        Ok(())
+    })?;
+    let _ = sync::synchronize(&state).await;
+    Ok(json!({ "id": client_id }))
+}
+
+/// CS meneruskan klien CRM ke grup CRM (E-33, keputusan E): hanya notifikasi
+/// dan audit di cloud. Cermin `forwardToCrm`.
+#[tauri::command]
+pub async fn desktop_forward_to_crm(
+    state: State<'_, DesktopState>,
+    client_id: String,
+    forward: Value,
+) -> Result<Value, CommandError> {
+    use rusqlite::OptionalExtension;
+    let operator = require_permission(&state, "clients.manage")?;
+    let notes = crm::validate_crm_forward(&forward).map_err(|message| CommandError::new("CRM_INVALID", message))?;
+    let now = clients::utc_timestamp(storage::now_epoch_seconds());
+    let code = {
+        let connection = storage::database(&state.data_dir)?;
+        let row: Option<(String, String)> = connection
+            .query_row(
+                "SELECT client_code, lifecycle_status FROM clients WHERE id = ?;",
+                [&client_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(|_| CommandError::internal())?;
+        let (code, lifecycle) = row.ok_or_else(|| CommandError::new("CLIENT_NOT_FOUND", "Client not found."))?;
+        if lifecycle != "EXISTING_CLIENT" {
+            return Err(CommandError::new("CRM_INVALID", crm::CRM_NOT_HANDED_OVER));
+        }
+        code
+    };
+    let forward_id = clients::new_uuid();
+    let payload = json!({
+        "id": client_id,
+        "forward_id": forward_id,
+        "notes": notes,
+        "updated_at": now,
+        "recorded_by": operator.id,
+    });
+    let audit = AuditEntry {
+        actor: &operator,
+        action: "client.forward_crm",
+        entity_type: "client",
+        entity_id: &client_id,
+        summary: json!({ "client_code": code, "notes": notes }),
+        on_behalf_of: None,
+    };
+    commit_with_outbox(&state, "client", "forward-crm", &client_id, payload, Some(audit), |_| Ok(()))?;
+    let _ = sync::synchronize(&state).await;
+    Ok(json!({ "id": forward_id }))
+}
+
+
+/// Keputusan QC atas komplain penerimaan (v3.5, keputusan B/C), sekali
+/// saja. `decision` = `{ fault_type, findings, remedy, remedy_notes,
+/// evidence_base64 }`. Cermin `decideQcClaim`.
+#[tauri::command]
+pub async fn desktop_decide_qc_claim(
+    state: State<'_, DesktopState>,
+    claim_id: String,
+    decision: Value,
+) -> Result<Value, CommandError> {
+    let operator = require_permission(&state, "qc.manage")?;
+    let checked = production::validate_claim_decision(&decision).map_err(production_invalid)?;
+    let finding = optional_photo("QC_EVIDENCE", decision.get("evidence_base64").and_then(Value::as_str))?;
+    let now = clients::utc_timestamp(storage::now_epoch_seconds());
+    let claim = {
+        let connection = storage::database(&state.data_dir)?;
+        query_json(&connection, &format!("{} WHERE q.id = ?;", production::CLAIM_LIST_SQL), &[&claim_id])?
+            .into_iter()
+            .next()
+            .ok_or_else(|| CommandError::new("CLAIM_NOT_FOUND", "Complaint not found."))?
+    };
+    let field = |key: &str| claim[key].as_str().unwrap_or_default().to_owned();
+    if let Some(message) = production::claim_decide_error(&field("status")) {
+        return Err(production_invalid(message));
+    }
+    let sample_id = field("sample_request_id");
+    let base_updated_at = field("updated_at");
+    let notes = production::claim_log_notes(&checked);
+    let log_id = clients::new_uuid();
+    let payload = json!({
+        "id": claim_id,
+        "sample_request_id": sample_id,
+        "client_id": field("client_id"),
+        "decision": checked.to_json(),
+        "base_updated_at": base_updated_at,
+        "updated_at": now,
+        "recorded_by": operator.id,
+        "log": { "id": log_id, "notes": notes },
+    });
+    let payload = with_evidence(payload, &finding);
+    let audit = AuditEntry {
+        actor: &operator,
+        action: "qc_claim.decide",
+        entity_type: "sample",
+        entity_id: &sample_id,
+        summary: json!({
+            "client_code": claim["client_code"],
+            "brand_name": claim["brand_name"],
+            "delivery_note_no": claim["delivery_note_no"],
+            "notes": notes,
+        }),
+        on_behalf_of: None,
+    };
+    commit_with_outbox(&state, "qc-claim", "decide", &claim_id, payload, Some(audit), |transaction| {
+        let changed = transaction
+            .execute(
+                production::CLAIM_DECIDE_SQL,
+                rusqlite::params![
+                    &claim_id,
+                    checked.fault_type,
+                    checked.decision,
+                    &checked.remedy,
+                    &checked.remedy_notes,
+                    &checked.findings,
+                    operator.id,
+                    &now,
+                    &base_updated_at
+                ],
+            )
+            .map_err(|_| CommandError::internal())?;
+        if changed == 0 {
+            return Err(production_invalid(production::CLAIM_CHANGED_ELSEWHERE));
+        }
+        insert_evidence(transaction, "QC_EVIDENCE", &finding, &sample_id, operator.id, &now)?;
+        transaction
+            .execute(
+                samples::SAMPLE_STATUS_LOG_INSERT_SQL,
+                rusqlite::params![
+                    &log_id,
+                    &sample_id,
+                    "OPEN",
+                    "DECIDED",
+                    production::CLAIM_DECIDE_ACTION,
+                    &notes,
+                    "",
+                    operator.id,
+                    &now
+                ],
+            )
+            .map_err(|_| CommandError::internal())?;
+        // Komplain diputuskan = order selesai: serah terima ke CRM (v3.6a).
+        transaction
+            .execute(crm::CLIENT_HANDOVER_SQL, rusqlite::params![field("client_id"), &now])
+            .map_err(|_| CommandError::internal())?;
+        Ok(())
+    })?;
+    let _ = sync::synchronize(&state).await;
+    Ok(json!({ "id": claim_id, "decision": checked.decision }))
 }
 
 /// Tandai tahap lantai produksi berikutnya selesai (v3.2, PRD F-25,
@@ -5797,6 +6213,10 @@ pub async fn desktop_create_mou(
                     &timestamp,
                 ],
             )
+            .map_err(|_| CommandError::internal())?;
+        // Repeat order (v3.6b): dokumen legal final tiket asal ikut MoU ini.
+        transaction
+            .execute(crm::LEGAL_REPEAT_COPY_SQL, rusqlite::params![&id, &sample_id, &timestamp])
             .map_err(|_| CommandError::internal())?;
         Ok(())
     })?;
@@ -6788,7 +7208,7 @@ pub(crate) fn safe_file_name(raw: &str, extension: &str) -> Option<String> {
 }
 
 /// Daftar yang boleh diekspor (v2.8, PRD D-41); `template` = contoh impor.
-pub(crate) const EXPORT_SUBJECTS: &[&str] = &["clients", "samples", "invoices", "funds", "template"];
+pub(crate) const EXPORT_SUBJECTS: &[&str] = &["clients", "samples", "invoices", "funds", "report", "template"];
 
 /// Template impor .xlsx paling besar sekian: header + satu baris contoh
 /// berukuran beberapa KB, jadi jalur tanpa `data.export` ini tidak bisa
@@ -6821,7 +7241,7 @@ pub(crate) fn checked_xlsx(
         return Err(invalid("Choose what to export."));
     }
     if template
-        && !["clients.manage", "finance.manage", "rnd.manage", "design.manage"]
+        && !["clients.manage", "finance.manage", "rnd.manage", "design.manage", "production.manage", "shipping.manage"]
             .iter()
             .any(|permission| operator_can(actor, permission))
     {

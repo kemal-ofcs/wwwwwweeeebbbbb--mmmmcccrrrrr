@@ -12,6 +12,7 @@ import type {
   PoDelayInput,
   PoStatus,
   PurchaseOrderInput,
+  QcFaultType,
   ShipmentAction,
   ShipmentInput,
   ShipmentStatus,
@@ -114,6 +115,10 @@ export interface ProductionOverview {
   /** Teks SOP Penyimpanan; kosong = tanpa PDF SOP. */
   storage_sop_text: string;
   carriers: SupplierOption[];
+  /** Komplain penerimaan dan keputusan QC (v3.5). */
+  claims: QcClaimRecord[];
+  /** Alamat Web persetujuan disetel: tautan konfirmasi penerimaan. */
+  approval_link_enabled: boolean;
 }
 
 /** Satu langkah PO; `po_id` kosong untuk PO baru. */
@@ -201,6 +206,8 @@ export interface ShipmentRecord {
   cancel_reason: string;
   shipped_at: string;
   forwarded_at: string;
+  /** Waktu jawaban klien dicatat (v3.5); '' = belum. */
+  received_at: string;
   created_at: string;
   updated_at: string;
   batch_code: string;
@@ -216,7 +223,69 @@ export interface ShipmentStep {
   shipment: ShipmentInput | null;
   tracking_no: string;
   reason: string;
+  /** Bukti serah terima (Shipped) atau tangkapan layar balasan klien (v3.5). */
   evidence_base64: string;
+  /** Keluhan klien (Complaint, v3.5) dan foto kerusakan opsional. */
+  complaint?: { complaint_notes: string; affected_units: number };
+  photo_base64?: string;
+}
+
+/** Satu baris `CLAIM_LIST_SQL` (v3.5). */
+export interface QcClaimRecord {
+  id: string;
+  shipment_id: string;
+  batch_id: string;
+  sample_request_id: string;
+  client_id: string;
+  complaint_notes: string;
+  affected_units: number;
+  status: "OPEN" | "DECIDED";
+  fault_type: QcFaultType | "";
+  decision: "RETURN_APPROVED" | "RETURN_REJECTED" | "";
+  remedy: string;
+  remedy_notes: string;
+  findings: string;
+  decided_at: string;
+  decided_by_name: string;
+  created_at: string;
+  updated_at: string;
+  delivery_note_no: string;
+  method: DeliveryMethod;
+  tracking_no: string;
+  driver_name: string;
+  vehicle_plate: string;
+  ship_on: string;
+  unit_count: number;
+  carton_count: number;
+  ship_to_address: string;
+  carrier_label: string;
+  batch_code: string;
+  mou_number: string;
+  brand_name: string;
+  client_code: string | null;
+  client_name: string | null;
+}
+
+/** Keputusan QC; `remedy` hanya untuk salah pabrik. */
+export interface ClaimDecisionInput {
+  fault_type: QcFaultType;
+  findings: string;
+  remedy: string;
+  remedy_notes: string;
+  evidence_base64: string;
+}
+
+export async function decideQcClaim(
+  claimId: string,
+  decision: ClaimDecisionInput,
+): Promise<{ id: string; decision: string }> {
+  if (isDesktopRuntime()) {
+    return invokeDesktop("desktop_decide_qc_claim", { claimId, decision });
+  }
+  return requestWebApi("/api/production/claim", "POST", {
+    claim_id: claimId,
+    decision,
+  });
 }
 
 export async function createShipment(

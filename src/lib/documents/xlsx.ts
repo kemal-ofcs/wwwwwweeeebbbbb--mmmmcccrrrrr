@@ -228,15 +228,18 @@ function columnName(index: number) {
 const STYLES = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><numFmts count="2"><numFmt numFmtId="164" formatCode="yyyy-mm-dd"/><numFmt numFmtId="165" formatCode="yyyy-mm-dd hh:mm"/></numFmts><fonts count="2"><font><sz val="11"/><name val="Calibri"/></font><font><b/><sz val="11"/><name val="Calibri"/></font></fonts><fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills><borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="5"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1"/><xf numFmtId="3" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/><xf numFmtId="164" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/><xf numFmtId="165" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/></cellXfs></styleSheet>`;
 
+export interface XlsxSheet {
+  /** Nama tab; dipotong 31 karakter dan dibersihkan dari karakter terlarang. */
+  name: string;
+  rows: readonly (readonly XlsxCell[])[];
+}
+
 /**
- * Satu sheet: baris pertama header tebal dan dibekukan, teks tetap teks
+ * XML satu sheet: baris pertama header tebal dan dibekukan, teks tetap teks
  * (nomor WhatsApp tidak menjadi `6.28E+12`), angka dengan pemisah ribuan,
  * tanggal sebagai tanggal Excel asli.
  */
-export function buildXlsx(
-  rows: readonly (readonly XlsxCell[])[],
-  sheetName = "Data",
-): Uint8Array {
+function sheetXml(rows: readonly (readonly XlsxCell[])[]) {
   const widths: number[] = [];
   const sheetRows = rows
     .map((row, rowIndex) => {
@@ -271,18 +274,59 @@ export function buildXlsx(
   const cols = widths.length
     ? `<cols>${widths.map((width, index) => `<col min="${index + 1}" max="${index + 1}" width="${width ?? 8}" customWidth="1"/>`).join("")}</cols>`
     : "";
-  const sheet = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetViews><sheetView workbookViewId="0"><pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews>${cols}<sheetData>${sheetRows}</sheetData></worksheet>`;
+}
+
+/** Nama tab Excel: tanpa `[]:*?/\`, paling panjang 31, unik di workbook. */
+function sheetNames(names: readonly string[]) {
+  const used = new Set<string>();
+  return names.map((raw, index) => {
+    const base =
+      raw
+        .replace(/[[\]:*?/\\]/g, " ")
+        .trim()
+        .slice(0, 31) || `Sheet${index + 1}`;
+    let name = base;
+    for (let n = 2; used.has(name.toLowerCase()); n += 1) {
+      name = `${base.slice(0, 28)} ${n}`;
+    }
+    used.add(name.toLowerCase());
+    return name;
+  });
+}
+
+/** Workbook dengan banyak sheet (F-40b), urutan tab = urutan `sheets`. */
+export function buildXlsxWorkbook(sheets: readonly XlsxSheet[]): Uint8Array {
+  const names = sheetNames(sheets.map((sheet) => sheet.name));
   const encoder = new TextEncoder();
   const file = (name: string, text: string) => ({
     name,
     data: encoder.encode(text),
   });
+  const overrides = sheets
+    .map(
+      (_, index) =>
+        `<Override PartName="/xl/worksheets/sheet${index + 1}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>`,
+    )
+    .join("");
+  const tabs = names
+    .map(
+      (name, index) =>
+        `<sheet name="${escapeXml(name)}" sheetId="${index + 1}" r:id="rId${index + 1}"/>`,
+    )
+    .join("");
+  const relations = sheets
+    .map(
+      (_, index) =>
+        `<Relationship Id="rId${index + 1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet${index + 1}.xml"/>`,
+    )
+    .join("");
   return zip([
     file(
       "[Content_Types].xml",
       `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/></Types>`,
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>${overrides}<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/></Types>`,
     ),
     file(
       "_rels/.rels",
@@ -292,16 +336,26 @@ export function buildXlsx(
     file(
       "xl/workbook.xml",
       `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="${escapeXml(sheetName).slice(0, 31)}" sheetId="1" r:id="rId1"/></sheets></workbook>`,
+<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets>${tabs}</sheets></workbook>`,
     ),
     file(
       "xl/_rels/workbook.xml.rels",
       `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>`,
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${relations}<Relationship Id="rId${sheets.length + 1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>`,
     ),
     file("xl/styles.xml", STYLES),
-    file("xl/worksheets/sheet1.xml", sheet),
+    ...sheets.map((sheet, index) =>
+      file(`xl/worksheets/sheet${index + 1}.xml`, sheetXml(sheet.rows)),
+    ),
   ]);
+}
+
+/** Satu sheet (v2.8): ekspor daftar dan template impor. */
+export function buildXlsx(
+  rows: readonly (readonly XlsxCell[])[],
+  sheetName = "Data",
+): Uint8Array {
+  return buildXlsxWorkbook([{ name: sheetName, rows }]);
 }
 
 // ---------------------------------------------------------------------------

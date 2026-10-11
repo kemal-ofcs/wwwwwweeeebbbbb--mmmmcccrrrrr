@@ -32,6 +32,19 @@ function target(
 ): { path: string; query: string } | null {
   if (item.event_type === "COLD_DIGEST")
     return { path: "/clients", query: "tab=cold" };
+  // CRM (v3.6a): ringkasan repeat order ke tab Due, klien ke layar CRM.
+  if (item.event_type === "REORDER_DUE")
+    return { path: "/crm", query: "tab=due" };
+  if (
+    (item.event_type === "CLIENT_HANDOVER" ||
+      item.event_type === "CRM_FORWARD") &&
+    item.client_id
+  ) {
+    return {
+      path: "/clients",
+      query: `id=${encodeURIComponent(item.client_id)}`,
+    };
+  }
   if (item.event_type === "LEAD_NEW" && item.client_id) {
     return {
       path: "/clients",
@@ -186,7 +199,11 @@ export function NotificationBell() {
                   destination !== null &&
                   canAccessArea(
                     user,
-                    destination.path === "/samples" ? "samples" : "clients",
+                    destination.path === "/samples"
+                      ? "samples"
+                      : destination.path === "/crm"
+                        ? "crm"
+                        : "clients",
                   )
                     ? destination
                     : null;

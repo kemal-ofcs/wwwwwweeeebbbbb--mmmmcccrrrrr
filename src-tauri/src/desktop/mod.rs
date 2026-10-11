@@ -4,6 +4,8 @@ pub mod clients;
 pub mod samples;
 pub mod commands;
 pub mod config;
+pub mod crm;
+pub mod dashboard;
 pub mod design;
 pub mod finance;
 pub mod legal;

@@ -81,6 +81,7 @@ describe("baris sheet divalidasi (baris_sheet_divalidasi)", () => {
         code: "",
         title: "",
         amount_idr: 2_000_000,
+        quantity: null,
         notes: "Transfer BCA",
       },
     });
@@ -198,6 +199,69 @@ test("rencana impor melewati yang sudah ada (rencana_impor_melewati_yang_sudah_a
   expect(sheetImportPermission("CLIENTS")).toBeNull();
 });
 
+describe("riwayat batch dan pengiriman (riwayat_batch_dan_pengiriman)", () => {
+  const history = (date: string, title: string, quantity: string) =>
+    sheetRowInput({
+      line: 3,
+      date,
+      client_code: "KP-1",
+      code: "JNE1",
+      title,
+      amount: "999",
+      quantity,
+      notes: "",
+    });
+  test("sah", () => {
+    const shipped = validateSheetRow(
+      "SHIPMENT",
+      history("25/8/2025", "Serum", "5.000"),
+      "DMY",
+    );
+    if (!("row" in shipped)) throw new Error("pengiriman sah");
+    expect([
+      shipped.row.date,
+      shipped.row.amount_idr,
+      shipped.row.quantity,
+    ]).toEqual(["2025-08-25", null, 5000]);
+    const batch = validateSheetRow(
+      "BATCH",
+      history("20/8/2025", "Serum", ""),
+      "DMY",
+    );
+    if (!("row" in batch)) throw new Error("batch sah");
+    expect(batch.row.quantity).toBeNull();
+  });
+  const cases: [SheetKind, ReturnType<typeof history>, string][] = [
+    ["SHIPMENT", history("", "Serum", ""), "Tanggal Kirim is empty."],
+    ["BATCH", history("", "Serum", ""), "Tanggal is empty."],
+    ["BATCH", history("1/1/2025", "", ""), "Nama Produk is empty."],
+    [
+      "BATCH",
+      history("1/1/2025", "Serum", "5,5"),
+      'The unit count "5,5" could not be read.',
+    ],
+    [
+      "BATCH",
+      history("1/1/2025", "Serum", "0"),
+      'The unit count "0" is out of range.',
+    ],
+    [
+      "BATCH",
+      history("1/1/2025", "Serum", "10.000.001"),
+      'The unit count "10.000.001" is out of range.',
+    ],
+  ];
+  for (const [kind, raw, message] of cases) {
+    test(message, () => {
+      expect(validateSheetRow(kind, raw, "DMY")).toEqual({ error: message });
+    });
+  }
+  test("izin", () => {
+    expect(sheetImportPermission("BATCH")).toBe("production.manage");
+    expect(sheetImportPermission("SHIPMENT")).toBe("shipping.manage");
+  });
+});
+
 test("setiap SQL identik dengan Rust", () => {
   const path = ["desktop", "mobile"]
     .map((dir) =>
@@ -209,7 +273,7 @@ test("setiap SQL identik dengan Rust", () => {
   const shared = Object.entries(rules).filter(
     ([name, value]) => typeof value === "string" && name.endsWith("_SQL"),
   );
-  expect(shared.length).toBe(5);
+  expect(shared.length).toBe(6);
   for (const [name, value] of shared) {
     expect(rust, name).toContain(`"${value}"`);
   }

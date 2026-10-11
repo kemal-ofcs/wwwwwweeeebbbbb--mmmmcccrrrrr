@@ -83,6 +83,8 @@ async function setChats(cs: string, rnd: string, finance: string) {
       dp_percentage_bp: 5000,
       approval_web_url: "",
       approval_token_ttl_days: 3,
+      telegram_chat_id_crm: "",
+      crm_reorder_days: 60,
     },
     ADMIN,
   );
@@ -150,6 +152,8 @@ describe("notifikasi divisi, jalur Web", () => {
        ORDER BY r.role_key;`,
     );
     expect(granted).toEqual([
+      // Lonceng CRM (v3.6a) lewat `CRM_PERMISSION_SEED_SQL`.
+      { role_key: "crm", permission_key: "notifications_crm.view" },
       { role_key: "cs", permission_key: "notifications_cs.view" },
       { role_key: "finance", permission_key: "notifications_finance.view" },
       { role_key: "operator", permission_key: "notifications_cs.view" },
@@ -353,7 +357,7 @@ describe("notifikasi divisi, jalur Web", () => {
   test("lonceng: hanya divisi yang boleh dilihat; membuka = semua dibaca", async () => {
     const cs = await notifications.listNotifications(
       client,
-      [true, false, false, false, false],
+      [true, false, false, false, false, false],
       7,
     );
     expect(cs.items.length).toBeGreaterThan(0);
@@ -364,7 +368,7 @@ describe("notifikasi divisi, jalur Web", () => {
 
     const rnd = await notifications.listNotifications(
       client,
-      [false, true, false, false, false],
+      [false, true, false, false, false, false],
       7,
     );
     expect(rnd.items.map((item) => item.event_type)).toEqual([
@@ -377,7 +381,7 @@ describe("notifikasi divisi, jalur Web", () => {
       (
         await notifications.listNotifications(
           client,
-          [true, true, true, true, true],
+          [true, true, true, true, true, true],
           7,
         )
       ).unread,
@@ -387,7 +391,7 @@ describe("notifikasi divisi, jalur Web", () => {
       (
         await notifications.listNotifications(
           client,
-          [true, true, true, true, true],
+          [true, true, true, true, true, true],
           1,
         )
       ).unread,

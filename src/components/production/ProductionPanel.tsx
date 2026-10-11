@@ -15,6 +15,7 @@ import {
   createBatch,
   markMaterialsReady,
   type PurchaseOrderRecord,
+  type QcClaimRecord,
   recordBatchStage,
   recordPurchaseOrder,
   type ShipmentRecord,
@@ -90,6 +91,8 @@ export function ProductionPanel({
   shipments,
   carriers,
   storageSopText,
+  claims,
+  linkEnabled,
   onChanged,
 }: {
   /** MoU work order ini; dipakai untuk menawarkan "Create work order". */
@@ -103,6 +106,9 @@ export function ProductionPanel({
   shipments: ShipmentRecord[];
   carriers: SupplierOption[];
   storageSopText: string;
+  /** Komplain penerimaan (v3.5) dan tautan konfirmasi penerimaan. */
+  claims: QcClaimRecord[];
+  linkEnabled: boolean;
   onChanged: () => void;
 }) {
   const { user } = useAuth();
@@ -811,6 +817,8 @@ export function ProductionPanel({
           carriers={carriers}
           storageSopText={storageSopText}
           shipBlock={shipBlock}
+          claims={claims}
+          linkEnabled={linkEnabled}
           onChanged={onChanged}
         />
       ) : null}

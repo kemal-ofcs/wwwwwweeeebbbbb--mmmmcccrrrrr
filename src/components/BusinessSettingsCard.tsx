@@ -10,6 +10,8 @@ import {
 } from "@/lib/gateways/samples";
 import {
   APPROVAL_TTL_DAYS_LIMIT,
+  CRM_REORDER_DAYS_MAX,
+  CRM_REORDER_DAYS_MIN,
   DEFAULT_BUSINESS_SETTINGS,
   FREE_REVISION_LIMIT_MAX,
   INVOICE_DUE_DAYS_LIMIT,
@@ -297,6 +299,28 @@ export function BusinessSettingsCard({ canManage }: { canManage: boolean }) {
               </span>
             </label>
             <label className="app-label grid gap-1.5">
+              Repeat order reminder (days)
+              <input
+                required
+                type="number"
+                min={CRM_REORDER_DAYS_MIN}
+                max={CRM_REORDER_DAYS_MAX}
+                step={1}
+                value={settings.crm_reorder_days}
+                onChange={(event) =>
+                  setSettings({
+                    ...settings,
+                    crm_reorder_days: wholeNumber(event.target.value),
+                  })
+                }
+                className="app-input font-normal"
+              />
+              <span className="text-body-sm font-normal text-on-surface-variant">
+                CRM sees a client as due for a repeat order this many days after
+                their last order was completed.
+              </span>
+            </label>
+            <label className="app-label grid gap-1.5">
               MoU down payment (%)
               <input
                 required
@@ -478,6 +502,7 @@ export function BusinessSettingsCard({ canManage }: { canManage: boolean }) {
                 ["telegram_chat_id_finance", "Finance group"],
                 ["telegram_chat_id_design", "Design group"],
                 ["telegram_chat_id_production", "Production group"],
+                ["telegram_chat_id_crm", "CRM group"],
               ] as const
             ).map(([key, label]) => (
               <label key={key} className="app-label grid gap-1.5">

@@ -62,6 +62,7 @@ const row = (line: number, values: Record<string, string>) => ({
   code: "",
   title: "",
   amount: "",
+  quantity: "",
   notes: "",
   ...values,
 });
@@ -168,4 +169,60 @@ test("arsip formulasi: klien wajib, tampil di detail klien", async () => {
   await expect(
     sheets.importSheet(client, { ...body, kind: "CLIENTS" }, ADMIN),
   ).rejects.toThrow("Choose which sheet to import.");
+});
+
+test("riwayat pengiriman: klien lama masuk CRM, impor ulang menambah nol", async () => {
+  const crm = await import("@/lib/server/crm");
+  const body = {
+    kind: "SHIPMENT",
+    file_name: "pengiriman.xlsx",
+    date_order: "DMY",
+    dry_run: false,
+    rows: [
+      row(2, {
+        client_code: clientCode,
+        code: "JNE123",
+        title: "Brightening serum",
+        quantity: "5.000",
+        date: "25/8/2025",
+      }),
+      row(3, { client_code: clientCode, title: "Toner", quantity: "0" }),
+    ],
+  };
+  const saved = await sheets.importSheet(client, body, ADMIN);
+  expect([saved.added, saved.invalid]).toEqual([1, 1]);
+  const lifecycle = await client.execute({
+    sql: "SELECT lifecycle_status, assigned_crm_id FROM clients WHERE id = ?;",
+    args: [clientId],
+  });
+  expect(lifecycle.rows[0]?.lifecycle_status).toBe("EXISTING_CLIENT");
+  expect(lifecycle.rows[0]?.assigned_crm_id).toBeNull();
+  const card = (await crm.listCrm(client)).clients.find(
+    (entry) => entry.id === clientId,
+  );
+  expect(card).toMatchObject({
+    last_completed_at: "2025-08-25",
+    last_sample_id: "",
+    brand_name: "Brightening serum",
+    last_units: 5000,
+    reorder_on: "2025-10-24",
+  });
+  const again = await sheets.importSheet(client, body, ADMIN);
+  expect([again.added, again.skipped]).toEqual([0, 1]);
+  await sheets.importSheet(
+    client,
+    {
+      ...body,
+      kind: "BATCH",
+      rows: [
+        row(2, { client_code: clientCode, title: "Serum", date: "20/8/2025" }),
+      ],
+    },
+    ADMIN,
+  );
+  const kinds = (await sheets.listImportedRecords(client, clientId)).map(
+    (record) => `${record.kind}:${record.quantity ?? "-"}`,
+  );
+  expect(kinds).toContain("SHIPMENT:5000");
+  expect(kinds).toContain("BATCH:-");
 });

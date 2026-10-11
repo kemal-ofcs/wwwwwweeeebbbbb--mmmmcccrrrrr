@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-desktop-list-crm"
+description = "Enables the desktop_list_crm command without any pre-configured scope."
+commands.allow = ["desktop_list_crm"]
+
+[[permission]]
+identifier = "deny-desktop-list-crm"
+description = "Denies the desktop_list_crm command without any pre-configured scope."
+commands.deny = ["desktop_list_crm"]

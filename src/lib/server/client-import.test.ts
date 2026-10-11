@@ -105,6 +105,8 @@ beforeAll(async () => {
       dp_percentage_bp: 5000,
       approval_web_url: "",
       approval_token_ttl_days: 3,
+      telegram_chat_id_crm: "",
+      crm_reorder_days: 60,
     },
     ADMIN,
   );

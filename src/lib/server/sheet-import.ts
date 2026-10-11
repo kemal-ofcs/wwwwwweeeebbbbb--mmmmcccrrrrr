@@ -6,6 +6,7 @@ import { ApiRequestError } from "@/lib/server/http/api-response";
 import { DATE_ORDERS, IMPORT_MAX_ROWS } from "@/lib/validations/client-import";
 import { FUND_INSERT_SQL } from "@/lib/validations/finance";
 import {
+  IMPORT_HANDOVER_SQL,
   IMPORTED_RECORD_INSERT_SQL,
   IMPORTED_RECORD_LIST_SQL,
   planSheetImport,
@@ -163,9 +164,17 @@ export async function importSheet(
                 fileName,
                 actor.id,
                 stamp,
+                row.quantity,
               ],
             },
       );
+      if (kind === "SHIPMENT") {
+        // Order lama selesai (v3.7, keputusan D): klien ke CRM.
+        await transaction.execute({
+          sql: IMPORT_HANDOVER_SQL,
+          args: [row.client_id, stamp],
+        });
+      }
     }
     const result = report(plan, false, rows.length);
     await writeAudit(

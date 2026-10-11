@@ -14,6 +14,7 @@ use zeroize::Zeroizing;
 
 use super::approval;
 use super::clients;
+use super::crm;
 use super::design;
 use super::finance;
 use super::legal;
@@ -719,6 +720,11 @@ const SNAPSHOT_SOURCES: &[SnapshotSource] = &[
         payload_key: "shipments",
         table: "shipments",
         sql: "SELECT * FROM shipments ORDER BY created_at, id;",
+    },
+    SnapshotSource {
+        payload_key: "qcClaims",
+        table: "qc_claims",
+        sql: "SELECT * FROM qc_claims ORDER BY created_at, id;",
     },
     // Direktori operator hanya-baca untuk nama PIC dan pilihan pindah PIC saat
     // offline. SENGAJA hanya empat kolom: hash password, email, nomor HP, dan
@@ -1480,6 +1486,7 @@ impl TursoClient {
                 ('legal.manage', 'Record legal documents', 'Legal', 'Record BPOM, halal, and trademark (HKI) filings and certificates.', 1, 67),
                 ('production.view', 'View production', 'Production', 'See work orders, materials, purchase orders, and production schedules.', 1, 68),
                 ('ppic.manage', 'Plan production materials', 'Production', 'Create work orders, record purchase orders, and confirm materials are ready.', 1, 69),
+                ('qc.manage', 'Decide delivery complaints', 'Production', 'Investigate client complaints about delivered goods and decide whose fault it is.', 1, 69),
                 ('shipping.manage', 'Ship orders', 'Production', 'Issue delivery notes, mark orders as shipped, and record tracking numbers.', 1, 69),
                 ('production.manage', 'Schedule production', 'Production', 'Set and change the production schedule of each work order.', 1, 69),
                 ('design.override_dummy_limit', 'Override the dummy rejection limit', 'Design', 'Print a dummy again after the client has rejected it as many times as the limit allows.', 1, 66),
@@ -1501,6 +1508,8 @@ impl TursoClient {
                 ('notifications_rnd.view', 'RnD notifications', 'Notifications', 'See sample requests waiting for RnD review in the notification bell.', 1, 114),
                 ('notifications_finance.view', 'Finance notifications', 'Notifications', 'See sample fees and revision fees waiting for Finance in the notification bell.', 1, 116),
                 ('notifications_design.view', 'Design notifications', 'Notifications', 'See new design briefs and dummy revisions in the notification bell.', 1, 118),
+                ('notifications_crm.view', 'CRM notifications', 'Notifications', 'See clients handed over to CRM and clients due for a repeat order in the notification bell.', 1, 119),
+                ('crm.manage', 'Manage existing clients', 'Clients', 'Take over clients after their first order, record contact with them, and start their repeat orders.', 1, 57),
                 ('notifications_production.view', 'Production notifications', 'Notifications', 'See new work orders and late purchase orders in the notification bell.', 1, 119),
                 ('sync.view', 'View sync status', 'Sync', 'View the sync indicator and queue.', 1, 120),
                 ('sync.retry', 'Retry sync and resolve conflicts', 'Sync', 'Trigger a manual sync and resolve conflicts.', 1, 130),
@@ -1632,6 +1641,26 @@ impl TursoClient {
                 "INSERT OR IGNORE INTO setting_gex_system (key, value) VALUES ('shipping_permissions_seeded', '1');",
                 vec![],
             ),
+            // Izin CRM (v3.6a, PRD F-29), sekali saja. WAJIB identik dengan
+            // `CRM_PERMISSION_SEED_SQL` di `db-schema.ts`.
+            Statement::new(
+                "INSERT OR IGNORE INTO role_permission (role_id, permission_key, is_allowed, updated_at, updated_by) SELECT r.id, p.permission_key, 1, datetime('now'), 'system' FROM app_role r JOIN app_permission p ON p.permission_key IN ('crm.manage', 'leads.manage', 'notifications_crm.view', 'samples.manage', 'mou.manage', 'production.view') WHERE r.role_key = 'crm' AND NOT EXISTS (SELECT 1 FROM setting_gex_system WHERE key = 'crm_permissions_seeded');",
+                vec![],
+            ),
+            Statement::new(
+                "INSERT OR IGNORE INTO setting_gex_system (key, value) VALUES ('crm_permissions_seeded', '1');",
+                vec![],
+            ),
+            // Izin QC (v3.5, PRD F-28), sekali saja. WAJIB identik dengan
+            // `QC_PERMISSION_SEED_SQL` di `db-schema.ts`.
+            Statement::new(
+                "INSERT OR IGNORE INTO role_permission (role_id, permission_key, is_allowed, updated_at, updated_by) SELECT r.id, p.permission_key, 1, datetime('now'), 'system' FROM app_role r JOIN app_permission p ON p.permission_key = 'qc.manage' WHERE r.role_key = 'qc' AND NOT EXISTS (SELECT 1 FROM setting_gex_system WHERE key = 'qc_permissions_seeded');",
+                vec![],
+            ),
+            Statement::new(
+                "INSERT OR IGNORE INTO setting_gex_system (key, value) VALUES ('qc_permissions_seeded', '1');",
+                vec![],
+            ),
             // Izin dokumen legal (v2.6, PRD F-21), sekali saja. WAJIB identik
             // dengan `LEGAL_PERMISSION_SEED_SQL` di `db-schema.ts`.
             Statement::new(
@@ -1695,7 +1724,11 @@ impl TursoClient {
                 (17, 'data-export', datetime('now')),
                 (18, 'production-batches', datetime('now')),
                 (19, 'batch-stages', datetime('now')),
-                (20, 'shipments', datetime('now'));"#,
+                (20, 'shipments', datetime('now')),
+                (21, 'qc-claims', datetime('now')),
+                (22, 'crm-handover', datetime('now')),
+                (23, 'repeat-orders', datetime('now')),
+                (24, 'imported-history', datetime('now'));"#,
                 vec![],
             ),
             // ============ DOMAIN MAKLONOS ============
@@ -1818,7 +1851,8 @@ impl TursoClient {
                     updated_at TEXT NOT NULL,
                     rnd_reject_reason_option_id TEXT NOT NULL DEFAULT '',
                     revision_fee_idr INTEGER,
-                    is_test_requested INTEGER NOT NULL DEFAULT 0
+                    is_test_requested INTEGER NOT NULL DEFAULT 0,
+                    repeat_of_id TEXT NOT NULL DEFAULT ''
                 );"#,
                 vec![],
             ),
@@ -1989,7 +2023,8 @@ impl TursoClient {
                     notes TEXT NOT NULL DEFAULT '',
                     source_file TEXT NOT NULL DEFAULT '',
                     imported_by INTEGER,
-                    created_at TEXT NOT NULL
+                    created_at TEXT NOT NULL,
+                    quantity INTEGER
                 );"#,
                 vec![],
             ),
@@ -2057,6 +2092,32 @@ impl TursoClient {
                     cancel_reason TEXT NOT NULL DEFAULT '',
                     shipped_at TEXT NOT NULL DEFAULT '',
                     forwarded_at TEXT NOT NULL DEFAULT '',
+                    received_at TEXT NOT NULL DEFAULT '',
+                    created_by INTEGER,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );"#,
+                vec![],
+            ),
+            // Komplain penerimaan dan keputusan QC (v3.5, PRD F-28). WAJIB
+            // identik dengan `db-schema.ts`.
+            Statement::new(
+                r#"CREATE TABLE IF NOT EXISTS qc_claims (
+                    id TEXT PRIMARY KEY,
+                    shipment_id TEXT NOT NULL,
+                    batch_id TEXT NOT NULL,
+                    sample_request_id TEXT NOT NULL,
+                    client_id TEXT NOT NULL,
+                    complaint_notes TEXT NOT NULL,
+                    affected_units INTEGER NOT NULL DEFAULT 0,
+                    status TEXT NOT NULL DEFAULT 'OPEN',
+                    fault_type TEXT NOT NULL DEFAULT '',
+                    decision TEXT NOT NULL DEFAULT '',
+                    remedy TEXT NOT NULL DEFAULT '',
+                    remedy_notes TEXT NOT NULL DEFAULT '',
+                    findings TEXT NOT NULL DEFAULT '',
+                    decided_by INTEGER,
+                    decided_at TEXT NOT NULL DEFAULT '',
                     created_by INTEGER,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
@@ -2284,6 +2345,10 @@ impl TursoClient {
                 vec![],
             ),
             Statement::new(
+                "CREATE INDEX IF NOT EXISTS idx_qc_claims_shipment ON qc_claims(shipment_id);",
+                vec![],
+            ),
+            Statement::new(
                 "CREATE INDEX IF NOT EXISTS idx_media_asset_owner ON media_asset(owner_type, owner_id);",
                 vec![],
             ),
@@ -2386,11 +2451,17 @@ impl TursoClient {
             ("sample_requests", "revision_fee_idr", "ALTER TABLE sample_requests ADD COLUMN revision_fee_idr INTEGER;"),
             // Sampel sekalian diuji (v2.3a, D-30).
             ("sample_requests", "is_test_requested", "ALTER TABLE sample_requests ADD COLUMN is_test_requested INTEGER NOT NULL DEFAULT 0;"),
+            // Jumlah unit riwayat batch/pengiriman (v3.7, D-51).
+            ("imported_records", "quantity", "ALTER TABLE imported_records ADD COLUMN quantity INTEGER;"),
+            // Tiket asal repeat order (v3.6b, D-50).
+            ("sample_requests", "repeat_of_id", "ALTER TABLE sample_requests ADD COLUMN repeat_of_id TEXT NOT NULL DEFAULT '';"),
             // Progres tahap lantai produksi (v3.2, PRD F-25).
             ("production_batches", "stages_done", "ALTER TABLE production_batches ADD COLUMN stages_done INTEGER NOT NULL DEFAULT 0;"),
             ("production_batches", "packed_at", "ALTER TABLE production_batches ADD COLUMN packed_at TEXT NOT NULL DEFAULT '';"),
             ("production_batches", "carton_count", "ALTER TABLE production_batches ADD COLUMN carton_count INTEGER NOT NULL DEFAULT 0;"),
             ("production_batches", "produced_units", "ALTER TABLE production_batches ADD COLUMN produced_units INTEGER NOT NULL DEFAULT 0;"),
+            // Waktu klien menjawab penerimaan (v3.5, PRD F-28).
+            ("shipments", "received_at", "ALTER TABLE shipments ADD COLUMN received_at TEXT NOT NULL DEFAULT '';"),
         ] {
             self.ensure_column(table, column, sql).await?;
         }
@@ -2548,6 +2619,26 @@ impl TursoClient {
         .await?;
         self.query_one(
             "INSERT OR IGNORE INTO schema_migration (version, name, applied_at) VALUES (-2028, 'shipments-v1', datetime('now'));",
+            vec![],
+        )
+        .await?;
+        self.query_one(
+            "INSERT OR IGNORE INTO schema_migration (version, name, applied_at) VALUES (-2029, 'qc-claims-v1', datetime('now'));",
+            vec![],
+        )
+        .await?;
+        self.query_one(
+            "INSERT OR IGNORE INTO schema_migration (version, name, applied_at) VALUES (-2030, 'crm-handover-v1', datetime('now'));",
+            vec![],
+        )
+        .await?;
+        self.query_one(
+            "INSERT OR IGNORE INTO schema_migration (version, name, applied_at) VALUES (-2031, 'repeat-orders-v1', datetime('now'));",
+            vec![],
+        )
+        .await?;
+        self.query_one(
+            "INSERT OR IGNORE INTO schema_migration (version, name, applied_at) VALUES (-2032, 'imported-history-v1', datetime('now'));",
             vec![],
         )
         .await?;
@@ -2719,7 +2810,7 @@ impl TursoClient {
             .query_one(
                 // Sentinel WAJIB dinaikkan setiap kali ensure_schema menambah
                 // tabel atau kolom — nilainya di sini dan pada INSERT harus sama.
-                "SELECT COUNT(*) AS total FROM schema_migration WHERE version = -2028;",
+                "SELECT COUNT(*) AS total FROM schema_migration WHERE version = -2032;",
                 vec![],
             )
             .await
@@ -3606,7 +3697,10 @@ impl TursoClient {
             return Ok(production::shipment_request_error(production::ship_gate_error(&state), active).map(str::to_owned));
         }
         let row = self
-            .query_one("SELECT status, method, tracking_no, updated_at FROM shipments WHERE id = ?;", vec![json!(entity_key)])
+            .query_one(
+                "SELECT status, method, tracking_no, unit_count, updated_at FROM shipments WHERE id = ?;",
+                vec![json!(entity_key)],
+            )
             .await?
             .to_objects()
             .into_iter()
@@ -3618,6 +3712,12 @@ impl TursoClient {
         if cloud("status") != payload_text("base_status") || cloud("updated_at") != payload_text("base_updated_at") {
             return Ok(Some(production::SHIPMENT_CHANGED_ELSEWHERE.to_owned()));
         }
+        if payload_text("action") == "SHIP_COMPLAINT" {
+            let units = row.get("unit_count").and_then(lenient_i64).unwrap_or(0);
+            if let Err(message) = production::validate_complaint(payload.get("complaint").unwrap_or(&Value::Null), units) {
+                return Ok(Some(message.to_owned()));
+            }
+        }
         Ok(
             match production::apply_shipment_action(&cloud("status"), &cloud("method"), &cloud("tracking_no"), &payload_text("action")) {
                 Err(message) => Some(message.to_owned()),
@@ -3627,6 +3727,26 @@ impl TursoClient {
                 Ok(_) => None,
             },
         )
+    }
+
+    /// Pemeriksaan cloud untuk keputusan QC (v3.5): klaim harus masih
+    /// terbuka dan sama dengan yang dilihat QC. `Some(pesan)` = konflik.
+    async fn qc_claim_guard(&self, entity_key: &str, payload: &Value) -> Result<Option<String>, CommandError> {
+        let row = self
+            .query_one("SELECT status, updated_at FROM qc_claims WHERE id = ?;", vec![json!(entity_key)])
+            .await?
+            .to_objects()
+            .into_iter()
+            .next();
+        let Some(row) = row else {
+            return Ok(Some("This complaint does not exist in the database.".into()));
+        };
+        let cloud = |key: &str| row.get(key).and_then(Value::as_str).unwrap_or_default().to_owned();
+        if let Some(message) = production::claim_decide_error(&cloud("status")) {
+            return Ok(Some(message.to_owned()));
+        }
+        let seen = payload.get("base_updated_at").and_then(Value::as_str).unwrap_or_default();
+        Ok((cloud("updated_at") != seen).then(|| production::CLAIM_CHANGED_ELSEWHERE.to_owned()))
     }
 
     /// Pemeriksaan cloud untuk work order dan PO (v3.1). `Some(pesan)` =
@@ -4720,7 +4840,35 @@ impl TursoClient {
             // dihitung ulang dengan aturan cloud (PRD FR-06, E-05). Jeda sempit
             // yang sama dengan guard nomor WhatsApp di atas; WHERE status di
             // `SAMPLE_TRANSITION_SQL` menutup sisanya.
-            if domain == "sample" && operation != "create" {
+            // Repeat order (v3.6b): tiket asal di cloud harus `CLIENT_ACC` dan
+            // ordernya selesai.
+            if domain == "sample" && operation == "repeat" {
+                let source = self
+                    .query_one(crm::REPEAT_SOURCE_SQL, vec![json!(parsed_payload.get("source_id").and_then(Value::as_str).unwrap_or_default())])
+                    .await?
+                    .to_objects()
+                    .into_iter()
+                    .next();
+                let message = match source {
+                    None => Some("This sample request does not exist in the database."),
+                    Some(row) => crm::repeat_order_error(
+                        row.get("status").and_then(Value::as_str).unwrap_or_default(),
+                        row.get("completed").and_then(lenient_i64) == Some(1),
+                    ),
+                };
+                if let Some(message) = message {
+                    push_results.push(json!({
+                        "eventId": event_id,
+                        "status": "conflict",
+                        "reason": message,
+                        "message": message,
+                        "serverRevision": 0
+                    }));
+                    continue;
+                }
+            }
+
+            if domain == "sample" && operation != "create" && operation != "repeat" {
                 if let Some(message) = self
                     .sample_guard(operation, entity_key, &parsed_payload)
                     .await?
@@ -4810,8 +4958,36 @@ impl TursoClient {
 
             // Pengiriman (v3.4): gerbang lunas, satu aktif per work order, dan
             // langkah dihitung ulang dengan data cloud.
-            if domain == "shipment" {
-                if let Some(message) = self.shipment_guard(operation, entity_key, &parsed_payload).await? {
+            // Pindah PIC CRM (v3.6a): klien harus sudah diserahkan di cloud.
+            if domain == "client" && operation == "assign-crm" {
+                let lifecycle = self
+                    .query_one("SELECT lifecycle_status FROM clients WHERE id = ?;", vec![json!(entity_key)])
+                    .await?
+                    .to_objects()
+                    .into_iter()
+                    .next()
+                    .and_then(|row| row.get("lifecycle_status").and_then(Value::as_str).map(str::to_owned))
+                    .unwrap_or_default();
+                if lifecycle != "EXISTING_CLIENT" {
+                    let message = crm::CRM_NOT_HANDED_OVER.to_owned();
+                    push_results.push(json!({
+                        "eventId": event_id,
+                        "status": "conflict",
+                        "reason": message.clone(),
+                        "message": message,
+                        "serverRevision": 0
+                    }));
+                    continue;
+                }
+            }
+
+            if domain == "shipment" || domain == "qc-claim" {
+                let guarded = if domain == "shipment" {
+                    self.shipment_guard(operation, entity_key, &parsed_payload).await?
+                } else {
+                    self.qc_claim_guard(entity_key, &parsed_payload).await?
+                };
+                if let Some(message) = guarded {
                     push_results.push(json!({
                         "eventId": event_id,
                         "status": "conflict",
@@ -5609,6 +5785,7 @@ fn canonical_sync_route(domain: &str, operation: &str) -> Option<(&'static str, 
         "batch" | "production_batches" => "batch",
         "purchase-order" | "batch_purchase_orders" => "purchase-order",
         "shipment" | "shipments" => "shipment",
+        "qc-claim" | "qc_claims" => "qc-claim",
         _ => return None,
     };
     let canonical_operation = match (canonical_domain, operation) {
@@ -5624,6 +5801,7 @@ fn canonical_sync_route(domain: &str, operation: &str) -> Option<(&'static str, 
         ("sample", "update") => "update",
         ("sample", "transition") => "transition",
         ("sample", "price") => "price",
+        ("sample", "repeat") => "repeat",
         ("invoice", "reschedule") => "reschedule",
         ("fund", "deposit") => "deposit",
         ("finance-option", "upsert") => "upsert",
@@ -5646,6 +5824,9 @@ fn canonical_sync_route(domain: &str, operation: &str) -> Option<(&'static str, 
         ("purchase-order", "record") => "record",
         ("shipment", "create") => "create",
         ("shipment", "transition") => "transition",
+        ("qc-claim", "decide") => "decide",
+        ("client", "assign-crm") => "assign-crm",
+        ("client", "forward-crm") => "forward-crm",
         ("media", "upload") => "upload",
         ("audit", "record") => "record",
         _ => return None,
@@ -5664,7 +5845,20 @@ async fn insert_client_evidence(
     recorded_by: Value,
     at: &str,
 ) -> Result<(), CommandError> {
-    let Some(evidence) = payload.get("evidence").filter(|value| value.is_object()) else {
+    insert_payload_photo(turso, "evidence", purpose, payload, sample_id, recorded_by, at).await
+}
+
+/// Foto di `payload[key]` (`{ id, data_base64 }`); absen = tidak dilampirkan.
+async fn insert_payload_photo(
+    turso: &StatementCollector,
+    key: &str,
+    purpose: &str,
+    payload: &Value,
+    sample_id: &str,
+    recorded_by: Value,
+    at: &str,
+) -> Result<(), CommandError> {
+    let Some(evidence) = payload.get(key).filter(|value| value.is_object()) else {
         return Ok(());
     };
     let id = evidence.get("id").and_then(Value::as_str).unwrap_or_default();
@@ -5679,6 +5873,21 @@ async fn insert_client_evidence(
             samples::MEDIA_INSERT_SQL,
             vec![json!(id), json!(sample_id), json!(purpose), json!(size as i64), json!(data), recorded_by, json!(at)],
         )
+        .await?;
+    Ok(())
+}
+
+/// Order selesai: klien diserahkan ke CRM dan grup CRM diberi tahu sekali
+/// (v3.6a, keputusan B). Klien kosong = event build lama, dilewati.
+async fn hand_over_to_crm(turso: &StatementCollector, client_id: &str, at: &str) -> Result<(), CommandError> {
+    if client_id.is_empty() {
+        return Ok(());
+    }
+    turso
+        .query_one(crm::CLIENT_HANDOVER_SQL, vec![json!(client_id), json!(at)])
+        .await?;
+    turso
+        .query_one(notifications::NOTIFY_HANDOVER_SQL, vec![json!(client_id)])
         .await?;
     Ok(())
 }
@@ -6461,6 +6670,10 @@ async fn apply_event_to_turso(
                     ],
                 )
                 .await?;
+            // Repeat order (v3.6b): dokumen legal final tiket asal ikut MoU ini.
+            turso
+                .query_one(crm::LEGAL_REPEAT_COPY_SQL, vec![json!(entity_key), json!(sample_id), json!(created_at)])
+                .await?;
         }
         ("imported-record", "record") => {
             // Arsip impor (v2.7): hanya-tambah, kiriman ulang diabaikan.
@@ -6472,6 +6685,7 @@ async fn apply_event_to_turso(
             }
             let imported_by = payload.get("imported_by").filter(|value| value.is_i64()).cloned().unwrap_or(Value::Null);
             let amount = payload.get("amount_idr").filter(|value| value.is_i64()).cloned().unwrap_or(Value::Null);
+            let quantity = payload.get("quantity").filter(|value| value.is_i64()).cloned().unwrap_or(Value::Null);
             turso
                 .query_one(
                     sheet_import::IMPORTED_RECORD_INSERT_SQL,
@@ -6487,9 +6701,19 @@ async fn apply_event_to_turso(
                         json!(text("source_file")),
                         imported_by,
                         json!(text("created_at")),
+                        quantity,
                     ],
                 )
                 .await?;
+            if text("kind") == "SHIPMENT" {
+                // Order lama selesai (v3.7, keputusan D): klien ke CRM, tanpa notifikasi.
+                turso
+                    .query_one(
+                        sheet_import::IMPORT_HANDOVER_SQL,
+                        vec![json!(text("client_id")), json!(text("created_at"))],
+                    )
+                    .await?;
+            }
         }
         ("batch", "create") => {
             // Kelayakan (MoU disetujui, DP lunas, satu per MoU) diperiksa
@@ -6762,7 +6986,9 @@ async fn apply_event_to_turso(
                     )
                     .await?;
             }
-            insert_client_evidence(turso, "SHIPMENT_PROOF", payload, &sample_id, recorded_by.clone(), &updated_at).await?;
+            let evidence_purpose = if action == "SHIP_DISPATCH" { "SHIPMENT_PROOF" } else { "CLIENT_RESPONSE" };
+            insert_client_evidence(turso, evidence_purpose, payload, &sample_id, recorded_by.clone(), &updated_at).await?;
+            insert_payload_photo(turso, "photo", "COMPLAINT", payload, &sample_id, recorded_by.clone(), &updated_at).await?;
             turso
                 .query_one(
                     samples::SAMPLE_STATUS_LOG_INSERT_SQL,
@@ -6774,7 +7000,7 @@ async fn apply_event_to_turso(
                         json!(action),
                         json!(notes),
                         json!(""),
-                        recorded_by,
+                        recorded_by.clone(),
                         json!(updated_at),
                     ],
                 )
@@ -6785,6 +7011,160 @@ async fn apply_event_to_turso(
                     .query_one(notifications::NOTIFY_SHIPPED_SQL, vec![json!(log_id), json!(entity_key)])
                     .await?;
             }
+            if action == "SHIP_COMPLAINT" {
+                // Unit dihitung ulang `shipment_guard`; di sini bentuknya saja.
+                let complaint = production::validate_complaint(payload.get("complaint").unwrap_or(&Value::Null), i64::MAX)
+                    .map_err(|message| CommandError::new("TURSO_SYNC_PAYLOAD_INVALID", message))?;
+                let claim_id = text("claim_id");
+                if claim_id.is_empty() {
+                    return Err(CommandError::new("TURSO_SYNC_PAYLOAD_INVALID", "The complaint is incomplete."));
+                }
+                turso
+                    .query_one(
+                        production::CLAIM_INSERT_SQL,
+                        vec![
+                            json!(claim_id),
+                            json!(entity_key),
+                            json!(text("batch_id")),
+                            json!(sample_id),
+                            json!(text("client_id")),
+                            json!(complaint.complaint_notes),
+                            json!(complaint.affected_units),
+                            recorded_by,
+                            json!(updated_at),
+                        ],
+                    )
+                    .await?;
+                turso.query_one(notifications::NOTIFY_COMPLAINT_SQL, vec![json!(claim_id)]).await?;
+            }
+            if action == "SHIP_RECEIVED" {
+                hand_over_to_crm(turso, &text("client_id"), &updated_at).await?;
+            }
+        }
+        ("sample", "repeat") => {
+            // Tiket asal diperiksa sebelum handler; salinannya ber-id
+            // deterministik, sama dengan yang ditulis perangkat.
+            let source_id = text("source_id");
+            let updated_at = text("updated_at");
+            let log_id = payload
+                .get("log")
+                .and_then(|log| log.get("id"))
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned();
+            if entity_key.is_empty() || source_id.is_empty() || log_id.is_empty() || clients::parse_stored_timestamp(&updated_at).is_none() {
+                return Err(CommandError::new("TURSO_SYNC_PAYLOAD_INVALID", "The repeat order is incomplete or invalid."));
+            }
+            let created_by = payload.get("created_by").filter(|value| value.is_i64()).cloned().unwrap_or(Value::Null);
+            turso
+                .query_one(
+                    crm::SAMPLE_REPEAT_INSERT_SQL,
+                    vec![json!(entity_key), json!(source_id), created_by.clone(), json!(updated_at)],
+                )
+                .await?;
+            for sql in [crm::FORMULA_REPEAT_COPY_SQL, crm::PRICE_REPEAT_COPY_SQL] {
+                turso
+                    .query_one(sql, vec![json!(entity_key), json!(source_id), json!(updated_at)])
+                    .await?;
+            }
+            turso
+                .query_one(
+                    samples::SAMPLE_STATUS_LOG_INSERT_SQL,
+                    vec![
+                        json!(log_id),
+                        json!(entity_key),
+                        json!(""),
+                        json!("CLIENT_ACC"),
+                        json!(crm::REPEAT_ORDER_ACTION),
+                        json!(crm::REPEAT_ORDER_NOTES),
+                        json!(""),
+                        created_by,
+                        json!(updated_at),
+                    ],
+                )
+                .await?;
+        }
+        ("qc-claim", "decide") => {
+            // Klaim terbuka dan `updated_at` diperiksa `qc_claim_guard`.
+            let decision = production::validate_claim_decision(payload.get("decision").unwrap_or(&Value::Null))
+                .map_err(|message| CommandError::new("TURSO_SYNC_PAYLOAD_INVALID", message))?;
+            let sample_id = text("sample_request_id");
+            let updated_at = text("updated_at");
+            let log = payload.get("log").filter(|value| value.is_object());
+            let notes = log
+                .and_then(|log| log.get("notes"))
+                .and_then(Value::as_str)
+                .and_then(samples::normalize_sample_notes);
+            let log_id = log.and_then(|log| log.get("id")).and_then(Value::as_str).unwrap_or_default().to_owned();
+            let (Some(notes), false, false, Some(_)) =
+                (notes, sample_id.is_empty(), log_id.is_empty(), clients::parse_stored_timestamp(&updated_at))
+            else {
+                return Err(CommandError::new("TURSO_SYNC_PAYLOAD_INVALID", "The QC decision is incomplete or invalid."));
+            };
+            let recorded_by = payload.get("recorded_by").filter(|value| value.is_i64()).cloned().unwrap_or(Value::Null);
+            turso
+                .query_one(
+                    production::CLAIM_DECIDE_SQL,
+                    vec![
+                        json!(entity_key),
+                        json!(decision.fault_type),
+                        json!(decision.decision),
+                        json!(decision.remedy),
+                        json!(decision.remedy_notes),
+                        json!(decision.findings),
+                        recorded_by.clone(),
+                        json!(updated_at),
+                        json!(text("base_updated_at")),
+                    ],
+                )
+                .await?;
+            insert_client_evidence(turso, "QC_EVIDENCE", payload, &sample_id, recorded_by.clone(), &updated_at).await?;
+            turso
+                .query_one(
+                    samples::SAMPLE_STATUS_LOG_INSERT_SQL,
+                    vec![
+                        json!(log_id),
+                        json!(sample_id),
+                        json!("OPEN"),
+                        json!("DECIDED"),
+                        json!(production::CLAIM_DECIDE_ACTION),
+                        json!(notes),
+                        json!(""),
+                        recorded_by,
+                        json!(updated_at),
+                    ],
+                )
+                .await?;
+            turso.query_one(notifications::NOTIFY_CLAIM_DECIDED_SQL, vec![json!(entity_key)]).await?;
+            hand_over_to_crm(turso, &text("client_id"), &updated_at).await?;
+        }
+        ("client", "assign-crm") => {
+            // Status `EXISTING_CLIENT` di cloud diperiksa sebelum handler.
+            let crm_id = payload.get("assigned_crm_id").and_then(Value::as_i64);
+            let updated_at = text("updated_at");
+            let (Some(crm_id), Some(_)) = (crm_id, clients::parse_stored_timestamp(&updated_at)) else {
+                return Err(CommandError::new("TURSO_SYNC_PAYLOAD_INVALID", "The CRM assignment is incomplete or invalid."));
+            };
+            turso
+                .query_one(crm::CRM_ASSIGN_SQL, vec![json!(entity_key), json!(crm_id), json!(updated_at)])
+                .await?;
+        }
+        ("client", "forward-crm") => {
+            // Hanya notifikasi grup CRM (E-33); auditnya didorong terpisah.
+            let notes = crm::validate_crm_forward(payload)
+                .map_err(|message| CommandError::new("TURSO_SYNC_PAYLOAD_INVALID", message))?;
+            let forward_id = text("forward_id");
+            let updated_at = text("updated_at");
+            if forward_id.is_empty() || clients::parse_stored_timestamp(&updated_at).is_none() {
+                return Err(CommandError::new("TURSO_SYNC_PAYLOAD_INVALID", "The forward to CRM is incomplete."));
+            }
+            let recorded_by = payload.get("recorded_by").filter(|value| value.is_i64()).cloned().unwrap_or(Value::Null);
+            turso
+                .query_one(
+                    notifications::NOTIFY_CRM_FORWARD_SQL,
+                    vec![json!(forward_id), json!(entity_key), json!(notes), recorded_by, json!(updated_at)],
+                )
+                .await?;
         }
         ("batch", "stage") => {
             // Urutan dan gerbang tahap diperiksa `production_guard`; isiannya
@@ -10265,6 +10645,52 @@ mod tests {
             let count = |sql: &str| -> i64 { connection.query_row(sql, [], |row| row.get(0)).expect("hitung") };
             assert_eq!(count("SELECT COUNT(*) FROM imported_records WHERE amount_idr = 32500;"), 1);
             assert_eq!(count("SELECT COUNT(*) FROM incoming_funds WHERE status = 'ACTIVE';"), 1);
+            drop(connection);
+
+            // v3.7 (F-32): riwayat pengiriman = order lama selesai, klien ke CRM.
+            rusqlite::Connection::open(&hub)
+                .expect("buka hub")
+                .execute_batch(
+                    "INSERT INTO clients (id, client_code, name, phone_normalized, lifecycle_status, created_at, updated_at) VALUES ('c1', 'KLN-1', 'Aura', '628100', 'LEAD', '2026-10-09 01:00:00', '2026-10-09 01:00:00');",
+                )
+                .expect("klien");
+            let shipped = json!({
+                "id": "r3",
+                "kind": "SHIPMENT",
+                "client_id": "c1",
+                "record_date": "2025-08-25",
+                "code": "JNE123",
+                "title": "Brightening serum",
+                "amount_idr": null,
+                "quantity": 5000,
+                "notes": "",
+                "source_file": "pengiriman.xlsx",
+                "imported_by": 1,
+                "created_at": "2026-10-10 02:00:00",
+            });
+            let mut undated = shipped.clone();
+            undated["record_date"] = json!("");
+            let results = client
+                .push_events(&[
+                    event(5, "imported-record", "r3", shipped),
+                    event(6, "imported-record", "r4", undated),
+                ])
+                .await
+                .expect("push riwayat");
+            let statuses: Vec<&str> = results
+                .iter()
+                .map(|result| result["status"].as_str().unwrap_or_default())
+                .collect();
+            assert_eq!(statuses, vec!["applied", "conflict"]);
+            let state: (String, i64) = rusqlite::Connection::open(&hub)
+                .expect("buka hub")
+                .query_row(
+                    "SELECT c.lifecycle_status, i.quantity FROM clients c JOIN imported_records i ON i.client_id = c.id WHERE c.id = 'c1' AND i.id = 'r3';",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .expect("klien c1");
+            assert_eq!(state, ("EXISTING_CLIENT".into(), 5000));
         });
     }
 
@@ -10499,6 +10925,138 @@ mod tests {
             assert_eq!(statuses, vec!["applied", "conflict", "conflict"]);
             assert_eq!(results[1]["message"], json!("This work order already has a shipment."));
             assert_eq!(results[2]["message"], json!(production::SHIPMENT_CHANGED_ELSEWHERE));
+
+            // v3.5 (F-28): komplain dicek terhadap unit di cloud; keputusan QC sekali.
+            let hub_connection = rusqlite::Connection::open(&hub).expect("buka hub");
+            hub_connection
+                .execute_batch(
+                    "UPDATE shipments SET status = 'FORWARDED', updated_at = '2026-11-20 03:00:00' WHERE id = 'h1';
+                     INSERT INTO clients (id, client_code, name, phone_normalized, lifecycle_status, created_at, updated_at) VALUES ('c1', 'KLN-1', 'Aura', '628100', 'FIRST_ORDER_ACTIVE', '2026-10-09 01:00:00', '2026-10-09 01:00:00');",
+                )
+                .expect("pengiriman diteruskan");
+            drop(hub_connection);
+            let complaint = |units: i64, claim: &str| {
+                json!({
+                    "batch_id": "bt1",
+                    "client_id": "c1",
+                    "sample_request_id": "s1",
+                    "action": "SHIP_COMPLAINT",
+                    "base_status": "FORWARDED",
+                    "status": "COMPLAINED",
+                    "base_updated_at": "2026-11-20 03:00:00",
+                    "updated_at": "2026-11-21 03:00:00",
+                    "tracking_no": "",
+                    "complaint": { "complaint_notes": "5 bottles leaked", "affected_units": units },
+                    "claim_id": claim,
+                    "log": { "id": format!("log-{claim}"), "notes": "Complaint (5 units): 5 bottles leaked" },
+                })
+            };
+            let decision = |claim: &str, seen: &str| {
+                json!({
+                    "sample_request_id": "s1",
+                    "client_id": "c1",
+                    "decision": { "fault_type": "RECIPIENT", "findings": "Courier dropped the cartons" },
+                    "base_updated_at": seen,
+                    "updated_at": "2026-11-22 03:00:00",
+                    "log": { "id": format!("log-d-{claim}"), "notes": "Recipient fault, return rejected: Courier dropped the cartons" },
+                })
+            };
+            let mut results = client
+                .push_events(&[
+                    event("shipment", "transition", "h1", complaint(991, "q0")),
+                    event("shipment", "transition", "h1", complaint(5, "q1")),
+                ])
+                .await
+                .expect("push komplain");
+            // `event` menstempel `updated_at`; keputusan memakai yang tersimpan.
+            let seen: String = rusqlite::Connection::open(&hub)
+                .expect("buka hub")
+                .query_row("SELECT updated_at FROM qc_claims WHERE id = 'q1';", [], |row| row.get(0))
+                .expect("klaim q1");
+            results.extend(
+                client
+                    .push_events(&[
+                        event("qc-claim", "decide", "q1", decision("q1", &seen)),
+                        // Perangkat kedua memutuskan klaim yang sama.
+                        event("qc-claim", "decide", "q1", decision("q1", &seen)),
+                    ])
+                    .await
+                    .expect("push keputusan"),
+            );
+            let statuses: Vec<&str> = results
+                .iter()
+                .map(|result| result["status"].as_str().unwrap_or_default())
+                .collect();
+            assert_eq!(statuses, vec!["conflict", "applied", "applied", "conflict"]);
+            assert_eq!(
+                results[0]["message"],
+                json!("The affected units cannot be more than the units shipped.")
+            );
+            assert_eq!(results[3]["message"], json!("This complaint is already decided."));
+            let hub_connection = rusqlite::Connection::open(&hub).expect("buka hub");
+            let decided: (String, String, i64) = hub_connection
+                .query_row(
+                    "SELECT q.status, q.decision, (SELECT COUNT(*) FROM notification_outbox WHERE event_type IN ('DELIVERY_COMPLAINT', 'CLAIM_DECIDED')) FROM qc_claims q WHERE q.id = 'q1';",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .expect("klaim");
+            assert_eq!(decided, ("DECIDED".into(), "RETURN_REJECTED".into(), 3));
+
+            // v3.6a (F-29): klaim diputuskan = order selesai, klien ke CRM; pindah
+            // PIC CRM hanya untuk klien yang sudah diserahkan di cloud.
+            let hub_connection = rusqlite::Connection::open(&hub).expect("buka hub");
+            hub_connection
+                .execute_batch(
+                    "INSERT INTO clients (id, client_code, name, phone_normalized, lifecycle_status, created_at, updated_at) VALUES ('c2', 'KLN-2', 'Lead Baru', '628111', 'LEAD', '2026-10-09 01:00:00', '2026-10-09 01:00:00');",
+                )
+                .expect("klien lead");
+            drop(hub_connection);
+            let assign = || json!({ "assigned_crm_id": 8 });
+            let results = client
+                .push_events(&[
+                    event("client", "assign-crm", "c1", assign()),
+                    event("client", "assign-crm", "c2", assign()),
+                ])
+                .await
+                .expect("push PIC CRM");
+            let statuses: Vec<&str> = results
+                .iter()
+                .map(|result| result["status"].as_str().unwrap_or_default())
+                .collect();
+            assert_eq!(statuses, vec!["applied", "conflict"]);
+            assert_eq!(results[1]["message"], json!(crm::CRM_NOT_HANDED_OVER));
+            let crm_state: (String, i64, i64) = rusqlite::Connection::open(&hub)
+                .expect("buka hub")
+                .query_row(
+                    "SELECT lifecycle_status, assigned_crm_id, (SELECT COUNT(*) FROM notification_outbox WHERE event_type = 'CLIENT_HANDOVER') FROM clients WHERE id = 'c1';",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .expect("klien c1");
+            assert_eq!(crm_state, ("EXISTING_CLIENT".into(), 8, 1));
+
+            // v3.6b (F-30): repeat order hanya dari tiket yang ordernya selesai.
+            let repeat = |source: &str| json!({ "source_id": source, "log": { "id": format!("log-r-{source}"), "notes": crm::REPEAT_ORDER_NOTES } });
+            let results = client
+                .push_events(&[
+                    event("sample", "repeat", "s9", repeat("s1")),
+                    event("sample", "repeat", "s8", repeat("missing")),
+                ])
+                .await
+                .expect("push repeat order");
+            let statuses: Vec<&str> = results
+                .iter()
+                .map(|result| result["status"].as_str().unwrap_or_default())
+                .collect();
+            assert_eq!(statuses, vec!["applied", "conflict"]);
+            let repeated: (String, String) = rusqlite::Connection::open(&hub)
+                .expect("buka hub")
+                .query_row("SELECT status, repeat_of_id FROM sample_requests WHERE id = 's9';", [], |row| {
+                    Ok((row.get(0)?, row.get(1)?))
+                })
+                .expect("tiket repeat");
+            assert_eq!(repeated, ("CLIENT_ACC".into(), "s1".into()));
         });
     }
 

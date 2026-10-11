@@ -544,6 +544,8 @@ export function SampleDetail({
                 shipments={data.shipments}
                 carriers={data.carriers}
                 storageSopText={data.storage_sop_text}
+                claims={data.claims}
+                linkEnabled={data.approval_link_enabled}
                 stageLog={data.status_log
                   .filter((entry) => entry.action.startsWith("STAGE_"))
                   .map((entry) => ({

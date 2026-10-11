@@ -28,6 +28,12 @@ interface NavItem {
  * Menyembunyikan menu saja tidak pernah cukup: backend tetap wajib memeriksa.
  */
 const NAV_ITEMS: readonly NavItem[] = [
+  {
+    area: "dashboard",
+    href: "/dashboard",
+    label: "Dashboard",
+    icon: "dashboard",
+  },
   { area: "clients", href: "/clients", label: "Clients", icon: "users" },
   { area: "samples", href: "/samples", label: "Samples", icon: "document" },
   { area: "finance", href: "/finance", label: "Finance", icon: "database" },
@@ -37,6 +43,7 @@ const NAV_ITEMS: readonly NavItem[] = [
     label: "Production",
     icon: "tools",
   },
+  { area: "crm", href: "/crm", label: "CRM", icon: "phone" },
   { area: "operators", href: "/operators", label: "Operators", icon: "user" },
   { area: "audit", href: "/audit", label: "Audit", icon: "history" },
   {

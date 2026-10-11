@@ -7,9 +7,14 @@ import {
   applyPoAction,
   applyShipmentAction,
   batchRequestError,
+  claimDecideError,
+  claimLogNotes,
+  claimReportNumber,
+  complaintLogNotes,
   LEGAL_PENDING_FOR_PRODUCTION,
   materialsReadyError,
   normalizeTracking,
+  orderCompleted,
   PRODUCTION_NOT_PACKED,
   PRODUCTION_PACKED,
   poLogNotes,
@@ -25,6 +30,8 @@ import {
   stageLogNotes,
   storageFeeDue,
   validateBatchSchedule,
+  validateClaimDecision,
+  validateComplaint,
   validatePoDelay,
   validatePurchaseOrder,
   validateShipment,
@@ -177,6 +184,114 @@ test("jadwal (jadwal_berurutan_dan_alasan_saat_diubah)", () => {
   expect(poLogNotes("PO_CANCEL", "PO-778", "", "", "")).toBe(
     "PO PO-778 cancelled",
   );
+});
+
+test("penerimaan dan klaim QC (penerimaan_dan_klaim_qc)", () => {
+  const step = (status: string, action: string) => {
+    const result = applyShipmentAction(
+      { status, method: "CARRIER", tracking_no: "JNE123" },
+      action,
+    );
+    return "error" in result ? result.error : result.status;
+  };
+  const notAvailable =
+    "This step is not available for the shipment's current status.";
+  expect(step("SHIPPED", "SHIP_RECEIVED")).toBe("RECEIVED");
+  expect(step("FORWARDED", "SHIP_RECEIVED")).toBe("RECEIVED");
+  expect(step("FORWARDED", "SHIP_COMPLAINT")).toBe("COMPLAINED");
+  expect(step("PREPARED", "SHIP_RECEIVED")).toBe(notAvailable);
+  expect(step("RECEIVED", "SHIP_COMPLAINT")).toBe(notAvailable);
+  expect(shipmentActionPermission("SHIP_RECEIVED")).toBe("samples.manage");
+  expect(shipmentActionPermission("SHIP_COMPLAINT")).toBe("samples.manage");
+  expect(
+    shipmentLogNotes("SHIP_RECEIVED", {
+      delivery_note_no: "",
+      method: "",
+      carrier_label: "",
+      tracking_no: "",
+      driver_name: "",
+      vehicle_plate: "",
+      reason: "",
+    }),
+  ).toBe("Received in good condition");
+
+  const complaint = validateComplaint(
+    { complaint_notes: " 5 bottles leaked ", affected_units: 5 },
+    990,
+  );
+  expect(complaint).toEqual({
+    complaint: { complaint_notes: "5 bottles leaked", affected_units: 5 },
+  });
+  if (!("complaint" in complaint)) throw new Error("komplain sah");
+  expect(complaintLogNotes(complaint.complaint)).toBe(
+    "Complaint (5 units): 5 bottles leaked",
+  );
+  const link = validateComplaint(
+    { complaint_notes: "Box crushed", affected_units: 0 },
+    990,
+  );
+  if (!("complaint" in link)) throw new Error("komplain tautan sah");
+  expect(complaintLogNotes(link.complaint)).toBe("Complaint: Box crushed");
+  expect(
+    error(validateComplaint({ complaint_notes: "", affected_units: 1 }, 990)),
+  ).toBe("Describe the problem, up to 950 characters.");
+  expect(
+    error(
+      validateComplaint({ complaint_notes: "x", affected_units: 991 }, 990),
+    ),
+  ).toBe("The affected units cannot be more than the units shipped.");
+
+  const internal = validateClaimDecision({
+    fault_type: "INTERNAL",
+    findings: " Seal not tight ",
+    remedy: "REPLACE",
+    remedy_notes: "Ship 5 bottles",
+  });
+  expect(internal).toEqual({
+    decision: {
+      fault_type: "INTERNAL",
+      decision: "RETURN_APPROVED",
+      remedy: "REPLACE",
+      remedy_notes: "Ship 5 bottles",
+      findings: "Seal not tight",
+    },
+  });
+  if (!("decision" in internal)) throw new Error("keputusan sah");
+  expect(claimLogNotes(internal.decision)).toBe(
+    "Internal fault, return approved (replace goods): Seal not tight",
+  );
+  const recipient = validateClaimDecision({
+    fault_type: "RECIPIENT",
+    findings: "Courier dropped the cartons",
+    remedy: "REPLACE",
+    remedy_notes: "ignored",
+  });
+  if (!("decision" in recipient)) throw new Error("keputusan penerima sah");
+  expect([recipient.decision.decision, recipient.decision.remedy]).toEqual([
+    "RETURN_REJECTED",
+    "",
+  ]);
+  expect(claimLogNotes(recipient.decision)).toBe(
+    "Recipient fault, return rejected: Courier dropped the cartons",
+  );
+  expect(
+    error(validateClaimDecision({ fault_type: "CLIENT", findings: "x" })),
+  ).toBe("Choose whose fault it is.");
+  expect(
+    error(validateClaimDecision({ fault_type: "INTERNAL", findings: "x" })),
+  ).toBe("Choose how the client is put right.");
+  expect(
+    error(validateClaimDecision({ fault_type: "RECIPIENT", findings: "" })),
+  ).toBe("Write what QC found, up to 900 characters.");
+  expect(claimDecideError("OPEN")).toBeNull();
+  expect(claimDecideError("DECIDED")).toBe(
+    "This complaint is already decided.",
+  );
+  expect(claimReportNumber("SJ-20261120-A101")).toBe("BA-SJ-20261120-A101");
+  expect(orderCompleted("RECEIVED", null)).toBe(true);
+  expect(orderCompleted("COMPLAINED", "OPEN")).toBe(false);
+  expect(orderCompleted("COMPLAINED", "DECIDED")).toBe(true);
+  expect(orderCompleted("FORWARDED", null)).toBe(false);
 });
 
 test("pengiriman (pengiriman_mengikuti_aturan)", () => {
@@ -433,7 +548,7 @@ test("setiap SQL dan pesan identik dengan Rust", () => {
         name.endsWith("_ACTION") ||
         name.endsWith("_ELSEWHERE")),
   );
-  expect(shared.length).toBe(27);
+  expect(shared.length).toBe(32);
   for (const [name, value] of shared) {
     expect(rust, name).toContain(`"${value}"`);
   }

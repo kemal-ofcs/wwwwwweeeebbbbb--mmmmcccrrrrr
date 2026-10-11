@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-desktop-forward-to-crm"
+description = "Enables the desktop_forward_to_crm command without any pre-configured scope."
+commands.allow = ["desktop_forward_to_crm"]
+
+[[permission]]
+identifier = "deny-desktop-forward-to-crm"
+description = "Denies the desktop_forward_to_crm command without any pre-configured scope."
+commands.deny = ["desktop_forward_to_crm"]

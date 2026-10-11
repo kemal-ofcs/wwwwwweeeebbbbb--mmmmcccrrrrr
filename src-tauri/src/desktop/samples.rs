@@ -38,6 +38,8 @@ pub const SETTING_STORAGE_SOP_TEXT: &str = "storage_sop_text";
 pub const SETTING_DP_PERCENTAGE_BP: &str = "dp_percentage_bp";
 pub const SETTING_APPROVAL_WEB_URL: &str = "approval_web_url";
 pub const SETTING_APPROVAL_TOKEN_TTL_DAYS: &str = "approval_token_ttl_days";
+pub const SETTING_TELEGRAM_CHAT_ID_CRM: &str = "telegram_chat_id_crm";
+pub const SETTING_CRM_REORDER_DAYS: &str = "crm_reorder_days";
 pub const BUSINESS_SETTING_KEYS: &[&str] = &[
     SETTING_DEFAULT_FREE_REVISION_LIMIT,
     SETTING_SAMPLE_FEE_MODE,
@@ -62,6 +64,8 @@ pub const BUSINESS_SETTING_KEYS: &[&str] = &[
     SETTING_DP_PERCENTAGE_BP,
     SETTING_APPROVAL_WEB_URL,
     SETTING_APPROVAL_TOKEN_TTL_DAYS,
+    SETTING_TELEGRAM_CHAT_ID_CRM,
+    SETTING_CRM_REORDER_DAYS,
 ];
 
 pub const FREE_REVISION_LIMIT_MAX: i64 = 20;
@@ -77,6 +81,9 @@ pub const MAX_DUMMY_REJECTIONS_LIMIT: i64 = 20;
 pub const STORAGE_GRACE_DAYS_LIMIT: i64 = 90;
 pub const DP_PERCENTAGE_INVALID: &str = "The down payment must be from 0.01% to 100%.";
 pub const APPROVAL_TTL_DAYS_LIMIT: i64 = 30;
+pub const CRM_REORDER_DAYS_MIN: i64 = 7;
+pub const CRM_REORDER_DAYS_MAX: i64 = 365;
+pub const CRM_REORDER_DAYS_INVALID: &str = "The reorder reminder must be a whole number of days from 7 to 365.";
 pub const APPROVAL_WEB_URL_MAX: usize = 200;
 pub const APPROVAL_WEB_URL_INVALID: &str = "Enter the approval web address as https://..., or leave it empty.";
 pub const APPROVAL_TTL_INVALID: &str = "Approval links must last a whole number of days from 1 to 30.";
@@ -147,6 +154,10 @@ pub struct BusinessSettings {
     pub approval_web_url: String,
     /// Masa berlaku tautan persetujuan dalam hari.
     pub approval_token_ttl_days: i64,
+    /// Grup Telegram CRM (v3.6a, D-49).
+    pub telegram_chat_id_crm: String,
+    /// Perkiraan repeat order = order terakhir selesai + hari ini (D-43).
+    pub crm_reorder_days: i64,
 }
 
 impl Default for BusinessSettings {
@@ -175,6 +186,8 @@ impl Default for BusinessSettings {
             dp_percentage_bp: 5000,
             approval_web_url: String::new(),
             approval_token_ttl_days: 3,
+            telegram_chat_id_crm: String::new(),
+            crm_reorder_days: 60,
         }
     }
 }
@@ -205,6 +218,8 @@ impl BusinessSettings {
             "dp_percentage_bp": self.dp_percentage_bp,
             "approval_web_url": self.approval_web_url,
             "approval_token_ttl_days": self.approval_token_ttl_days,
+            "telegram_chat_id_crm": self.telegram_chat_id_crm,
+            "crm_reorder_days": self.crm_reorder_days,
         })
     }
 
@@ -234,6 +249,8 @@ impl BusinessSettings {
             (SETTING_DP_PERCENTAGE_BP, self.dp_percentage_bp.to_string()),
             (SETTING_APPROVAL_WEB_URL, self.approval_web_url.clone()),
             (SETTING_APPROVAL_TOKEN_TTL_DAYS, self.approval_token_ttl_days.to_string()),
+            (SETTING_TELEGRAM_CHAT_ID_CRM, self.telegram_chat_id_crm.clone()),
+            (SETTING_CRM_REORDER_DAYS, self.crm_reorder_days.to_string()),
         ]
     }
 }
@@ -360,6 +377,13 @@ pub fn read_business_settings(values: &HashMap<String, String>) -> BusinessSetti
             APPROVAL_TTL_DAYS_LIMIT,
         )
         .unwrap_or(defaults.approval_token_ttl_days),
+        telegram_chat_id_crm: stored_chat_id(values, SETTING_TELEGRAM_CHAT_ID_CRM),
+        crm_reorder_days: in_range(
+            stored_int(values.get(SETTING_CRM_REORDER_DAYS)),
+            CRM_REORDER_DAYS_MIN,
+            CRM_REORDER_DAYS_MAX,
+        )
+        .unwrap_or(defaults.crm_reorder_days),
     }
 }
 
@@ -407,6 +431,7 @@ pub fn validate_business_settings(draft: &Value) -> Result<BusinessSettings, &'s
     let chat_finance = chat(SETTING_TELEGRAM_CHAT_ID_FINANCE)?;
     let chat_design = chat(SETTING_TELEGRAM_CHAT_ID_DESIGN)?;
     let chat_production = chat(SETTING_TELEGRAM_CHAT_ID_PRODUCTION)?;
+    let chat_crm = chat(SETTING_TELEGRAM_CHAT_ID_CRM)?;
     Ok(BusinessSettings {
         default_free_revision_limit: limit,
         sample_fee_mode: mode,
@@ -474,6 +499,13 @@ pub fn validate_business_settings(draft: &Value) -> Result<BusinessSettings, &'s
             APPROVAL_TTL_DAYS_LIMIT,
         )
         .ok_or(APPROVAL_TTL_INVALID)?,
+        telegram_chat_id_crm: chat_crm,
+        crm_reorder_days: in_range(
+            strict_int(draft.get(SETTING_CRM_REORDER_DAYS)),
+            CRM_REORDER_DAYS_MIN,
+            CRM_REORDER_DAYS_MAX,
+        )
+        .ok_or(CRM_REORDER_DAYS_INVALID)?,
     })
 }
 
@@ -1024,7 +1056,7 @@ pub const SAMPLE_FEEDBACK_INSERT_SQL: &str = "INSERT INTO sample_feedbacks (id, 
 /// Padanan `SAMPLE_LIST_SQL`: `unit_price_idr` = harga Finance terbaru untuk
 /// iterasi yang sedang berjalan (NULL = belum diberi harga, gerbang D-27).
 /// Seri di detik yang sama dipisahkan `rowid`; lihat catatan `ponytail` di TS.
-pub const SAMPLE_LIST_SQL: &str = "SELECT s.*, c.client_code, c.name AS client_name, c.free_revision_limit, o.nama_operator AS pic_crm_name, (SELECT p.final_unit_price_idr FROM pricing_formulas p WHERE p.sample_request_id = s.id AND p.iteration_number = s.revision_index + 1 ORDER BY p.recorded_at DESC, p.rowid DESC LIMIT 1) AS unit_price_idr, EXISTS (SELECT 1 FROM invoices i WHERE i.sample_request_id = s.id AND ((s.status = 'WAITING_SAMPLE_PAYMENT' AND i.ref_type = 'SAMPLE_FEE') OR (s.status = 'WAITING_REVISION_PAYMENT' AND i.ref_type = 'REVISION_FEE' AND i.revision_index = s.revision_index)) AND (i.status = 'RESCHEDULED' OR (i.status = 'OPEN' AND (SELECT COALESCE(SUM(a.amount_idr), 0) FROM fund_allocations a WHERE a.invoice_id = i.id) >= i.total_idr))) AS fee_paid, EXISTS (SELECT 1 FROM invoices i WHERE i.sample_request_id = s.id AND i.ref_type = 'TEST_FEE' AND (i.status = 'RESCHEDULED' OR (i.status = 'OPEN' AND (SELECT COALESCE(SUM(a.amount_idr), 0) FROM fund_allocations a WHERE a.invoice_id = i.id) >= i.total_idr))) AS test_paid, (SELECT d.status FROM design_tickets d WHERE d.sample_request_id = s.id AND d.status <> 'CANCELLED' ORDER BY d.created_at DESC, d.rowid DESC LIMIT 1) AS design_status, (SELECT d.dummy_rejection_count FROM design_tickets d WHERE d.sample_request_id = s.id AND d.status <> 'CANCELLED' ORDER BY d.created_at DESC, d.rowid DESC LIMIT 1) AS dummy_round, ((s.is_dummy_required = 0 AND NOT EXISTS (SELECT 1 FROM design_tickets d WHERE d.sample_request_id = s.id AND d.status <> 'CANCELLED')) OR EXISTS (SELECT 1 FROM media_asset m WHERE m.owner_type = 'sample' AND m.owner_id = s.id AND m.purpose = 'MOCKUP')) AS mockup_ready, (SELECT m.status FROM production_mou m WHERE m.sample_request_id = s.id AND m.status NOT IN ('CANCELLED', 'REJECTED') ORDER BY m.created_at DESC, m.rowid DESC LIMIT 1) AS mou_status, (SELECT m.dp_amount_required_idr FROM production_mou m WHERE m.sample_request_id = s.id AND m.status = 'ACCEPTED' ORDER BY m.created_at DESC, m.rowid DESC LIMIT 1) AS mou_dp_idr, EXISTS (SELECT 1 FROM invoices i WHERE i.sample_request_id = s.id AND i.ref_type = 'DP_PRODUCTION_LEGAL' AND (i.status = 'RESCHEDULED' OR (i.status = 'OPEN' AND (SELECT COALESCE(SUM(a.amount_idr), 0) FROM fund_allocations a WHERE a.invoice_id = i.id) >= i.total_idr))) AS dp_paid, (SELECT CASE m.regulatory_path WHEN 'WITH_BPOM' THEN 4 ELSE 1 END - (SELECT COUNT(DISTINCT l.kind) FROM legal_documents l WHERE l.mou_id = m.id AND l.status IN ('ISSUED', 'NOT_REQUIRED') AND (m.regulatory_path = 'WITH_BPOM' OR l.kind = 'HALAL')) FROM production_mou m WHERE m.sample_request_id = s.id AND m.status = 'ACCEPTED' ORDER BY m.created_at DESC, m.rowid DESC LIMIT 1) AS legal_open, (SELECT CASE WHEN d.dummy_rejection_count = 0 THEN EXISTS (SELECT 1 FROM invoices i WHERE i.sample_request_id = s.id AND i.ref_type = 'DUMMY_FEE' AND i.revision_index = 0 AND (i.status = 'RESCHEDULED' OR (i.status = 'OPEN' AND (SELECT COALESCE(SUM(a.amount_idr), 0) FROM fund_allocations a WHERE a.invoice_id = i.id) >= i.total_idr))) ELSE NOT EXISTS (SELECT 1 FROM invoices i WHERE i.sample_request_id = s.id AND i.ref_type = 'DUMMY_FEE' AND i.revision_index = d.dummy_rejection_count AND i.status = 'OPEN' AND (SELECT COALESCE(SUM(a.amount_idr), 0) FROM fund_allocations a WHERE a.invoice_id = i.id) < i.total_idr) END FROM design_tickets d WHERE d.sample_request_id = s.id AND d.status <> 'CANCELLED' ORDER BY d.created_at DESC, d.rowid DESC LIMIT 1) AS dummy_paid, (SELECT m.status FROM production_mou m WHERE m.sample_request_id = s.id ORDER BY m.created_at DESC, m.rowid DESC LIMIT 1) IN ('REJECTED', 'CANCELLED') AS mou_closed, (SELECT b.material_status FROM production_batches b WHERE b.sample_request_id = s.id ORDER BY b.created_at DESC, b.rowid DESC LIMIT 1) AS batch_material, (SELECT b.sched_packing_on FROM production_batches b WHERE b.sample_request_id = s.id ORDER BY b.created_at DESC, b.rowid DESC LIMIT 1) AS batch_packing_on, (SELECT b.stages_done FROM production_batches b WHERE b.sample_request_id = s.id ORDER BY b.created_at DESC, b.rowid DESC LIMIT 1) AS batch_stages, (SELECT h.status FROM shipments h WHERE h.sample_request_id = s.id AND h.status <> 'CANCELLED' ORDER BY h.created_at DESC, h.rowid DESC LIMIT 1) AS shipment_status FROM sample_requests s LEFT JOIN clients c ON c.id = s.client_id LEFT JOIN master_operator o ON o.id = s.pic_crm_id";
+pub const SAMPLE_LIST_SQL: &str = "SELECT s.*, c.client_code, c.name AS client_name, c.free_revision_limit, o.nama_operator AS pic_crm_name, (SELECT p.final_unit_price_idr FROM pricing_formulas p WHERE p.sample_request_id = s.id AND p.iteration_number = s.revision_index + 1 ORDER BY p.recorded_at DESC, p.rowid DESC LIMIT 1) AS unit_price_idr, EXISTS (SELECT 1 FROM invoices i WHERE i.sample_request_id = s.id AND ((s.status = 'WAITING_SAMPLE_PAYMENT' AND i.ref_type = 'SAMPLE_FEE') OR (s.status = 'WAITING_REVISION_PAYMENT' AND i.ref_type = 'REVISION_FEE' AND i.revision_index = s.revision_index)) AND (i.status = 'RESCHEDULED' OR (i.status = 'OPEN' AND (SELECT COALESCE(SUM(a.amount_idr), 0) FROM fund_allocations a WHERE a.invoice_id = i.id) >= i.total_idr))) AS fee_paid, EXISTS (SELECT 1 FROM invoices i WHERE i.sample_request_id = s.id AND i.ref_type = 'TEST_FEE' AND (i.status = 'RESCHEDULED' OR (i.status = 'OPEN' AND (SELECT COALESCE(SUM(a.amount_idr), 0) FROM fund_allocations a WHERE a.invoice_id = i.id) >= i.total_idr))) AS test_paid, (SELECT d.status FROM design_tickets d WHERE d.sample_request_id = s.id AND d.status <> 'CANCELLED' ORDER BY d.created_at DESC, d.rowid DESC LIMIT 1) AS design_status, (SELECT d.dummy_rejection_count FROM design_tickets d WHERE d.sample_request_id = s.id AND d.status <> 'CANCELLED' ORDER BY d.created_at DESC, d.rowid DESC LIMIT 1) AS dummy_round, ((s.is_dummy_required = 0 AND NOT EXISTS (SELECT 1 FROM design_tickets d WHERE d.sample_request_id = s.id AND d.status <> 'CANCELLED')) OR EXISTS (SELECT 1 FROM media_asset m WHERE m.owner_type = 'sample' AND m.owner_id = s.id AND m.purpose = 'MOCKUP')) AS mockup_ready, (SELECT m.status FROM production_mou m WHERE m.sample_request_id = s.id AND m.status NOT IN ('CANCELLED', 'REJECTED') ORDER BY m.created_at DESC, m.rowid DESC LIMIT 1) AS mou_status, (SELECT m.dp_amount_required_idr FROM production_mou m WHERE m.sample_request_id = s.id AND m.status = 'ACCEPTED' ORDER BY m.created_at DESC, m.rowid DESC LIMIT 1) AS mou_dp_idr, EXISTS (SELECT 1 FROM invoices i WHERE i.sample_request_id = s.id AND i.ref_type = 'DP_PRODUCTION_LEGAL' AND (i.status = 'RESCHEDULED' OR (i.status = 'OPEN' AND (SELECT COALESCE(SUM(a.amount_idr), 0) FROM fund_allocations a WHERE a.invoice_id = i.id) >= i.total_idr))) AS dp_paid, (SELECT CASE m.regulatory_path WHEN 'WITH_BPOM' THEN 4 ELSE 1 END - (SELECT COUNT(DISTINCT l.kind) FROM legal_documents l WHERE l.mou_id = m.id AND l.status IN ('ISSUED', 'NOT_REQUIRED') AND (m.regulatory_path = 'WITH_BPOM' OR l.kind = 'HALAL')) FROM production_mou m WHERE m.sample_request_id = s.id AND m.status = 'ACCEPTED' ORDER BY m.created_at DESC, m.rowid DESC LIMIT 1) AS legal_open, (SELECT CASE WHEN d.dummy_rejection_count = 0 THEN EXISTS (SELECT 1 FROM invoices i WHERE i.sample_request_id = s.id AND i.ref_type = 'DUMMY_FEE' AND i.revision_index = 0 AND (i.status = 'RESCHEDULED' OR (i.status = 'OPEN' AND (SELECT COALESCE(SUM(a.amount_idr), 0) FROM fund_allocations a WHERE a.invoice_id = i.id) >= i.total_idr))) ELSE NOT EXISTS (SELECT 1 FROM invoices i WHERE i.sample_request_id = s.id AND i.ref_type = 'DUMMY_FEE' AND i.revision_index = d.dummy_rejection_count AND i.status = 'OPEN' AND (SELECT COALESCE(SUM(a.amount_idr), 0) FROM fund_allocations a WHERE a.invoice_id = i.id) < i.total_idr) END FROM design_tickets d WHERE d.sample_request_id = s.id AND d.status <> 'CANCELLED' ORDER BY d.created_at DESC, d.rowid DESC LIMIT 1) AS dummy_paid, (SELECT m.status FROM production_mou m WHERE m.sample_request_id = s.id ORDER BY m.created_at DESC, m.rowid DESC LIMIT 1) IN ('REJECTED', 'CANCELLED') AS mou_closed, (SELECT b.material_status FROM production_batches b WHERE b.sample_request_id = s.id ORDER BY b.created_at DESC, b.rowid DESC LIMIT 1) AS batch_material, (SELECT b.sched_packing_on FROM production_batches b WHERE b.sample_request_id = s.id ORDER BY b.created_at DESC, b.rowid DESC LIMIT 1) AS batch_packing_on, (SELECT b.stages_done FROM production_batches b WHERE b.sample_request_id = s.id ORDER BY b.created_at DESC, b.rowid DESC LIMIT 1) AS batch_stages, (SELECT h.status FROM shipments h WHERE h.sample_request_id = s.id AND h.status <> 'CANCELLED' ORDER BY h.created_at DESC, h.rowid DESC LIMIT 1) AS shipment_status, (SELECT q.status FROM qc_claims q WHERE q.sample_request_id = s.id ORDER BY q.created_at DESC, q.rowid DESC LIMIT 1) AS claim_status FROM sample_requests s LEFT JOIN clients c ON c.id = s.client_id LEFT JOIN master_operator o ON o.id = s.pic_crm_id";
 
 /// Satu harga per simpan (v2.2), hanya-tambah. ?1 id, ?2 tiket, ?3 iterasi,
 /// ?4-?7 komponen, ?8 HPP, ?9 margin, ?10 harga jual, ?11 catatan,
@@ -1062,13 +1094,24 @@ pub const SAMPLE_CHANGED_ELSEWHERE: &str =
 // Kompresi dikerjakan webview; di sini hanya pemeriksaan ulang hasilnya.
 // ---------------------------------------------------------------------------
 
-pub const SAMPLE_MEDIA_PURPOSES: &[&str] =
-    &["REFERENCE", "PAYMENT_PROOF", "MOCKUP", "CLIENT_RESPONSE", "LEGAL_DOCUMENT", "DUMMY_ARTWORK", "SHIPMENT_PROOF"];
+pub const SAMPLE_MEDIA_PURPOSES: &[&str] = &[
+    "REFERENCE",
+    "PAYMENT_PROOF",
+    "MOCKUP",
+    "CLIENT_RESPONSE",
+    "LEGAL_DOCUMENT",
+    "DUMMY_ARTWORK",
+    "SHIPMENT_PROOF",
+    "COMPLAINT",
+    "QC_EVIDENCE",
+];
 
 /// Padanan `mediaPurposePermission`: mockup milik desainer (v2.4).
 pub fn media_purpose_permission(purpose: &str) -> &'static str {
     if purpose == "SHIPMENT_PROOF" {
         "shipping.manage"
+    } else if purpose == "QC_EVIDENCE" {
+        "qc.manage"
     } else if purpose == "MOCKUP" || purpose == "DUMMY_ARTWORK" {
         "design.manage"
     } else {
@@ -1156,6 +1199,8 @@ mod tests {
                 ("dp_percentage_bp", "3000"),
                 ("approval_web_url", " https://crm.company.id/ "),
                 ("approval_token_ttl_days", "7"),
+                ("telegram_chat_id_crm", "@maklon_crm"),
+                ("crm_reorder_days", "90"),
             ]),
             BusinessSettings {
                 default_free_revision_limit: 2,
@@ -1181,6 +1226,8 @@ mod tests {
                 dp_percentage_bp: 3000,
                 approval_web_url: "https://crm.company.id".into(),
                 approval_token_ttl_days: 7,
+                telegram_chat_id_crm: "@maklon_crm".into(),
+                crm_reorder_days: 90,
             }
         );
         assert_eq!(
@@ -1197,6 +1244,7 @@ mod tests {
                 ("dp_percentage_bp", "0"),
                 ("approval_web_url", "http://crm.company.id"),
                 ("approval_token_ttl_days", "31"),
+                ("crm_reorder_days", "6"),
             ]),
             BusinessSettings::default()
         );
@@ -1260,6 +1308,8 @@ mod tests {
             "dp_percentage_bp": 10000,
             "approval_web_url": "",
             "approval_token_ttl_days": 30,
+            "telegram_chat_id_crm": "",
+            "crm_reorder_days": 7,
         });
         assert_eq!(
             validate_business_settings(&valid),
@@ -1287,6 +1337,8 @@ mod tests {
                 dp_percentage_bp: 10_000,
                 approval_web_url: String::new(),
                 approval_token_ttl_days: 30,
+                telegram_chat_id_crm: String::new(),
+                crm_reorder_days: 7,
             })
         );
         let with = |key: &str, value: Value| {
@@ -1302,6 +1354,10 @@ mod tests {
         assert_eq!(with("default_dummy_fee_idr", json!(-5)), "Default fees must be whole rupiah amounts.");
         assert_eq!(with("telegram_chat_id_design", Value::Null), TELEGRAM_CHAT_ID_INVALID);
         assert_eq!(with("telegram_chat_id_production", Value::Null), TELEGRAM_CHAT_ID_INVALID);
+        assert_eq!(with("telegram_chat_id_crm", Value::Null), TELEGRAM_CHAT_ID_INVALID);
+        for days in [json!(6), json!(366), json!("60")] {
+            assert_eq!(with("crm_reorder_days", days), CRM_REORDER_DAYS_INVALID);
+        }
         assert_eq!(with("storage_grace_days", json!(91)), "The free storage period must be a whole number of days from 0 to 90.");
         assert_eq!(with("storage_fee_idr", json!(-1)), "The storage fee must be a whole rupiah amount.");
         for limit in [json!(21), json!(-1), json!("2")] {

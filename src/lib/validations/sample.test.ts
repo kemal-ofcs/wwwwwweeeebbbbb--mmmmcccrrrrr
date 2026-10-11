@@ -390,6 +390,8 @@ describe("readBusinessSettings", () => {
     dp_percentage_bp: 5000,
     approval_web_url: "",
     approval_token_ttl_days: 3,
+    telegram_chat_id_crm: "",
+    crm_reorder_days: 60,
   };
   test("kosong = bawaan", () => {
     expect(readBusinessSettings({})).toEqual(defaults);
@@ -419,6 +421,8 @@ describe("readBusinessSettings", () => {
         dp_percentage_bp: "3000",
         approval_web_url: " https://crm.company.id/ ",
         approval_token_ttl_days: "7",
+        telegram_chat_id_crm: "@maklon_crm",
+        crm_reorder_days: "90",
       }),
     ).toEqual({
       default_free_revision_limit: 2,
@@ -444,6 +448,8 @@ describe("readBusinessSettings", () => {
       dp_percentage_bp: 3000,
       approval_web_url: "https://crm.company.id",
       approval_token_ttl_days: 7,
+      telegram_chat_id_crm: "@maklon_crm",
+      crm_reorder_days: 90,
     });
     expect(
       readBusinessSettings({
@@ -459,6 +465,7 @@ describe("readBusinessSettings", () => {
         dp_percentage_bp: "0",
         approval_web_url: "http://crm.company.id",
         approval_token_ttl_days: "31",
+        crm_reorder_days: "6",
       }),
     ).toEqual(defaults);
   });
@@ -489,6 +496,8 @@ describe("validateBusinessSettings", () => {
     dp_percentage_bp: 10_000,
     approval_web_url: "",
     approval_token_ttl_days: 30,
+    telegram_chat_id_crm: "",
+    crm_reorder_days: 7,
   };
   test("sah", () => {
     expect(validateBusinessSettings(valid)).toEqual({
@@ -526,6 +535,14 @@ describe("validateBusinessSettings", () => {
     ],
     [{ ...valid, telegram_chat_id_design: null }, TELEGRAM_CHAT_ID_INVALID],
     [{ ...valid, telegram_chat_id_production: null }, TELEGRAM_CHAT_ID_INVALID],
+    [{ ...valid, telegram_chat_id_crm: null }, TELEGRAM_CHAT_ID_INVALID],
+    ...[6, 366, "60"].map(
+      (days) =>
+        [
+          { ...valid, crm_reorder_days: days },
+          "The reorder reminder must be a whole number of days from 7 to 365.",
+        ] as [Record<string, unknown>, string],
+    ),
     [
       { ...valid, storage_grace_days: 91 },
       "The free storage period must be a whole number of days from 0 to 90.",

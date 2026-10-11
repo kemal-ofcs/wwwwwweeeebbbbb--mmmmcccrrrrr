@@ -20,10 +20,11 @@ use super::clients::{
     company_day_bounds_utc, parse_stored_timestamp, timezone_offset_hours, utc_timestamp,
 };
 use super::models::CommandError;
+use super::production;
 use super::samples::{self, BusinessSettings};
 use super::turso::{Statement, TursoClient};
 
-pub const NOTIFICATION_DIVISIONS: &[&str] = &["CS", "RND", "FINANCE", "DESIGN", "PRODUCTION"];
+pub const NOTIFICATION_DIVISIONS: &[&str] = &["CS", "RND", "FINANCE", "DESIGN", "PRODUCTION", "CRM"];
 pub const NOTIFICATION_MAX_ATTEMPTS: i64 = 5;
 pub const COLD_DIGEST_HOUR: i64 = 8;
 pub const COLD_DIGEST_MAX_CATCH_UP_DAYS: i64 = 7;
@@ -36,6 +37,7 @@ pub fn division_permission(division: &str) -> Option<&'static str> {
         "FINANCE" => Some("notifications_finance.view"),
         "DESIGN" => Some("notifications_design.view"),
         "PRODUCTION" => Some("notifications_production.view"),
+        "CRM" => Some("notifications_crm.view"),
         _ => None,
     }
 }
@@ -127,6 +129,15 @@ pub fn cold_digest_window(
     let from = company_day_bounds_utc(&shift_date(&first_day, -warm_max_days - 1)?, timezone)?;
     let to = company_day_bounds_utc(&shift_date(today, -warm_max_days)?, timezone)?;
     Some((from.0, to.0))
+}
+
+/// Padanan `reorderDigestRange`: `(dari, sampai]`.
+pub fn reorder_digest_range(today: &str, last_digest_date: Option<&str>) -> Option<(String, String)> {
+    let earliest = shift_date(today, -COLD_DIGEST_MAX_CATCH_UP_DAYS)?;
+    let yesterday = shift_date(today, -1)?;
+    let last = last_digest_date.map_or(yesterday, str::to_owned);
+    let from = if last < earliest { earliest } else { last };
+    (from.as_str() < today).then(|| (from, today.to_owned()))
 }
 
 // ---------------------------------------------------------------------------
@@ -255,6 +266,7 @@ pub fn render_notification(
                 "SAMPLE" => "Sample".to_owned(),
                 "DUMMY" => "Packaging dummy".to_owned(),
                 "MOU" => "MoU".to_owned(),
+                "RECEIPT" => "Delivery".to_owned(),
                 other => other.to_owned(),
             };
             let decision = match field(payload, "decision").as_str() {
@@ -336,6 +348,34 @@ pub fn render_notification(
             ]
             .join("\n")
         }
+        "DELIVERY_COMPLAINT" => [
+            format!("Delivery complaint, QC to investigate: {sample}"),
+            format!(
+                "Delivery note {}: {}",
+                field(payload, "delivery_note_no"),
+                field(payload, "complaint_notes")
+            ),
+            format!("Reported {when}"),
+        ]
+        .join("\n"),
+        "CLAIM_DECIDED" => {
+            let note = field(payload, "delivery_note_no");
+            let verdict = if field(payload, "fault_type") == "INTERNAL" {
+                format!(
+                    "Delivery note {note}: our fault, return approved ({})",
+                    production::qc_remedy_label(&field(payload, "remedy"))
+                )
+            } else {
+                format!("Delivery note {note}: not our fault, return rejected")
+            };
+            [
+                format!("QC decided the complaint: {sample}"),
+                verdict,
+                format!("Findings: {}", field(payload, "findings")),
+                format!("Decided {when}"),
+            ]
+            .join("\n")
+        }
         "SHIP_CLEARED" => [
             format!("Cleared to ship: {sample}"),
             format!(
@@ -357,6 +397,41 @@ pub fn render_notification(
             format!("Packed {when}"),
         ]
         .join("\n"),
+        "CLIENT_HANDOVER" => [
+            format!("New client for CRM: {client}"),
+            format!("CRM PIC: {}", or_dash(field(payload, "crm_name"))),
+            format!("First order completed {when}"),
+        ]
+        .join("\n"),
+        "CRM_FORWARD" => [
+            format!("Client asked CS for a new order: {client}"),
+            format!(
+                "CRM PIC: {}, forwarded by {}",
+                or_dash(field(payload, "crm_name")),
+                or_dash(field(payload, "from"))
+            ),
+            format!("Notes: {}", field(payload, "notes")),
+            format!("Forwarded {when}"),
+        ]
+        .join("\n"),
+        "REORDER_DUE" => {
+            let clients = payload.get("clients").and_then(Value::as_array).cloned().unwrap_or_default();
+            let mut lines = vec![format!(
+                "Clients due for a repeat order ({}): {}",
+                field(payload, "date"),
+                clients.len()
+            )];
+            lines.extend(clients.iter().map(|row| {
+                format!(
+                    "- {} ({}), PIC {}, due {}",
+                    field(row, "client_name"),
+                    field(row, "client_code"),
+                    or_dash(field(row, "crm_name")),
+                    field(row, "reorder_on")
+                )
+            }));
+            lines.join("\n")
+        }
         "COLD_DIGEST" => {
             let leads = payload
                 .get("leads")
@@ -414,6 +489,23 @@ pub const NOTIFY_SHIP_CLEARED_SQL: &str = "INSERT INTO notification_outbox (id, 
 /// Barang keluar, ke grup CS (v3.4). ?1 = id log, ?2 = id pengiriman.
 pub const NOTIFY_SHIPPED_SQL: &str = "INSERT INTO notification_outbox (id, event_type, target_division, payload_json, occurred_at, status, attempts, next_attempt_at, created_at) SELECT 'shipped:' || ?1, 'SHIPMENT_SHIPPED', 'CS', json_object('sample_id', s.id, 'client_code', COALESCE(c.client_code, ''), 'client_name', COALESCE(c.name, ''), 'brand_name', s.brand_name, 'delivery_note_no', h.delivery_note_no, 'method', h.method, 'carrier', COALESCE(o.label, ''), 'tracking_no', h.tracking_no, 'driver_name', h.driver_name, 'vehicle_plate', h.vehicle_plate), h.shipped_at, CASE WHEN EXISTS (SELECT 1 FROM telegram_config t WHERE t.id = 'default' AND t.is_active = 1 AND TRIM(COALESCE(t.bot_token, '')) <> '') AND TRIM(COALESCE((SELECT g.value FROM setting_gex_system g WHERE g.key = 'telegram_chat_id_cs'), '')) <> '' THEN 'PENDING' ELSE 'SKIPPED' END, 0, datetime('now'), datetime('now') FROM shipments h JOIN sample_requests s ON s.id = h.sample_request_id LEFT JOIN clients c ON c.id = h.client_id LEFT JOIN master_option o ON o.id = h.carrier_option_id WHERE h.id = ?2 AND h.status = 'SHIPPED' LIMIT 1 ON CONFLICT(id) DO NOTHING;";
 
+/// Komplain penerimaan, ke grup CS dan Production (v3.5). ?1 = id klaim.
+pub const NOTIFY_COMPLAINT_SQL: &str = "INSERT INTO notification_outbox (id, event_type, target_division, payload_json, occurred_at, status, attempts, next_attempt_at, created_at) SELECT 'complaint:' || q.id || ':' || d.division, 'DELIVERY_COMPLAINT', d.division, json_object('sample_id', s.id, 'client_code', COALESCE(c.client_code, ''), 'client_name', COALESCE(c.name, ''), 'brand_name', s.brand_name, 'delivery_note_no', h.delivery_note_no, 'affected_units', q.affected_units, 'complaint_notes', q.complaint_notes), q.created_at, CASE WHEN EXISTS (SELECT 1 FROM telegram_config t WHERE t.id = 'default' AND t.is_active = 1 AND TRIM(COALESCE(t.bot_token, '')) <> '') AND TRIM(COALESCE((SELECT g.value FROM setting_gex_system g WHERE g.key = CASE d.division WHEN 'CS' THEN 'telegram_chat_id_cs' ELSE 'telegram_chat_id_production' END), '')) <> '' THEN 'PENDING' ELSE 'SKIPPED' END, 0, datetime('now'), datetime('now') FROM qc_claims q JOIN shipments h ON h.id = q.shipment_id JOIN sample_requests s ON s.id = q.sample_request_id LEFT JOIN clients c ON c.id = q.client_id CROSS JOIN (SELECT 'CS' AS division UNION ALL SELECT 'PRODUCTION') d WHERE q.id = ?1 ON CONFLICT(id) DO NOTHING;";
+
+/// Keputusan QC atas komplain, ke grup CS (v3.5). ?1 = id klaim.
+pub const NOTIFY_CLAIM_DECIDED_SQL: &str = "INSERT INTO notification_outbox (id, event_type, target_division, payload_json, occurred_at, status, attempts, next_attempt_at, created_at) SELECT 'claim-decided:' || q.id, 'CLAIM_DECIDED', 'CS', json_object('sample_id', s.id, 'client_code', COALESCE(c.client_code, ''), 'client_name', COALESCE(c.name, ''), 'brand_name', s.brand_name, 'delivery_note_no', h.delivery_note_no, 'fault_type', q.fault_type, 'remedy', q.remedy, 'findings', q.findings), q.decided_at, CASE WHEN EXISTS (SELECT 1 FROM telegram_config t WHERE t.id = 'default' AND t.is_active = 1 AND TRIM(COALESCE(t.bot_token, '')) <> '') AND TRIM(COALESCE((SELECT g.value FROM setting_gex_system g WHERE g.key = 'telegram_chat_id_cs'), '')) <> '' THEN 'PENDING' ELSE 'SKIPPED' END, 0, datetime('now'), datetime('now') FROM qc_claims q JOIN shipments h ON h.id = q.shipment_id JOIN sample_requests s ON s.id = q.sample_request_id LEFT JOIN clients c ON c.id = q.client_id WHERE q.id = ?1 AND q.status = 'DECIDED' LIMIT 1 ON CONFLICT(id) DO NOTHING;";
+
+/// Klien baru untuk CRM, sekali per klien (v3.6a). ?1 = id klien.
+pub const NOTIFY_HANDOVER_SQL: &str = "INSERT INTO notification_outbox (id, event_type, target_division, payload_json, occurred_at, status, attempts, next_attempt_at, created_at) SELECT 'handover:' || c.id, 'CLIENT_HANDOVER', 'CRM', json_object('client_id', c.id, 'client_code', c.client_code, 'client_name', c.name, 'crm_name', COALESCE(o.nama_operator, '')), c.updated_at, CASE WHEN EXISTS (SELECT 1 FROM telegram_config t WHERE t.id = 'default' AND t.is_active = 1 AND TRIM(COALESCE(t.bot_token, '')) <> '') AND TRIM(COALESCE((SELECT g.value FROM setting_gex_system g WHERE g.key = 'telegram_chat_id_crm'), '')) <> '' THEN 'PENDING' ELSE 'SKIPPED' END, 0, datetime('now'), datetime('now') FROM clients c LEFT JOIN master_operator o ON o.id = c.assigned_crm_id WHERE c.id = ?1 AND c.lifecycle_status = 'EXISTING_CLIENT' ON CONFLICT(id) DO NOTHING;";
+/// CS meneruskan klien CRM (E-33). ?1 id, ?2 klien, ?3 catatan, ?4 operator, ?5 waktu.
+pub const NOTIFY_CRM_FORWARD_SQL: &str = "INSERT INTO notification_outbox (id, event_type, target_division, payload_json, occurred_at, status, attempts, next_attempt_at, created_at) SELECT 'crm-forward:' || ?1, 'CRM_FORWARD', 'CRM', json_object('client_id', c.id, 'client_code', c.client_code, 'client_name', c.name, 'crm_name', COALESCE(o.nama_operator, ''), 'from', COALESCE(f.nama_operator, ''), 'notes', ?3), ?5, CASE WHEN EXISTS (SELECT 1 FROM telegram_config t WHERE t.id = 'default' AND t.is_active = 1 AND TRIM(COALESCE(t.bot_token, '')) <> '') AND TRIM(COALESCE((SELECT g.value FROM setting_gex_system g WHERE g.key = 'telegram_chat_id_crm'), '')) <> '' THEN 'PENDING' ELSE 'SKIPPED' END, 0, datetime('now'), datetime('now') FROM clients c LEFT JOIN master_operator o ON o.id = c.assigned_crm_id LEFT JOIN master_operator f ON f.id = ?4 WHERE c.id = ?2 ON CONFLICT(id) DO NOTHING;";
+/// Ringkasan repeat order untuk satu tanggal, dan tanggal ringkasan terakhir.
+pub const REORDER_DIGEST_STATE_SQL: &str = "SELECT (SELECT COUNT(*) FROM notification_outbox WHERE id = ?1) AS done, COALESCE((SELECT MAX(id) FROM notification_outbox WHERE id LIKE 'reorder-due:%'), '') AS last_id;";
+/// Klien yang jatuh tempo di rentang `reorderDigestRange` (?1 eksklusif, ?2 inklusif).
+pub const REORDER_DUE_CLIENTS_SQL: &str = "SELECT z.client_code, z.client_name, z.crm_name, z.reorder_on FROM (SELECT z.*, CASE WHEN z.last_completed_at = '' THEN '' ELSE date(z.last_completed_at, z.tz_shift, '+' || z.reorder_days || ' days') END AS reorder_on, date('now', z.tz_shift) AS today, (SELECT COUNT(*) FROM sample_requests r WHERE r.client_id = z.id AND r.id <> z.last_sample_id AND r.created_at >= z.last_completed_at AND r.status NOT IN ('RND_REJECTED', 'CLIENT_REJECT', 'CANCELLED')) AS open_tickets FROM (SELECT c.id, c.client_code, c.name AS client_name, c.city, c.assigned_crm_id, COALESCE(o.nama_operator, '') AS crm_name, MAX(COALESCE(CASE h.status WHEN 'RECEIVED' THEN h.received_at ELSE (SELECT MAX(q.decided_at) FROM qc_claims q WHERE q.shipment_id = h.id AND q.status = 'DECIDED') END, ''), COALESCE((SELECT MAX(i.record_date) FROM imported_records i WHERE i.client_id = c.id AND i.kind = 'SHIPMENT'), '')) AS last_completed_at, COALESCE(s.id, '') AS last_sample_id, COALESCE(s.brand_name, (SELECT i.title FROM imported_records i WHERE i.client_id = c.id AND i.kind = 'SHIPMENT' ORDER BY i.record_date DESC, i.created_at DESC LIMIT 1), '') AS brand_name, COALESCE(s.packaging, '') AS packaging, COALESCE(h.unit_count, (SELECT i.quantity FROM imported_records i WHERE i.client_id = c.id AND i.kind = 'SHIPMENT' ORDER BY i.record_date DESC, i.created_at DESC LIMIT 1), 0) AS last_units, COALESCE((SELECT f.formula_code FROM sample_formulas f WHERE f.sample_request_id = s.id ORDER BY f.iteration_number DESC, f.recorded_at DESC LIMIT 1), '') AS last_formula_code, COALESCE((SELECT MAX(MAX(l.last_followup_at, l.last_client_response_at)) FROM leads l WHERE l.client_id = c.id), '') AS last_contact_at, COALESCE((SELECT CAST(g.value AS INTEGER) FROM setting_gex_system g WHERE g.key = 'crm_reorder_days'), 60) AS reorder_days, CASE COALESCE((SELECT t.timezone FROM company_profile t WHERE t.id = 'default_company'), '') WHEN 'Asia/Makassar' THEN '+8 hours' WHEN 'Asia/Jayapura' THEN '+9 hours' ELSE '+7 hours' END AS tz_shift FROM clients c LEFT JOIN shipments h ON h.id = (SELECT x.id FROM shipments x WHERE x.client_id = c.id AND (x.status = 'RECEIVED' OR (x.status = 'COMPLAINED' AND EXISTS (SELECT 1 FROM qc_claims q WHERE q.shipment_id = x.id AND q.status = 'DECIDED'))) ORDER BY x.updated_at DESC, x.id DESC LIMIT 1) LEFT JOIN sample_requests s ON s.id = h.sample_request_id LEFT JOIN master_operator o ON o.id = c.assigned_crm_id WHERE c.lifecycle_status = 'EXISTING_CLIENT') z) z WHERE z.open_tickets = 0 AND z.reorder_on > ?1 AND z.reorder_on <= ?2 ORDER BY z.reorder_on, z.client_code LIMIT 50;";
+/// ?1 = id, ?2 = payload, ?3 = status (`PENDING`/`SKIPPED`).
+pub const REORDER_DIGEST_INSERT_SQL: &str = "INSERT INTO notification_outbox (id, event_type, target_division, payload_json, occurred_at, status, attempts, next_attempt_at, created_at) VALUES (?1, 'REORDER_DUE', 'CRM', ?2, datetime('now'), ?3, 0, datetime('now'), datetime('now')) ON CONFLICT(id) DO NOTHING;";
+
 /// Jadwal produksi disimpan, ke grup CS (v3.1). ?1 = id log, ?2 = id work order.
 pub const NOTIFY_BATCH_SCHEDULED_SQL: &str = "INSERT INTO notification_outbox (id, event_type, target_division, payload_json, occurred_at, status, attempts, next_attempt_at, created_at) SELECT 'schedule:' || ?1, 'BATCH_SCHEDULED', 'CS', json_object('sample_id', s.id, 'client_code', COALESCE(c.client_code, ''), 'client_name', COALESCE(c.name, ''), 'brand_name', s.brand_name, 'batch_code', b.batch_code, 'packing_on', b.sched_packing_on, 'notes', COALESCE(l.notes, '')), b.schedule_updated_at, CASE WHEN EXISTS (SELECT 1 FROM telegram_config t WHERE t.id = 'default' AND t.is_active = 1 AND TRIM(COALESCE(t.bot_token, '')) <> '') AND TRIM(COALESCE((SELECT g.value FROM setting_gex_system g WHERE g.key = 'telegram_chat_id_cs'), '')) <> '' THEN 'PENDING' ELSE 'SKIPPED' END, 0, datetime('now'), datetime('now') FROM production_batches b JOIN sample_requests s ON s.id = b.sample_request_id LEFT JOIN clients c ON c.id = b.client_id LEFT JOIN sample_status_log l ON l.id = ?1 WHERE b.id = ?2 LIMIT 1 ON CONFLICT(id) DO NOTHING;";
 
@@ -451,15 +543,15 @@ pub const NOTIFICATION_FAILED_LIST_SQL: &str = "SELECT id, event_type, target_di
 pub const NOTIFICATION_PENDING_COUNT_SQL: &str =
     "SELECT COUNT(*) AS total FROM notification_outbox WHERE status = 'PENDING';";
 
-pub const NOTIFICATION_BELL_LIST_SQL: &str = "SELECT id, event_type, target_division, payload_json, occurred_at, created_at FROM notification_outbox WHERE ((?1 = 1 AND target_division = 'CS') OR (?2 = 1 AND target_division = 'RND') OR (?3 = 1 AND target_division = 'FINANCE') OR (?4 = 1 AND target_division = 'DESIGN') OR (?5 = 1 AND target_division = 'PRODUCTION')) AND NOT (event_type = 'COLD_DIGEST' AND json_array_length(payload_json, '$.leads') = 0) ORDER BY created_at DESC, rowid DESC LIMIT 30;";
+pub const NOTIFICATION_BELL_LIST_SQL: &str = "SELECT id, event_type, target_division, payload_json, occurred_at, created_at FROM notification_outbox WHERE ((?1 = 1 AND target_division = 'CS') OR (?2 = 1 AND target_division = 'RND') OR (?3 = 1 AND target_division = 'FINANCE') OR (?4 = 1 AND target_division = 'DESIGN') OR (?5 = 1 AND target_division = 'PRODUCTION') OR (?6 = 1 AND target_division = 'CRM')) AND NOT (event_type IN ('COLD_DIGEST', 'REORDER_DUE') AND json_array_length(payload_json, CASE event_type WHEN 'COLD_DIGEST' THEN '$.leads' ELSE '$.clients' END) = 0) ORDER BY created_at DESC, rowid DESC LIMIT 30;";
 
-pub const NOTIFICATION_UNREAD_COUNT_SQL: &str = "SELECT COUNT(*) AS total FROM notification_outbox WHERE ((?1 = 1 AND target_division = 'CS') OR (?2 = 1 AND target_division = 'RND') OR (?3 = 1 AND target_division = 'FINANCE') OR (?4 = 1 AND target_division = 'DESIGN') OR (?5 = 1 AND target_division = 'PRODUCTION')) AND NOT (event_type = 'COLD_DIGEST' AND json_array_length(payload_json, '$.leads') = 0) AND created_at > COALESCE((SELECT seen_at FROM notification_seen WHERE operator_id = ?6), '');";
+pub const NOTIFICATION_UNREAD_COUNT_SQL: &str = "SELECT COUNT(*) AS total FROM notification_outbox WHERE ((?1 = 1 AND target_division = 'CS') OR (?2 = 1 AND target_division = 'RND') OR (?3 = 1 AND target_division = 'FINANCE') OR (?4 = 1 AND target_division = 'DESIGN') OR (?5 = 1 AND target_division = 'PRODUCTION') OR (?6 = 1 AND target_division = 'CRM')) AND NOT (event_type IN ('COLD_DIGEST', 'REORDER_DUE') AND json_array_length(payload_json, CASE event_type WHEN 'COLD_DIGEST' THEN '$.leads' ELSE '$.clients' END) = 0) AND created_at > COALESCE((SELECT seen_at FROM notification_seen WHERE operator_id = ?7), '');";
 
 pub const NOTIFICATION_MARK_SEEN_SQL: &str = "INSERT INTO notification_seen (operator_id, seen_at) VALUES (?1, datetime('now')) ON CONFLICT(operator_id) DO UPDATE SET seen_at = excluded.seen_at;";
 
 pub const NOTIFICATION_CONTEXT_SQL: &str = "SELECT CAST(strftime('%s', 'now') AS INTEGER) AS now_epoch, COALESCE((SELECT timezone FROM company_profile WHERE id = 'default_company'), '') AS timezone, COALESCE((SELECT is_active FROM telegram_config WHERE id = 'default'), 0) AS is_active, COALESCE((SELECT bot_token FROM telegram_config WHERE id = 'default'), '') AS bot_token, COALESCE((SELECT updated_at FROM telegram_config WHERE id = 'default'), '') AS updated_at, COALESCE((SELECT updated_by FROM telegram_config WHERE id = 'default'), '') AS updated_by;";
 
-pub const NOTIFICATION_SETTINGS_SQL: &str = "SELECT key, value FROM setting_gex_system WHERE key IN ('lead_hot_max_days', 'lead_warm_max_days', 'telegram_chat_id_cs', 'telegram_chat_id_rnd', 'telegram_chat_id_finance', 'telegram_chat_id_design', 'telegram_chat_id_production');";
+pub const NOTIFICATION_SETTINGS_SQL: &str = "SELECT key, value FROM setting_gex_system WHERE key IN ('lead_hot_max_days', 'lead_warm_max_days', 'telegram_chat_id_cs', 'telegram_chat_id_rnd', 'telegram_chat_id_finance', 'telegram_chat_id_design', 'telegram_chat_id_production', 'telegram_chat_id_crm');";
 
 /// ?1 = token baru (kosong = pertahankan yang lama), ?2 = aktif, ?3 = pelaku.
 pub const TELEGRAM_CONFIG_SAVE_SQL: &str = "INSERT INTO telegram_config (id, bot_token, is_active, updated_at, updated_by) VALUES ('default', ?1, ?2, datetime('now'), ?3) ON CONFLICT(id) DO UPDATE SET bot_token = CASE WHEN excluded.bot_token = '' THEN telegram_config.bot_token ELSE excluded.bot_token END, is_active = excluded.is_active, updated_at = excluded.updated_at, updated_by = excluded.updated_by;";
@@ -539,6 +631,7 @@ fn chat_id<'a>(settings: &'a BusinessSettings, division: &str) -> &'a str {
         "FINANCE" => &settings.telegram_chat_id_finance,
         "DESIGN" => &settings.telegram_chat_id_design,
         "PRODUCTION" => &settings.telegram_chat_id_production,
+        "CRM" => &settings.telegram_chat_id_crm,
         _ => "",
     }
 }
@@ -635,6 +728,64 @@ async fn ensure_cold_digest(
     Ok(())
 }
 
+/// Ringkasan repeat order harian ke grup CRM (v3.6a, keputusan G), pola
+/// yang sama dengan ringkasan Cold.
+async fn ensure_reorder_digest(
+    turso: &TursoClient,
+    context: &Context,
+    ready: bool,
+) -> Result<(), CommandError> {
+    let (today, hour) = company_clock(context.now_epoch, &context.timezone);
+    if hour < COLD_DIGEST_HOUR {
+        return Ok(());
+    }
+    let id = format!("reorder-due:{today}");
+    let state = turso
+        .query_one(REORDER_DIGEST_STATE_SQL, vec![json!(id)])
+        .await?
+        .to_objects()
+        .into_iter()
+        .next()
+        .unwrap_or_default();
+    if as_int(&state, "done") > 0 {
+        return Ok(());
+    }
+    let last_id = as_text(&state, "last_id");
+    let Some((from, to)) = reorder_digest_range(&today, last_id.strip_prefix("reorder-due:")) else {
+        return Ok(());
+    };
+    let clients: Vec<Value> = turso
+        .query_one(REORDER_DUE_CLIENTS_SQL, vec![json!(from), json!(to)])
+        .await?
+        .to_objects()
+        .iter()
+        .map(|row| {
+            json!({
+                "client_code": as_text(row, "client_code"),
+                "client_name": as_text(row, "client_name"),
+                "crm_name": as_text(row, "crm_name"),
+                "reorder_on": as_text(row, "reorder_on"),
+            })
+        })
+        .collect();
+    let status = if ready && !clients.is_empty() && !context.settings.telegram_chat_id_crm.is_empty() {
+        "PENDING"
+    } else {
+        "SKIPPED"
+    };
+    turso
+        .query_one(
+            REORDER_DIGEST_INSERT_SQL,
+            vec![
+                json!(id),
+                json!(json!({ "date": today, "clients": clients }).to_string()),
+                json!(status),
+            ],
+        )
+        .await?;
+    Ok(())
+}
+
 /// Satu putaran pengirim: buat ringkasan Cold hari ini bila waktunya, lalu
 /// klaim dan kirim baris yang jatuh tempo. Dipanggil di akhir siklus sync
 /// (hasilnya diabaikan pemanggil, aturan 9) dan sesudah "Retry failed".
@@ -642,6 +793,7 @@ pub async fn dispatch(turso: &TursoClient, http: &Client) -> Result<(), CommandE
     let context = load_context(turso).await?;
     let ready = context.is_active && !context.bot_token.is_empty();
     ensure_cold_digest(turso, &context, ready).await?;
+    ensure_reorder_digest(turso, &context, ready).await?;
     if !ready {
         return Ok(());
     }
@@ -806,10 +958,10 @@ pub async fn retry_failed(turso: &TursoClient) -> Result<u64, CommandError> {
 }
 
 /// Lonceng: 30 kejadian terakhir dari divisi yang boleh dilihat, plus jumlah
-/// yang belum dibaca. `allowed` = urutan CS, RnD, Finance, Desain.
+/// yang belum dibaca. `allowed` = urutan `NOTIFICATION_DIVISIONS`.
 pub async fn bell(
     turso: &TursoClient,
-    allowed: [bool; 5],
+    allowed: [bool; 6],
     operator_id: i64,
 ) -> Result<Value, CommandError> {
     let context = load_context(turso).await?;
@@ -903,6 +1055,35 @@ mod tests {
             company_clock(1_790_987_400, "Asia/Jakarta"),
             ("2026-10-03".to_owned(), 7)
         );
+    }
+
+    #[test]
+    fn rentang_ringkasan_repeat_order() {
+        // Vektor kembar dengan "rentang ringkasan repeat order" di `notification.test.ts`.
+        let range = |last: Option<&str>| reorder_digest_range("2026-10-10", last);
+        assert_eq!(range(None), Some(("2026-10-09".into(), "2026-10-10".into())));
+        assert_eq!(range(Some("2026-10-07")), Some(("2026-10-07".into(), "2026-10-10".into())));
+        assert_eq!(range(Some("2026-09-01")), Some(("2026-10-03".into(), "2026-10-10".into())));
+        assert_eq!(range(Some("2026-10-10")), None);
+    }
+
+    #[test]
+    fn teks_pesan_crm() {
+        let at = "2026-10-03 07:05:00";
+        let crm = json!({
+            "client_name": "Aura Beauty",
+            "client_code": "KLN-20261003-WB01",
+            "crm_name": "Rendi",
+            "from": "Sari",
+            "notes": "Wants 5000 pcs",
+        });
+        assert_eq!(render_notification("CLIENT_HANDOVER", &crm, at, "Asia/Jakarta"), "New client for CRM: Aura Beauty (KLN-20261003-WB01)\nCRM PIC: Rendi\nFirst order completed 2026-10-03 14:05 WIB");
+        assert_eq!(render_notification("CRM_FORWARD", &crm, at, "Asia/Jakarta"), "Client asked CS for a new order: Aura Beauty (KLN-20261003-WB01)\nCRM PIC: Rendi, forwarded by Sari\nNotes: Wants 5000 pcs\nForwarded 2026-10-03 14:05 WIB");
+        let digest = json!({
+            "date": "2026-12-01",
+            "clients": [{ "client_name": "Aura Beauty", "client_code": "KLN-20261003-WB01", "crm_name": "", "reorder_on": "2026-12-01" }],
+        });
+        assert_eq!(render_notification("REORDER_DUE", &digest, at, "Asia/Jakarta"), "Clients due for a repeat order (2026-12-01): 1\n- Aura Beauty (KLN-20261003-WB01), PIC -, due 2026-12-01");
     }
 
     #[test]
@@ -1068,6 +1249,28 @@ mod tests {
         assert_eq!(
             render_notification("BATCH_SCHEDULED", &batch, at, "Asia/Jakarta"),
             "Production scheduled, packing on 2026-11-05: Aura Glow for Aura Beauty (KLN-20261003-WB01)\nWork order BAT-20261010-A101: -\nSaved 2026-10-03 14:05 WIB"
+        );
+        let mut claim = shipped.clone();
+        for (key, value) in [
+            ("complaint_notes", "5 bottles leaked"),
+            ("fault_type", "INTERNAL"),
+            ("remedy", "REPLACE"),
+            ("findings", "Seal not tight"),
+        ] {
+            claim[key] = json!(value);
+        }
+        assert_eq!(
+            render_notification("DELIVERY_COMPLAINT", &claim, at, "Asia/Jakarta"),
+            "Delivery complaint, QC to investigate: Aura Glow for Aura Beauty (KLN-20261003-WB01)\nDelivery note SJ-20261120-A101: 5 bottles leaked\nReported 2026-10-03 14:05 WIB"
+        );
+        assert_eq!(
+            render_notification("CLAIM_DECIDED", &claim, at, "Asia/Jakarta"),
+            "QC decided the complaint: Aura Glow for Aura Beauty (KLN-20261003-WB01)\nDelivery note SJ-20261120-A101: our fault, return approved (replace goods)\nFindings: Seal not tight\nDecided 2026-10-03 14:05 WIB"
+        );
+        claim["fault_type"] = json!("RECIPIENT");
+        assert_eq!(
+            render_notification("CLAIM_DECIDED", &claim, at, "Asia/Jakarta"),
+            "QC decided the complaint: Aura Glow for Aura Beauty (KLN-20261003-WB01)\nDelivery note SJ-20261120-A101: not our fault, return rejected\nFindings: Seal not tight\nDecided 2026-10-03 14:05 WIB"
         );
     }
 }

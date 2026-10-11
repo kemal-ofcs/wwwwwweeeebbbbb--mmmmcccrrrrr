@@ -465,6 +465,9 @@ export const SHIPMENT_STATUSES = [
   "SHIPPED",
   "FORWARDED",
   "CANCELLED",
+  // Jawaban klien atas barang yang diterima (v3.5).
+  "RECEIVED",
+  "COMPLAINED",
 ] as const;
 export type ShipmentStatus = (typeof SHIPMENT_STATUSES)[number];
 
@@ -474,6 +477,8 @@ export const SHIPMENT_ACTIONS = [
   "SHIP_DISPATCH",
   "SHIP_TRACKING",
   "SHIP_FORWARD",
+  "SHIP_RECEIVED",
+  "SHIP_COMPLAINT",
 ] as const;
 export type ShipmentAction = (typeof SHIPMENT_ACTIONS)[number];
 
@@ -608,6 +613,13 @@ export function applyShipmentAction(
       return state.method === "CARRIER" && !state.tracking_no
         ? { error: "Record the tracking number before forwarding it." }
         : { status: "FORWARDED" };
+    // Jawaban klien (v3.5): bisa sebelum CS sempat meneruskan resi.
+    case "SHIP_RECEIVED":
+    case "SHIP_COMPLAINT":
+      if (state.status !== "SHIPPED" && state.status !== "FORWARDED") {
+        return wrong;
+      }
+      return { status: action === "SHIP_RECEIVED" ? "RECEIVED" : "COMPLAINED" };
     default:
       return { error: "This shipment step does not exist." };
   }
@@ -615,7 +627,11 @@ export function applyShipmentAction(
 
 /** Forwarded milik CS, sisanya Logistik (keputusan D). Padanan `shipment_action_permission`. */
 export function shipmentActionPermission(action: unknown) {
-  return action === "SHIP_FORWARD" ? "samples.manage" : "shipping.manage";
+  // Meneruskan resi dan mencatat jawaban klien milik CS (v3.4, v3.5).
+  return action === "SHIP_FORWARD" ||
+    (RECEIPT_ACTIONS as readonly unknown[]).includes(action)
+    ? "samples.manage"
+    : "shipping.manage";
 }
 
 /** Resi; wajib hanya untuk langkah `SHIP_TRACKING`. Padanan `normalize_tracking`. */
@@ -663,10 +679,155 @@ export function shipmentLogNotes(action: string, input: ShipmentLogInput) {
     }
     case "SHIP_TRACKING":
       return `Tracking number ${input.tracking_no}`;
+    case "SHIP_RECEIVED":
+      return "Received in good condition";
     default:
       return "Tracking number and delivery note sent to the client";
   }
 }
+
+// ---------------------------------------------------------------------------
+// Penerimaan klien dan klaim QC (v3.5, PRD F-28, D-48).
+// ---------------------------------------------------------------------------
+
+/** Langkah yang mencatat jawaban klien atas barang yang diterima. */
+export const RECEIPT_ACTIONS = ["SHIP_RECEIVED", "SHIP_COMPLAINT"] as const;
+
+/**
+ * Keluhan dan temuan masuk linimasa tiket (batas 1000) bersama awalannya:
+ * keluhan lewat tautan = nama (100) + " (approval link): " + catatan (800).
+ */
+export const COMPLAINT_NOTES_MAX = 950;
+export const QC_FINDINGS_MAX = 900;
+
+export interface ComplaintInput {
+  complaint_notes: string;
+  /** 0 = klien tidak menyebut jumlahnya (mis. lewat tautan). */
+  affected_units: number;
+}
+
+/** Keluhan klien (keputusan A). Padanan `validate_complaint`. */
+export function validateComplaint(
+  input: unknown,
+  unitCount: number,
+): { complaint: ComplaintInput } | { error: string } {
+  const raw = record(input);
+  const notes = text(raw, "complaint_notes");
+  if (!notes || [...notes].length > COMPLAINT_NOTES_MAX) {
+    return { error: "Describe the problem, up to 950 characters." };
+  }
+  const affected = strictInt(raw.affected_units);
+  if (affected === null || affected < 0 || affected > unitCount) {
+    return {
+      error: "The affected units cannot be more than the units shipped.",
+    };
+  }
+  return { complaint: { complaint_notes: notes, affected_units: affected } };
+}
+
+/** Catatan linimasa komplain. Padanan `complaint_log_notes`. */
+export function complaintLogNotes(complaint: ComplaintInput) {
+  return complaint.affected_units > 0
+    ? `Complaint (${complaint.affected_units} units): ${complaint.complaint_notes}`
+    : `Complaint: ${complaint.complaint_notes}`;
+}
+
+export const QC_FAULT_TYPES = ["INTERNAL", "RECIPIENT"] as const;
+export type QcFaultType = (typeof QC_FAULT_TYPES)[number];
+export const QC_REMEDIES = ["REPLACE", "CREDIT", "OTHER"] as const;
+export type QcRemedy = (typeof QC_REMEDIES)[number];
+export const QC_REMEDY_LABEL: Record<QcRemedy, string> = {
+  REPLACE: "replace goods",
+  CREDIT: "credit or refund",
+  OTHER: "other",
+};
+/** Aksi linimasa keputusan QC. */
+export const CLAIM_DECIDE_ACTION = "QC_DECIDE";
+
+export interface ClaimDecision {
+  fault_type: QcFaultType;
+  decision: "RETURN_APPROVED" | "RETURN_REJECTED";
+  remedy: string;
+  remedy_notes: string;
+  findings: string;
+}
+
+/**
+ * Keputusan QC (keputusan B, C): salah pabrik = retur disetujui dengan
+ * tindak lanjut; salah penerima/ekspedisi = retur ditolak (E-32). Padanan
+ * `validate_claim_decision`.
+ */
+export function validateClaimDecision(
+  input: unknown,
+): { decision: ClaimDecision } | { error: string } {
+  const raw = record(input);
+  const fault = raw.fault_type;
+  if (
+    typeof fault !== "string" ||
+    !(QC_FAULT_TYPES as readonly string[]).includes(fault)
+  ) {
+    return { error: "Choose whose fault it is." };
+  }
+  const findings = text(raw, "findings");
+  if (!findings || [...findings].length > QC_FINDINGS_MAX) {
+    return { error: "Write what QC found, up to 900 characters." };
+  }
+  const notes = text(raw, "remedy_notes");
+  if (notes === null || [...notes].length > PRODUCTION_REASON_MAX) {
+    return { error: "Notes are up to 500 characters." };
+  }
+  const internal = fault === "INTERNAL";
+  const remedy = text(raw, "remedy") ?? "";
+  if (internal && !(QC_REMEDIES as readonly string[]).includes(remedy)) {
+    return { error: "Choose how the client is put right." };
+  }
+  return {
+    decision: {
+      fault_type: fault as QcFaultType,
+      decision: internal ? "RETURN_APPROVED" : "RETURN_REJECTED",
+      remedy: internal ? remedy : "",
+      remedy_notes: internal ? notes : "",
+      findings,
+    },
+  };
+}
+
+/** `null` = klaim boleh diputuskan. Padanan `claim_decide_error`. */
+export function claimDecideError(status: string): string | null {
+  return status === "OPEN" ? null : "This complaint is already decided.";
+}
+
+/** Catatan linimasa keputusan QC. Padanan `claim_log_notes`. */
+export function claimLogNotes(decision: ClaimDecision) {
+  if (decision.fault_type === "RECIPIENT") {
+    return `Recipient fault, return rejected: ${decision.findings}`;
+  }
+  const remedy =
+    QC_REMEDY_LABEL[decision.remedy as QcRemedy] ?? decision.remedy;
+  return `Internal fault, return approved (${remedy}): ${decision.findings}`;
+}
+
+/** Nomor Berita Acara: satu klaim per Surat Jalan (keputusan D). PDF-nya webview saja. */
+export function claimReportNumber(deliveryNoteNo: string) {
+  return `BA-${deliveryNoteNo}`;
+}
+
+/**
+ * Order selesai (keputusan E, `ORDER_COMPLETED`): diterima baik, atau
+ * komplainnya sudah diputuskan QC. Dihitung, tidak disimpan.
+ */
+export function orderCompleted(
+  shipmentStatus: string | null,
+  claimStatus: string | null,
+) {
+  return (
+    shipmentStatus === "RECEIVED" ||
+    (shipmentStatus === "COMPLAINED" && claimStatus === "DECIDED")
+  );
+}
+
+export const CLAIM_CHANGED_ELSEWHERE =
+  "This complaint was changed on another device first. Open it again to see the latest version.";
 
 export const SHIPMENT_CHANGED_ELSEWHERE =
   "This shipment was changed on another device first. Open it again to see the latest version.";
@@ -770,4 +931,16 @@ export const SHIPMENT_UPDATE_SQL =
 
 /** Satu langkah. ?2 status baru, ?3 resi ('' = tetap), ?4 alasan batal, ?5 waktu, ?6 status dan ?7 `updated_at` yang dilihat pencatat. */
 export const SHIPMENT_STEP_SQL =
-  "UPDATE shipments SET status = ?2, tracking_no = CASE WHEN ?3 <> '' THEN ?3 ELSE tracking_no END, cancel_reason = CASE WHEN ?2 = 'CANCELLED' THEN ?4 ELSE cancel_reason END, shipped_at = CASE WHEN ?2 = 'SHIPPED' AND shipped_at = '' THEN ?5 ELSE shipped_at END, forwarded_at = CASE WHEN ?2 = 'FORWARDED' AND forwarded_at = '' THEN ?5 ELSE forwarded_at END, updated_at = ?5 WHERE id = ?1 AND status = ?6 AND updated_at = ?7;";
+  "UPDATE shipments SET status = ?2, tracking_no = CASE WHEN ?3 <> '' THEN ?3 ELSE tracking_no END, cancel_reason = CASE WHEN ?2 = 'CANCELLED' THEN ?4 ELSE cancel_reason END, shipped_at = CASE WHEN ?2 = 'SHIPPED' AND shipped_at = '' THEN ?5 ELSE shipped_at END, forwarded_at = CASE WHEN ?2 = 'FORWARDED' AND forwarded_at = '' THEN ?5 ELSE forwarded_at END, received_at = CASE WHEN ?2 IN ('RECEIVED', 'COMPLAINED') AND received_at = '' THEN ?5 ELSE received_at END, updated_at = ?5 WHERE id = ?1 AND status = ?6 AND updated_at = ?7;";
+
+/** Klaim QC beserta pengiriman, work order, tiket, klien, dan pemutus. */
+export const CLAIM_LIST_SQL =
+  "SELECT q.*, h.delivery_note_no, h.method, h.tracking_no, h.driver_name, h.vehicle_plate, h.ship_on, h.unit_count, h.carton_count, h.ship_to_address, COALESCE(o.label, '') AS carrier_label, b.batch_code, m.mou_number, s.brand_name, c.client_code, c.name AS client_name, COALESCE(d.nama_operator, '') AS decided_by_name FROM qc_claims q JOIN shipments h ON h.id = q.shipment_id JOIN production_batches b ON b.id = q.batch_id JOIN production_mou m ON m.id = b.mou_id JOIN sample_requests s ON s.id = q.sample_request_id LEFT JOIN clients c ON c.id = q.client_id LEFT JOIN master_option o ON o.id = h.carrier_option_id LEFT JOIN master_operator d ON d.id = q.decided_by";
+
+/** ?1 id, ?2 pengiriman, ?3 work order, ?4 tiket, ?5 klien, ?6 keluhan, ?7 unit bermasalah, ?8 pencatat, ?9 waktu. */
+export const CLAIM_INSERT_SQL =
+  "INSERT INTO qc_claims (id, shipment_id, batch_id, sample_request_id, client_id, complaint_notes, affected_units, status, fault_type, decision, remedy, remedy_notes, findings, decided_by, decided_at, created_by, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'OPEN', '', '', '', '', '', NULL, '', ?8, ?9, ?9) ON CONFLICT(id) DO NOTHING;";
+
+/** Keputusan QC, sekali. ?2-?6 isian, ?7 pemutus, ?8 waktu, ?9 `updated_at` yang dilihat QC. */
+export const CLAIM_DECIDE_SQL =
+  "UPDATE qc_claims SET status = 'DECIDED', fault_type = ?2, decision = ?3, remedy = ?4, remedy_notes = ?5, findings = ?6, decided_by = ?7, decided_at = ?8, updated_at = ?8 WHERE id = ?1 AND status = 'OPEN' AND updated_at = ?9;";

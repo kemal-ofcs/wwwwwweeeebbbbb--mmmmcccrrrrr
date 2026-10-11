@@ -29,7 +29,7 @@ import { ImportColumnGuide } from "./ImportColumnGuide";
 
 /**
  * Impor CSV Data Uang Masuk, Database Formulasi, dan Database Desain (PRD
- * F-22, v2.7). Layar hanya membaca berkas dan menebak pemetaan; backend
+ * F-22, v2.7), serta Riwayat Batch dan Riwayat Pengiriman (F-32, v3.7). Layar hanya membaca berkas dan menebak pemetaan; backend
  * (`importSheet`) memutuskan validitasnya, dipanggil dua kali dengan
  * pemeriksaan yang sama: pratinjau lalu simpan.
  */
@@ -47,6 +47,14 @@ const KIND_LABEL: Record<SheetKind, { title: string; hint: string }> = {
     title: "Designs (Database Desain)",
     hint: "Kept as read-only history on each client.",
   },
+  BATCH: {
+    title: "Production batches (Riwayat Batch)",
+    hint: "Kept as read-only history on each client. No work orders are created.",
+  },
+  SHIPMENT: {
+    title: "Shipments (Riwayat Pengiriman)",
+    hint: "Kept as read-only history on each client. Each shipment counts as a completed order, so the client moves to CRM without a PIC.",
+  },
 };
 
 const DATE_ORDER_LABEL: Record<DateOrder, string> = {
@@ -58,6 +66,8 @@ const TEMPLATE_NAME: Record<SheetKind, string> = {
   FUNDS: "template-incoming-payments.xlsx",
   FORMULA: "template-formulas.xlsx",
   DESIGN: "template-designs.xlsx",
+  BATCH: "template-batch-history.xlsx",
+  SHIPMENT: "template-shipment-history.xlsx",
 };
 
 interface SheetFile {
@@ -163,6 +173,7 @@ export function SheetImport() {
         code: cell("code", cells),
         title: cell("title", cells),
         amount: cell("amount", cells),
+        quantity: cell("quantity", cells),
         notes: cell("notes", cells),
       }));
       const result = await importSheet({

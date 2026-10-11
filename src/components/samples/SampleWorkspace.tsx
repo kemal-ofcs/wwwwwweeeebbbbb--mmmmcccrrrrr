@@ -25,6 +25,7 @@ import {
 } from "@/lib/gateways/samples";
 import { SYNC_COMPLETED_EVENT } from "@/lib/gateways/sync-status";
 import { onOpenDetail, requestedDetail } from "@/lib/utils/open-detail";
+import { orderCompleted } from "@/lib/validations/production";
 import {
   SAMPLE_TERMINAL_STATUSES,
   type SampleStatus,
@@ -277,9 +278,11 @@ export function SampleWorkspace() {
       // Sejak v2, Client approved bukan akhir: dummy, MoU, DP, dan dokumen
       // legal masih berjalan (temuan uji v2). Order baru dianggap berhenti
       // bila MoU terakhirnya ditolak atau dibatalkan; MoU baru membukanya lagi.
+      // Order yang diterima klien atau komplainnya diputuskan QC selesai (v3.5).
       const closed =
         row.status === "CLIENT_ACC"
-          ? row.mou_closed === 1 && !row.mou_status
+          ? (row.mou_closed === 1 && !row.mou_status) ||
+            orderCompleted(row.shipment_status, row.claim_status)
           : SAMPLE_TERMINAL_STATUSES.includes(row.status as SampleStatus);
       if (view === "rnd" && !RND_QUEUE_STATUSES.includes(row.status))
         return false;

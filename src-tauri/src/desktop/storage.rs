@@ -315,7 +315,8 @@ pub fn initialize(path: &Path) -> Result<(), String> {
         updated_at TEXT NOT NULL,
         rnd_reject_reason_option_id TEXT NOT NULL DEFAULT '',
         revision_fee_idr INTEGER,
-        is_test_requested INTEGER NOT NULL DEFAULT 0
+        is_test_requested INTEGER NOT NULL DEFAULT 0,
+        repeat_of_id TEXT NOT NULL DEFAULT ''
       );
       CREATE TABLE IF NOT EXISTS sample_feedbacks (
         id TEXT PRIMARY KEY,
@@ -506,7 +507,8 @@ pub fn initialize(path: &Path) -> Result<(), String> {
         notes TEXT NOT NULL DEFAULT '',
         source_file TEXT NOT NULL DEFAULT '',
         imported_by INTEGER,
-        created_at TEXT NOT NULL
+        created_at TEXT NOT NULL,
+        quantity INTEGER
       );
       CREATE INDEX IF NOT EXISTS idx_local_imported_records_client
         ON imported_records(client_id);
@@ -570,12 +572,36 @@ pub fn initialize(path: &Path) -> Result<(), String> {
         cancel_reason TEXT NOT NULL DEFAULT '',
         shipped_at TEXT NOT NULL DEFAULT '',
         forwarded_at TEXT NOT NULL DEFAULT '',
+        received_at TEXT NOT NULL DEFAULT '',
         created_by INTEGER,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
       CREATE INDEX IF NOT EXISTS idx_local_shipments_batch
         ON shipments(batch_id);
+      -- Komplain penerimaan dan keputusan QC (v3.5, PRD F-28), cache cloud.
+      CREATE TABLE IF NOT EXISTS qc_claims (
+        id TEXT PRIMARY KEY,
+        shipment_id TEXT NOT NULL,
+        batch_id TEXT NOT NULL,
+        sample_request_id TEXT NOT NULL,
+        client_id TEXT NOT NULL,
+        complaint_notes TEXT NOT NULL,
+        affected_units INTEGER NOT NULL DEFAULT 0,
+        status TEXT NOT NULL DEFAULT 'OPEN',
+        fault_type TEXT NOT NULL DEFAULT '',
+        decision TEXT NOT NULL DEFAULT '',
+        remedy TEXT NOT NULL DEFAULT '',
+        remedy_notes TEXT NOT NULL DEFAULT '',
+        findings TEXT NOT NULL DEFAULT '',
+        decided_by INTEGER,
+        decided_at TEXT NOT NULL DEFAULT '',
+        created_by INTEGER,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_local_qc_claims_shipment
+        ON qc_claims(shipment_id);
       -- Foto: data ringkas ditarik dari cloud; `data_base64` terisi untuk foto
       -- buatan perangkat ini dan foto yang pernah dibuka ('' = belum diambil).
       CREATE TABLE IF NOT EXISTS media_asset (
@@ -697,6 +723,10 @@ pub fn initialize(path: &Path) -> Result<(), String> {
         "is_test_requested",
         "ALTER TABLE sample_requests ADD COLUMN is_test_requested INTEGER NOT NULL DEFAULT 0;",
     )?;
+    // Jumlah unit riwayat batch/pengiriman (v3.7, D-51).
+    ensure_column(&connection, "imported_records", "quantity", "ALTER TABLE imported_records ADD COLUMN quantity INTEGER;")?;
+    // Tiket asal repeat order (v3.6b, D-50).
+    ensure_column(&connection, "sample_requests", "repeat_of_id", "ALTER TABLE sample_requests ADD COLUMN repeat_of_id TEXT NOT NULL DEFAULT '';")?;
     // Progres tahap lantai produksi (v3.2, PRD F-25).
     for (column, sql) in [
         ("stages_done", "ALTER TABLE production_batches ADD COLUMN stages_done INTEGER NOT NULL DEFAULT 0;"),
@@ -706,6 +736,8 @@ pub fn initialize(path: &Path) -> Result<(), String> {
     ] {
         ensure_column(&connection, "production_batches", column, sql)?;
     }
+    // Waktu klien menjawab penerimaan (v3.5, PRD F-28).
+    ensure_column(&connection, "shipments", "received_at", "ALTER TABLE shipments ADD COLUMN received_at TEXT NOT NULL DEFAULT '';")?;
 
     Ok(())
 }
@@ -739,6 +771,7 @@ const CLOUD_MIRRORED_TABLES: &[&str] = &[
     "production_batches",
     "batch_purchase_orders",
     "shipments",
+    "qc_claims",
     "media_asset",
 ];
 
@@ -1066,6 +1099,7 @@ mod tests {
             "production_batches",
             "batch_purchase_orders",
             "shipments",
+            "qc_claims",
             "media_asset",
             "setting_gex_system",
             "desktop_sync_outbox",

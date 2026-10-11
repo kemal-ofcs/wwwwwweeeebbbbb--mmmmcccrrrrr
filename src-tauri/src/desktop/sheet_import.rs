@@ -12,9 +12,10 @@ use serde_json::{json, Value};
 
 use super::clients::{parse_sheet_date, parse_stored_timestamp, utc_timestamp, SheetDate};
 use super::finance::{FUND_DESCRIPTION_MAX, INVOICE_AMOUNT_MAX};
+use super::mou::MOU_UNITS_MAX;
 use super::samples::is_calendar_date;
 
-pub const ARCHIVE_KINDS: &[&str] = &["FORMULA", "DESIGN"];
+pub const ARCHIVE_KINDS: &[&str] = &["FORMULA", "DESIGN", "BATCH", "SHIPMENT"];
 pub const ARCHIVE_CODE_MAX: usize = 100;
 pub const ARCHIVE_TITLE_MAX: usize = 200;
 pub const ARCHIVE_NOTES_MAX: usize = 1000;
@@ -25,6 +26,9 @@ pub fn sheet_import_permission(kind: &str) -> Option<&'static str> {
         "FUNDS" => Some("finance.manage"),
         "FORMULA" => Some("rnd.manage"),
         "DESIGN" => Some("design.manage"),
+        // Riwayat produksi dan pengiriman lama (v3.7, keputusan E).
+        "BATCH" => Some("production.manage"),
+        "SHIPMENT" => Some("shipping.manage"),
         _ => None,
     }
 }
@@ -91,6 +95,31 @@ pub fn parse_sheet_day(raw: &str, order: &str) -> SheetValue<String> {
     }
 }
 
+/// Padanan `parseSheetQuantity`.
+pub fn parse_sheet_quantity(raw: &str) -> SheetValue<i64> {
+    let text = raw.trim();
+    if text.is_empty() {
+        return SheetValue::Empty;
+    }
+    let plain = text.bytes().all(|byte| byte.is_ascii_digit());
+    let grouped = {
+        let parts: Vec<&str> = text.split(['.', ',']).collect();
+        parts.len() > 1
+            && (1..=3).contains(&parts[0].len())
+            && parts.iter().all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()))
+            && parts[1..].iter().all(|part| part.len() == 3)
+    };
+    if !plain && !grouped {
+        return SheetValue::Error(format!("The unit count \"{text}\" could not be read."));
+    }
+    let digits: String = text.chars().filter(char::is_ascii_digit).collect();
+    let value = if digits.len() > 9 { i64::MAX } else { digits.parse().unwrap_or(0) };
+    if !(1..=MOU_UNITS_MAX).contains(&value) {
+        return SheetValue::Error(format!("The unit count \"{text}\" is out of range."));
+    }
+    SheetValue::Value(value)
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SheetRow {
     pub line: i64,
@@ -99,6 +128,7 @@ pub struct SheetRow {
     pub code: String,
     pub title: String,
     pub amount_idr: Option<i64>,
+    pub quantity: Option<i64>,
     pub notes: String,
 }
 
@@ -109,9 +139,11 @@ fn field(input: &Value, key: &str) -> String {
 /// Padanan `validateSheetRow` (masukan mentah, seperti `sheetRowInput`).
 pub fn validate_sheet_row(kind: &str, input: &Value, order: &str) -> Result<SheetRow, String> {
     let funds = kind == "FUNDS";
+    let history = kind == "BATCH" || kind == "SHIPMENT";
     let date = match parse_sheet_day(&field(input, "date"), order) {
         SheetValue::Error(message) => return Err(message),
-        SheetValue::Empty if funds => return Err("Tanggal is empty.".to_owned()),
+        SheetValue::Empty if kind == "SHIPMENT" => return Err("Tanggal Kirim is empty.".to_owned()),
+        SheetValue::Empty if funds || history => return Err("Tanggal is empty.".to_owned()),
         SheetValue::Empty => String::new(),
         SheetValue::Value(value) => value,
     };
@@ -125,15 +157,20 @@ pub fn validate_sheet_row(kind: &str, input: &Value, order: &str) -> Result<Shee
     }
     let title = if funds { String::new() } else { field(input, "title").trim().to_owned() };
     if !funds && title.is_empty() {
-        return Err(if kind == "FORMULA" { "Nama Produk is empty." } else { "Brand is empty." }.to_owned());
+        return Err(if kind == "DESIGN" { "Brand is empty." } else { "Nama Produk is empty." }.to_owned());
     }
     if title.chars().count() > ARCHIVE_TITLE_MAX {
         return Err(format!("The name is longer than {ARCHIVE_TITLE_MAX} characters."));
     }
-    let amount = if kind == "DESIGN" { SheetValue::Empty } else { parse_sheet_amount(&field(input, "amount")) };
+    let amount = if kind == "DESIGN" || history { SheetValue::Empty } else { parse_sheet_amount(&field(input, "amount")) };
     let amount_idr = match amount {
         SheetValue::Error(message) => return Err(message),
         SheetValue::Empty if funds => return Err("Nominal is empty.".to_owned()),
+        SheetValue::Empty => None,
+        SheetValue::Value(value) => Some(value),
+    };
+    let quantity = match if history { parse_sheet_quantity(&field(input, "quantity")) } else { SheetValue::Empty } {
+        SheetValue::Error(message) => return Err(message),
         SheetValue::Empty => None,
         SheetValue::Value(value) => Some(value),
     };
@@ -149,6 +186,7 @@ pub fn validate_sheet_row(kind: &str, input: &Value, order: &str) -> Result<Shee
         code,
         title,
         amount_idr,
+        quantity,
         notes,
     })
 }
@@ -228,6 +266,11 @@ pub fn archive_payload_error(payload: &Value) -> Option<&'static str> {
         None | Some(Value::Null) => true,
         Some(value) => value.as_i64().is_some_and(|amount| (1..=INVOICE_AMOUNT_MAX).contains(&amount)),
     };
+    let quantity_ok = match payload.get("quantity") {
+        None | Some(Value::Null) => true,
+        Some(value) => value.as_i64().is_some_and(|units| (1..=MOU_UNITS_MAX).contains(&units)),
+    };
+    let history = text("kind") == "BATCH" || text("kind") == "SHIPMENT";
     let valid = ARCHIVE_KINDS.contains(&text("kind"))
         && !text("client_id").is_empty()
         && !text("title").trim().is_empty()
@@ -235,7 +278,9 @@ pub fn archive_payload_error(payload: &Value) -> Option<&'static str> {
         && text("code").chars().count() <= ARCHIVE_CODE_MAX
         && text("notes").chars().count() <= ARCHIVE_NOTES_MAX
         && (date.is_empty() || is_calendar_date(date))
+        && (!history || is_calendar_date(date))
         && amount_ok
+        && quantity_ok
         && parse_stored_timestamp(text("created_at")).is_some();
     (!valid).then_some("The imported record is incomplete or invalid.")
 }
@@ -246,9 +291,12 @@ pub const SHEET_FUND_KEYS_SQL: &str = "SELECT received_on, amount_idr, descripti
 
 pub const SHEET_ARCHIVE_KEYS_SQL: &str = "SELECT kind, client_id, code, title, record_date FROM imported_records;";
 
-pub const IMPORTED_RECORD_INSERT_SQL: &str = "INSERT INTO imported_records (id, kind, client_id, record_date, code, title, amount_idr, notes, source_file, imported_by, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11) ON CONFLICT(id) DO NOTHING;";
+pub const IMPORTED_RECORD_INSERT_SQL: &str = "INSERT INTO imported_records (id, kind, client_id, record_date, code, title, amount_idr, notes, source_file, imported_by, created_at, quantity) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12) ON CONFLICT(id) DO NOTHING;";
 
-pub const IMPORTED_RECORD_LIST_SQL: &str = "SELECT id, kind, client_id, record_date, code, title, amount_idr, notes, source_file, created_at FROM imported_records WHERE client_id = ?1 ORDER BY record_date DESC, created_at DESC, rowid DESC;";
+pub const IMPORTED_RECORD_LIST_SQL: &str = "SELECT id, kind, client_id, record_date, code, title, amount_idr, quantity, notes, source_file, created_at FROM imported_records WHERE client_id = ?1 ORDER BY record_date DESC, created_at DESC, rowid DESC;";
+
+/// Padanan `IMPORT_HANDOVER_SQL`.
+pub const IMPORT_HANDOVER_SQL: &str = "UPDATE clients SET lifecycle_status = 'EXISTING_CLIENT', updated_at = ?2 WHERE id = ?1 AND lifecycle_status <> 'EXISTING_CLIENT';";
 
 #[cfg(test)]
 mod tests {
@@ -319,6 +367,31 @@ mod tests {
         for (kind, raw, message) in errors {
             assert_eq!(validate_sheet_row(kind, raw, "DMY"), Err((*message).to_owned()), "{message}");
         }
+    }
+
+    #[test]
+    fn riwayat_batch_dan_pengiriman() {
+        // Vektor kembar dengan "riwayat batch dan pengiriman" di `sheet-import.test.ts`.
+        let history = |date: &str, title: &str, quantity: &str| {
+            json!({ "line": 3, "date": date, "client_code": "KP-1", "code": "JNE1", "title": title, "amount": "999", "quantity": quantity, "notes": "" })
+        };
+        let row = validate_sheet_row("SHIPMENT", &history("25/8/2025", "Serum", "5.000"), "DMY").expect("pengiriman sah");
+        assert_eq!((row.date.as_str(), row.amount_idr, row.quantity), ("2025-08-25", None, Some(5000)));
+        let row = validate_sheet_row("BATCH", &history("20/8/2025", "Serum", ""), "DMY").expect("batch sah");
+        assert_eq!(row.quantity, None);
+        let errors: &[(&str, Value, &str)] = &[
+            ("SHIPMENT", history("", "Serum", ""), "Tanggal Kirim is empty."),
+            ("BATCH", history("", "Serum", ""), "Tanggal is empty."),
+            ("BATCH", history("1/1/2025", "", ""), "Nama Produk is empty."),
+            ("BATCH", history("1/1/2025", "Serum", "5,5"), "The unit count \"5,5\" could not be read."),
+            ("BATCH", history("1/1/2025", "Serum", "0"), "The unit count \"0\" is out of range."),
+            ("BATCH", history("1/1/2025", "Serum", "10.000.001"), "The unit count \"10.000.001\" is out of range."),
+        ];
+        for (kind, raw, message) in errors {
+            assert_eq!(validate_sheet_row(kind, raw, "DMY"), Err((*message).to_owned()), "{message}");
+        }
+        assert_eq!(sheet_import_permission("BATCH"), Some("production.manage"));
+        assert_eq!(sheet_import_permission("SHIPMENT"), Some("shipping.manage"));
     }
 
     #[test]

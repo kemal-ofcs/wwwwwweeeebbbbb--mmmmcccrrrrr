@@ -9,6 +9,7 @@ import { type AuditActor, writeAudit } from "@/lib/server/audit";
 import { loadBusinessSettings } from "@/lib/server/business-settings";
 import { ApiRequestError } from "@/lib/server/http/api-response";
 import { recordMouStep } from "@/lib/server/mou";
+import { recordShipmentStep } from "@/lib/server/production";
 import { recordDesignStep, recordSampleStep } from "@/lib/server/samples";
 import {
   APPROVAL_INSERT_SQL,
@@ -29,6 +30,7 @@ import {
 import { DESIGN_LIST_SQL } from "@/lib/validations/design";
 import { MOU_LIST_SQL } from "@/lib/validations/mou";
 import { NOTIFY_CLIENT_RESPONSE_SQL } from "@/lib/validations/notification";
+import { SHIPMENT_LIST_SQL } from "@/lib/validations/production";
 import { formatRupiah, SAMPLE_LIST_SQL } from "@/lib/validations/sample";
 
 /**
@@ -147,6 +149,36 @@ async function summary(
   entityType: ApprovalEntityType,
   entityId: string,
 ) {
+  if (entityType === "RECEIPT") {
+    const shipment = await row(
+      executor,
+      `${SHIPMENT_LIST_SQL} WHERE h.id = ?;`,
+      [entityId],
+    );
+    return {
+      client_name: String(shipment?.client_name ?? ""),
+      brand_name: String(shipment?.brand_name ?? ""),
+      details: [
+        {
+          label: "Delivery note",
+          value: String(shipment?.delivery_note_no ?? ""),
+        },
+        {
+          label: "Units",
+          value: Number(shipment?.unit_count ?? 0).toLocaleString("id-ID"),
+        },
+        {
+          label: "Cartons",
+          value: Number(shipment?.carton_count ?? 0).toLocaleString("id-ID"),
+        },
+        { label: "Shipped on", value: String(shipment?.ship_on ?? "") },
+        {
+          label: "Tracking number",
+          value: String(shipment?.tracking_no ?? "") || "-",
+        },
+      ],
+    };
+  }
   if (entityType === "MOU") {
     const mou = await row(executor, `${MOU_LIST_SQL} WHERE m.id = ?;`, [
       entityId,
@@ -301,6 +333,20 @@ export async function respondApproval(
       await recordSampleStep(client, step, CLIENT_ACTOR, options);
     } else if (entityType === "DUMMY") {
       await recordDesignStep(client, step, CLIENT_ACTOR, false, options);
+    } else if (entityType === "RECEIPT") {
+      // "Ada masalah" menjadi komplain tanpa jumlah unit (keputusan A).
+      await recordShipmentStep(
+        client,
+        {
+          shipment_id: entityId,
+          step: {
+            action,
+            complaint: { complaint_notes: notes, affected_units: 0 },
+          },
+        },
+        CLIENT_ACTOR,
+        options,
+      );
     } else {
       await recordMouStep(client, step, CLIENT_ACTOR, options);
     }

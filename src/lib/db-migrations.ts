@@ -149,7 +149,25 @@ const COLUMN_MIGRATIONS: readonly ColumnMigration[] = [
     column: "is_test_requested",
     sql: "ALTER TABLE sample_requests ADD COLUMN is_test_requested INTEGER NOT NULL DEFAULT 0;",
   },
+  // Jumlah unit riwayat batch/pengiriman (v3.7, D-51).
+  {
+    table: "imported_records",
+    column: "quantity",
+    sql: "ALTER TABLE imported_records ADD COLUMN quantity INTEGER;",
+  },
+  // Tiket asal repeat order (v3.6b, D-50).
+  {
+    table: "sample_requests",
+    column: "repeat_of_id",
+    sql: "ALTER TABLE sample_requests ADD COLUMN repeat_of_id TEXT NOT NULL DEFAULT '';",
+  },
   // Progres tahap lantai produksi (v3.2, PRD F-25).
+  // Waktu klien menjawab penerimaan (v3.5, PRD F-28).
+  {
+    table: "shipments",
+    column: "received_at",
+    sql: "ALTER TABLE shipments ADD COLUMN received_at TEXT NOT NULL DEFAULT '';",
+  },
   {
     table: "production_batches",
     column: "stages_done",
@@ -408,6 +426,43 @@ export async function runDatabaseMigrations(client: Client) {
   await client.execute({
     sql: `INSERT OR IGNORE INTO schema_migration (version, name, applied_at)
           VALUES (20, 'shipments', ?);`,
+    args: [new Date().toISOString()],
+  });
+
+  // Versi 21: komplain penerimaan dan keputusan QC (v3.5, PRD F-28): tabel
+  // `qc_claims` (DDL awal), kolom `shipments.received_at`
+  // (`COLUMN_MIGRATIONS`), dan izin `qc.manage`. Nomor dan nama WAJIB sama
+  // dengan `turso.rs`.
+  await client.execute({
+    sql: `INSERT OR IGNORE INTO schema_migration (version, name, applied_at)
+          VALUES (21, 'qc-claims', ?);`,
+    args: [new Date().toISOString()],
+  });
+
+  // Versi 22: serah terima CS -> CRM (v3.6a, PRD F-29): izin `crm.manage` dan
+  // `notifications_crm.view` beserta seed role CRM, tanpa tabel baru. Nomor
+  // dan nama WAJIB sama dengan `turso.rs`.
+  await client.execute({
+    sql: `INSERT OR IGNORE INTO schema_migration (version, name, applied_at)
+          VALUES (22, 'crm-handover', ?);`,
+    args: [new Date().toISOString()],
+  });
+
+  // Versi 23: repeat order (v3.6b, PRD F-30): kolom
+  // `sample_requests.repeat_of_id` (`COLUMN_MIGRATIONS`) dan izin tambahan
+  // role CRM. Nomor dan nama WAJIB sama dengan `turso.rs`.
+  await client.execute({
+    sql: `INSERT OR IGNORE INTO schema_migration (version, name, applied_at)
+          VALUES (23, 'repeat-orders', ?);`,
+    args: [new Date().toISOString()],
+  });
+
+  // Versi 24: riwayat batch dan pengiriman dari sheet lama (v3.7, PRD F-32):
+  // kolom `imported_records.quantity` (`COLUMN_MIGRATIONS`). Nomor dan nama
+  // WAJIB sama dengan `turso.rs`.
+  await client.execute({
+    sql: `INSERT OR IGNORE INTO schema_migration (version, name, applied_at)
+          VALUES (24, 'imported-history', ?);`,
     args: [new Date().toISOString()],
   });
 }

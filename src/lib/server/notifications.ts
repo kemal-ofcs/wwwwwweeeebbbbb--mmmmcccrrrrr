@@ -29,7 +29,11 @@ import {
   NOTIFICATION_SKIP_SQL,
   NOTIFICATION_UNREAD_COUNT_SQL,
   type NotificationDivision,
+  REORDER_DIGEST_INSERT_SQL,
+  REORDER_DIGEST_STATE_SQL,
+  REORDER_DUE_CLIENTS_SQL,
   renderNotification,
+  reorderDigestRange,
   retryDelayMinutes,
   TELEGRAM_CONFIG_SAVE_SQL,
   TELEGRAM_TOKEN_INVALID,
@@ -96,6 +100,8 @@ function chatId(settings: BusinessSettings, division: string) {
       return settings.telegram_chat_id_design;
     case "PRODUCTION":
       return settings.telegram_chat_id_production;
+    case "CRM":
+      return settings.telegram_chat_id_crm;
     default:
       return "";
   }
@@ -188,6 +194,44 @@ async function ensureColdDigest(
   });
 }
 
+/** Ringkasan repeat order harian ke grup CRM (v3.6a), pola ringkasan Cold. */
+async function ensureReorderDigest(
+  client: Client,
+  context: Context,
+  ready: boolean,
+) {
+  const { date, hour } = companyClock(context.nowEpoch, context.timezone);
+  if (hour < COLD_DIGEST_HOUR) return;
+  const id = `reorder-due:${date}`;
+  const state = await client.execute({
+    sql: REORDER_DIGEST_STATE_SQL,
+    args: [id],
+  });
+  if (Number(state.rows[0]?.done ?? 0) > 0) return;
+  const lastId = String(state.rows[0]?.last_id ?? "");
+  const range = reorderDigestRange(
+    date,
+    lastId.startsWith("reorder-due:") ? lastId.slice(12) : null,
+  );
+  if (!range) return;
+  const clients = (
+    await client.execute({ sql: REORDER_DUE_CLIENTS_SQL, args: range })
+  ).rows.map((row) => ({
+    client_code: String(row.client_code ?? ""),
+    client_name: String(row.client_name ?? ""),
+    crm_name: String(row.crm_name ?? ""),
+    reorder_on: String(row.reorder_on ?? ""),
+  }));
+  const status =
+    ready && clients.length > 0 && context.settings.telegram_chat_id_crm !== ""
+      ? "PENDING"
+      : "SKIPPED";
+  await client.execute({
+    sql: REORDER_DIGEST_INSERT_SQL,
+    args: [id, JSON.stringify({ date, clients }), status],
+  });
+}
+
 /**
  * Satu putaran pengirim: ringkasan Cold hari ini bila waktunya, lalu klaim dan
  * kirim baris yang jatuh tempo. Web tidak punya worker latar (D-04), jadi ini
@@ -197,6 +241,7 @@ export async function dispatchNotifications(client: Client) {
   const context = await loadContext(client);
   const ready = context.isActive && context.botToken !== "";
   await ensureColdDigest(client, context, ready);
+  await ensureReorderDigest(client, context, ready);
   if (!ready) return;
   const due = await client.execute(NOTIFICATION_DUE_SQL);
   for (const row of due.rows) {
@@ -338,7 +383,7 @@ export async function retryFailedNotifications(client: Client) {
 export function notificationAccess(actor: OperatorUser) {
   const allowed = NOTIFICATION_DIVISIONS.map((division) =>
     hasPermission(actor, NOTIFICATION_PERMISSIONS[division]),
-  ) as [boolean, boolean, boolean, boolean, boolean];
+  ) as [boolean, boolean, boolean, boolean, boolean, boolean];
   if (!allowed.some(Boolean)) {
     throw new AuthorizationError("Access denied for this action.", 403);
   }
@@ -347,11 +392,11 @@ export function notificationAccess(actor: OperatorUser) {
 
 /**
  * Lonceng: 30 kejadian terakhir dari divisi yang boleh dilihat, plus jumlah
- * yang belum dibaca. `allowed` = urutan CS, RnD, Finance, Desain.
+ * yang belum dibaca. `allowed` = urutan `NOTIFICATION_DIVISIONS`.
  */
 export async function listNotifications(
   client: Client,
-  allowed: readonly [boolean, boolean, boolean, boolean, boolean],
+  allowed: readonly [boolean, boolean, boolean, boolean, boolean, boolean],
   operatorId: number,
 ) {
   const context = await loadContext(client);

@@ -3,6 +3,7 @@ import "server-only";
 import type { Client, Transaction } from "@libsql/client";
 import { type AuditActor, writeAudit } from "@/lib/server/audit";
 import { loadBusinessSettings } from "@/lib/server/business-settings";
+import { assertCrmOwner } from "@/lib/server/crm";
 import { ApiRequestError } from "@/lib/server/http/api-response";
 import {
   BATCH_PREFIX_SETTING,
@@ -475,6 +476,7 @@ export async function updateClient(
     });
     const row = current.rows[0];
     if (!row) throw new ApiRequestError("Client not found.", 404);
+    await assertCrmOwner(transaction, id, actor);
     const draft = await validateClientDraft(transaction, draftInput, {
       channel: String(row.channel_option_id),
       category: String(row.product_category_option_id),
